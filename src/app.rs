@@ -2,24 +2,26 @@ use std::path::{Path, PathBuf};
 
 use glam::Vec2;
 use mega_ui::wgpu::{DrawStats, UiRenderer};
-use mega_ui::{Rect, Theme, Ui, Window};
+use mega_ui::{DockState, Rect, Theme, Ui};
 
 use crate::host::{FrameInput, Scene};
 use crate::project::Project;
+use crate::ui;
 
-const IMAGE_TEXTURE: u32 = 10;
+pub const IMAGE_TEXTURE: u32 = 10;
 
 pub struct EditorApp {
-    project: Project,
-    input: FrameInput,
-    image_size: Option<(u32, u32)>,
-    pending_texture: Option<(Vec<u8>, u32, u32)>,
-    canvas_rect: Rect,
-    pan: Vec2,
-    zoom: f32,
-    fit_image: bool,
-    dirty: bool,
-    status: String,
+    pub project: Project,
+    pub input: FrameInput,
+    pub image_size: Option<(u32, u32)>,
+    pub pending_texture: Option<(Vec<u8>, u32, u32)>,
+    pub canvas_rect: Rect,
+    pub pan: Vec2,
+    pub zoom: f32,
+    pub fit_image: bool,
+    pub dirty: bool,
+    pub status: String,
+    pub dock: DockState,
 }
 
 impl Default for EditorApp {
@@ -34,13 +36,14 @@ impl Default for EditorApp {
             zoom: 1.0,
             fit_image: false,
             dirty: false,
-            status: "Create a project, then import a PNG".into(),
+            status: "Create a project, then import or paste an image".into(),
+            dock: ui::default_dock(),
         }
     }
 }
 
 impl EditorApp {
-    fn new_project(&mut self, ui: &mut Ui) {
+    pub fn new_project(&mut self, ui: &mut Ui) {
         self.project = Project::default();
         self.image_size = None;
         self.pending_texture = None;
@@ -51,7 +54,7 @@ impl EditorApp {
         ui.notify_success("New project created");
     }
 
-    fn import_png(&mut self, ui: &mut Ui) {
+    pub fn import_png(&mut self, ui: &mut Ui) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("PNG image", &["png"])
             .pick_file()
@@ -72,7 +75,21 @@ impl EditorApp {
         }
     }
 
-    fn save_project(&mut self, ui: &mut Ui) {
+    pub fn paste_image(&mut self, ui: &mut Ui) {
+        match paste_image_from_clipboard().and_then(|(pixels, width, height)| {
+            self.project.import_rgba(&pixels, width, height)?;
+            self.refresh_image()
+        }) {
+            Ok(()) => {
+                self.dirty = true;
+                self.status = "Pasted image from clipboard".into();
+                ui.notify_success("Image pasted from clipboard");
+            }
+            Err(error) => self.show_error(ui, error),
+        }
+    }
+
+    pub fn save_project(&mut self, ui: &mut Ui) {
         let path = self.project.path.clone().or_else(|| {
             rfd::FileDialog::new()
                 .add_filter("Mega Image Project", &["mgimg"])
@@ -91,7 +108,7 @@ impl EditorApp {
         }
     }
 
-    fn open_project(&mut self, ui: &mut Ui) {
+    pub fn open_project(&mut self, ui: &mut Ui) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Mega Image Project", &["mgimg"])
             .pick_file()
@@ -114,7 +131,7 @@ impl EditorApp {
         }
     }
 
-    fn export_png(&mut self, ui: &mut Ui) {
+    pub fn export_png(&mut self, ui: &mut Ui) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("PNG image", &["png"])
             .set_file_name("export.png")
@@ -152,7 +169,7 @@ impl EditorApp {
         ui.notify_error(&error);
     }
 
-    fn update_view(&mut self) {
+    pub fn update_view(&mut self) {
         if !self.canvas_rect.contains(self.input.mouse_pos) {
             return;
         }
@@ -169,7 +186,7 @@ impl EditorApp {
         }
     }
 
-    fn fit_to_canvas(&mut self) {
+    pub fn fit_to_canvas(&mut self) {
         let Some((width, height)) = self.image_size else {
             return;
         };
@@ -179,38 +196,6 @@ impl EditorApp {
             .clamp(0.05, 1.0);
         self.pan = Vec2::ZERO;
         self.fit_image = false;
-    }
-
-    fn draw_canvas(&mut self, ui: &mut Ui) {
-        let available = ui.available_size().max(Vec2::splat(1.0));
-        let origin = Vec2::new(8.0, 64.0);
-        self.canvas_rect = Rect::from_min_size(
-            origin,
-            Vec2::new((available.x - 8.0).max(1.0), (available.y - 8.0).max(1.0)),
-        );
-        ui.fill_rect(self.canvas_rect, [0.075, 0.08, 0.095, 1.0]);
-        if self.fit_image {
-            self.fit_to_canvas();
-        }
-        self.update_view();
-        if let Some((width, height)) = self.image_size {
-            let size = Vec2::new(width as f32, height as f32) * self.zoom;
-            let center = self.canvas_rect.min + rect_size(self.canvas_rect) * 0.5 + self.pan;
-            let image_rect = Rect::from_min_size(center - size * 0.5, size);
-            let shadow = Rect {
-                min: image_rect.min - Vec2::splat(1.0),
-                max: image_rect.max + Vec2::splat(1.0),
-            };
-            if let Some(visible_shadow) = shadow.intersect(self.canvas_rect) {
-                ui.fill_rect(visible_shadow, [0.0, 0.0, 0.0, 0.8]);
-            }
-            ui.texture_rect(IMAGE_TEXTURE, image_rect, [0.0, 0.0], [1.0, 1.0]);
-        } else {
-            let message = "Import a PNG to begin";
-            let pos =
-                self.canvas_rect.min + rect_size(self.canvas_rect) * 0.5 - Vec2::new(75.0, 8.0);
-            ui.text_at(pos, message);
-        }
     }
 }
 
@@ -229,82 +214,11 @@ impl Scene for EditorApp {
     }
 
     fn build(&mut self, ui: &mut Ui, viewport: Vec2, _stats: DrawStats) -> bool {
-        ui.menu_bar(|ui| {
-            ui.menu("file", "File", |ui| {
-                if ui.menu_item("new", "New Project").clicked() {
-                    self.new_project(ui);
-                }
-                if ui.menu_item("open", "Open Project…").clicked() {
-                    self.open_project(ui);
-                }
-                if ui.menu_item("save", "Save Project").clicked() {
-                    self.save_project(ui);
-                }
-                ui.separator();
-                if ui.menu_item("import", "Import PNG…").clicked() {
-                    self.import_png(ui);
-                }
-                if ui.menu_item("export", "Export PNG…").clicked() {
-                    self.export_png(ui);
-                }
-            });
-        });
-
-        let side_width = 260.0;
-        ui.window(
-            Window::new("canvas", "Canvas")
-                .pos(Vec2::new(0.0, 24.0))
-                .size(Vec2::new(
-                    (viewport.x - side_width).max(320.0),
-                    (viewport.y - 48.0).max(300.0),
-                )),
-            |ui| self.draw_canvas(ui),
-        );
-        ui.window(
-            Window::new("project", "Project")
-                .pos(Vec2::new((viewport.x - side_width).max(320.0), 24.0))
-                .size(Vec2::new(side_width, (viewport.y - 48.0).max(300.0))),
-            |ui| {
-                ui.label("Assets");
-                ui.separator();
-                match self.image_size {
-                    Some((width, height)) => {
-                        ui.label("  main/image.png");
-                        ui.label(&format!("  {width} × {height}"));
-                    }
-                    None => ui.label("  No imported assets"),
-                }
-                ui.space(14.0);
-                ui.label("Layers");
-                ui.separator();
-                if self.image_size.is_some() {
-                    ui.label("  Image");
-                } else {
-                    ui.label("  Empty");
-                }
-                ui.space(14.0);
-                if ui.button("fit", "Fit image").clicked() {
-                    self.fit_image = true;
-                }
-                ui.label(&format!("Zoom: {:.0}%", self.zoom * 100.0));
-                ui.space(14.0);
-                let name = self
-                    .project
-                    .path
-                    .as_deref()
-                    .map(file_name)
-                    .unwrap_or("Unsaved project");
-                ui.label(name);
-                if self.dirty {
-                    ui.label("Modified");
-                }
-            },
-        );
-        ui.status_bar(|ui| {
-            ui.label(&self.status);
-            ui.spacer();
-            ui.label("Middle drag: pan · Wheel: zoom");
-        });
+        let paste = self.input.key_paste;
+        ui::draw(ui, self, viewport);
+        if paste {
+            self.paste_image(ui);
+        }
         false
     }
 
@@ -323,7 +237,29 @@ impl Scene for EditorApp {
     }
 }
 
-fn file_name(path: &Path) -> &str {
+fn paste_image_from_clipboard() -> Result<(Vec<u8>, u32, u32), String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("Cannot open clipboard: {e}"))?;
+    let image = clipboard
+        .get_image()
+        .map_err(|_| "Clipboard does not contain an image".to_string())?;
+    let width = u32::try_from(image.width).map_err(|_| "Clipboard image is too large".to_string())?;
+    let height =
+        u32::try_from(image.height).map_err(|_| "Clipboard image is too large".to_string())?;
+    if width == 0 || height == 0 {
+        return Err("Clipboard image is empty".into());
+    }
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| "Clipboard image is too large".to_string())?;
+    if image.bytes.len() < expected {
+        return Err("Clipboard image data is incomplete".into());
+    }
+    Ok((image.bytes[..expected].to_vec(), width, height))
+}
+
+pub fn file_name(path: &Path) -> &str {
     path.file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("project")
@@ -349,6 +285,6 @@ fn ensure_extension(path: PathBuf, extension: &str) -> PathBuf {
     }
 }
 
-fn rect_size(rect: Rect) -> Vec2 {
+pub fn rect_size(rect: Rect) -> Vec2 {
     rect.max - rect.min
 }

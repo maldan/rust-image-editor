@@ -41,7 +41,17 @@ impl Project {
         let bytes = fs::read(path).map_err(|e| format!("Cannot read image: {e}"))?;
         let decoded = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
             .map_err(|e| format!("Invalid PNG: {e}"))?;
-        let normalized = encode_png(&decoded)?;
+        self.set_image(decoded)
+    }
+
+    pub fn import_rgba(&mut self, pixels: &[u8], width: u32, height: u32) -> Result<(), String> {
+        let image = image::RgbaImage::from_raw(width, height, pixels.to_vec())
+            .ok_or_else(|| "Invalid clipboard image size".to_string())?;
+        self.set_image(DynamicImage::ImageRgba8(image))
+    }
+
+    fn set_image(&mut self, image: DynamicImage) -> Result<(), String> {
+        let normalized = encode_png(&image)?;
         self.image_png = Some(normalized);
         self.manifest.asset_path = Some(IMAGE_PATH.into());
         Ok(())
@@ -141,6 +151,17 @@ mod tests {
         assert_eq!(loaded.manifest, project.manifest);
         let (_, width, height) = loaded.decoded_rgba().unwrap().unwrap();
         assert_eq!((width, height), (2, 3));
+    }
+
+    #[test]
+    fn import_rgba_stores_png_asset() {
+        let mut project = Project::default();
+        let pixels = vec![10, 20, 30, 255, 40, 50, 60, 255];
+        project.import_rgba(&pixels, 2, 1).unwrap();
+        assert_eq!(project.manifest.asset_path.as_deref(), Some(IMAGE_PATH));
+        let (decoded, width, height) = project.decoded_rgba().unwrap().unwrap();
+        assert_eq!((width, height), (2, 1));
+        assert_eq!(&decoded[..8], &pixels[..]);
     }
 
     #[test]

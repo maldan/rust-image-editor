@@ -8,6 +8,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 struct Gpu {
@@ -32,6 +33,9 @@ pub struct FrameInput {
     pub mouse_middle_pressed: bool,
     pub mouse_middle_released: bool,
     pub scroll_delta: Vec2,
+    pub key_paste: bool,
+    pub key_ctrl: bool,
+    modifiers: ModifiersState,
 }
 
 impl FrameInput {
@@ -50,9 +54,15 @@ impl FrameInput {
             mouse_middle_released: self.mouse_middle_released,
             viewport,
             scroll_delta: self.scroll_delta,
+            key_paste: self.key_paste,
+            key_ctrl: self.key_ctrl,
             dt,
             ..UiInput::default()
         }
+    }
+
+    fn shortcut_mod(&self) -> bool {
+        self.modifiers.control_key() || self.modifiers.super_key()
     }
 
     fn clear_edges(&mut self) {
@@ -64,6 +74,7 @@ impl FrameInput {
         self.mouse_middle_pressed = false;
         self.mouse_middle_released = false;
         self.scroll_delta = Vec2::ZERO;
+        self.key_paste = false;
     }
 }
 
@@ -332,6 +343,30 @@ impl<S: Scene> ApplicationHandler for Host<S> {
                     MouseScrollDelta::LineDelta(x, y) => Vec2::new(x * 40.0, y * 40.0),
                     MouseScrollDelta::PixelDelta(p) => Vec2::new(p.x as f32, p.y as f32),
                 };
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::ModifiersChanged(mods) => {
+                self.input.modifiers = mods.state();
+                self.input.key_ctrl = mods.state().control_key() || mods.state().super_key();
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state != ElementState::Pressed {
+                    return;
+                }
+                let shortcut = self.input.shortcut_mod();
+                if shortcut {
+                    match &event.logical_key {
+                        Key::Character(c) if c.eq_ignore_ascii_case("v") => {
+                            self.input.key_paste = true;
+                        }
+                        _ => {}
+                    }
+                    if let PhysicalKey::Code(KeyCode::KeyV) = event.physical_key {
+                        self.input.key_paste = true;
+                    }
+                }
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }

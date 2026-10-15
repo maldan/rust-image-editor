@@ -1,6 +1,7 @@
 mod app;
 mod host;
 mod project;
+mod ui;
 
 use app::EditorApp;
 use host::Host;
