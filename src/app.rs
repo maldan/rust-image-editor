@@ -4,10 +4,10 @@ use glam::Vec2;
 use mega_ui::wgpu::DrawStats;
 use mega_ui::{DockState, Rect, Theme, Ui};
 
-use crate::canvas_gpu::{CanvasOverlay, CanvasRenderer};
+use crate::canvas_gpu::{CanvasOverlay, CanvasRenderer, FloatingDraw, LayerDraw};
 use crate::editing::{
-    BrushStroke, FloatingTransform, PixelRect, Selection, Tool, TransformHit, apply_brush,
-    brush_dirty_bounds, composite_layers, composite_region, fill_bucket, flood_mask,
+    BrushStroke, FloatingTransform, PixelRect, SelectMode, Selection, Tool, TransformHit,
+    apply_brush, brush_dirty_bounds, fill_bucket, flood_mask,
 };
 use crate::history::{EditCapture, History};
 use crate::host::{FrameInput, Scene};
@@ -15,14 +15,17 @@ use crate::project::Project;
 use crate::tiles::DirtyTiles;
 use crate::ui;
 use crate::view::CanvasView;
+use crate::workspace::Workspace;
 
 pub struct EditorApp {
-    pub project: Project,
+    pub workspace: Workspace,
     pub input: FrameInput,
     pub image_size: Option<(u32, u32)>,
-    /// Composited preview when more than one visible layer contributes.
-    display_pixels: Option<Vec<u8>>,
     pub dirty_tiles: DirtyTiles,
+    /// Layer index that `dirty_tiles` refer to.
+    dirty_layer: Option<usize>,
+    layers_reload: bool,
+    floating_reload: bool,
     pub canvas_rect: Rect,
     pub pan: Vec2,
     pub zoom: f32,
@@ -39,9 +42,11 @@ pub struct EditorApp {
     pub brush_color: [f32; 4],
     pub wand_threshold: f32,
     pub fill_threshold: f32,
+    pub dim_outside_selection: bool,
     pub selection: Option<Selection>,
     pub selection_anchor: Option<(u32, u32)>,
     pub selection_current: Option<(u32, u32)>,
+    selection_mode: SelectMode,
     selection_deselect_press: Option<Vec2>,
     selection_mask_dirty: bool,
     brush_last: Option<(f32, f32)>,
@@ -55,23 +60,27 @@ pub struct EditorApp {
     transform_last: Option<Vec2>,
     pub layer_drag: Option<usize>,
     canvas_cleared: bool,
+    pub resize_w: u32,
+    pub resize_h: u32,
 }
 
 impl Default for EditorApp {
     fn default() -> Self {
         Self {
-            project: Project::default(),
+            workspace: Workspace::default(),
             input: FrameInput::default(),
             image_size: None,
-            display_pixels: None,
             dirty_tiles: DirtyTiles::default(),
+            dirty_layer: None,
+            layers_reload: false,
+            floating_reload: false,
             canvas_rect: Rect::from_min_size(Vec2::ZERO, Vec2::ZERO),
             pan: Vec2::ZERO,
             zoom: 1.0,
             rotation: 0.0,
             fit_image: false,
             dirty: false,
-            status: "Create a project, then import or paste an image".into(),
+            status: "Import assets, place them on a document, or resize canvas".into(),
             dock: ui::default_dock(),
             tool: Tool::Brush,
             erase_mode: false,
@@ -80,9 +89,11 @@ impl Default for EditorApp {
             brush_color: [0.0, 0.0, 0.0, 1.0],
             wand_threshold: 32.0,
             fill_threshold: 32.0,
+            dim_outside_selection: false,
             selection: None,
             selection_anchor: None,
             selection_current: None,
+            selection_mode: SelectMode::Replace,
             selection_deselect_press: None,
             selection_mask_dirty: true,
             brush_last: None,
@@ -96,11 +107,21 @@ impl Default for EditorApp {
             transform_last: None,
             layer_drag: None,
             canvas_cleared: true,
+            resize_w: 512,
+            resize_h: 512,
         }
     }
 }
 
 impl EditorApp {
+    pub fn project(&self) -> &Project {
+        self.workspace.active()
+    }
+
+    pub fn project_mut(&mut self) -> &mut Project {
+        self.workspace.active_mut()
+    }
+
     pub fn brush_last_active(&self) -> bool {
         self.brush_last.is_some() || self.transform_drag.is_some()
     }
@@ -122,10 +143,12 @@ impl EditorApp {
 
     pub fn new_project(&mut self, ui: &mut Ui) {
         self.cancel_transform();
-        self.project = Project::default();
+        self.workspace = Workspace::default();
         self.image_size = None;
-        self.display_pixels = None;
         self.dirty_tiles.clear();
+        self.dirty_layer = None;
+        self.layers_reload = false;
+        self.floating_reload = false;
         self.canvas_cleared = true;
         self.history.clear();
         self.clear_selection();
@@ -137,6 +160,44 @@ impl EditorApp {
         ui.notify_success("New project created");
     }
 
+    fn select_mode(&self) -> SelectMode {
+        if self.input.key_ctrl {
+            SelectMode::Subtract
+        } else if self.input.key_shift {
+            SelectMode::Add
+        } else {
+            SelectMode::Replace
+        }
+    }
+
+    fn apply_selection(&mut self, next: Selection, mode: SelectMode) {
+        match mode {
+            SelectMode::Replace => self.set_selection(next),
+            SelectMode::Add => {
+                if let Some(sel) = self.selection.as_mut() {
+                    sel.union(&next);
+                    if sel.is_empty() {
+                        self.clear_selection();
+                    } else {
+                        self.selection_mask_dirty = true;
+                    }
+                } else {
+                    self.set_selection(next);
+                }
+            }
+            SelectMode::Subtract => {
+                if let Some(sel) = self.selection.as_mut() {
+                    sel.subtract(&next);
+                    if sel.is_empty() {
+                        self.clear_selection();
+                    } else {
+                        self.selection_mask_dirty = true;
+                    }
+                }
+            }
+        }
+    }
+
     pub fn import_png(&mut self, ui: &mut Ui) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("PNG image", &["png"])
@@ -144,15 +205,11 @@ impl EditorApp {
         else {
             return;
         };
-        match self
-            .project
-            .import_png(&path)
-            .and_then(|_| self.refresh_image())
-        {
-            Ok(()) => {
+        match self.workspace.import_asset_png(&path) {
+            Ok(_) => {
                 self.dirty = true;
-                self.status = format!("Imported {}", file_name(&path));
-                ui.notify_success("PNG imported into the project");
+                self.status = format!("Imported asset {}", file_name(&path));
+                ui.notify_success("PNG imported as asset (not placed on document)");
             }
             Err(error) => self.show_error(ui, error),
         }
@@ -160,20 +217,21 @@ impl EditorApp {
 
     pub fn paste_image(&mut self, ui: &mut Ui) {
         match paste_image_from_clipboard().and_then(|(pixels, width, height)| {
-            self.project.import_rgba(&pixels, width, height)?;
-            self.refresh_image()
+            self.workspace
+                .import_asset_rgba("Clipboard".into(), &pixels, width, height)?;
+            Ok(())
         }) {
             Ok(()) => {
                 self.dirty = true;
-                self.status = "Pasted image from clipboard".into();
-                ui.notify_success("Image pasted from clipboard");
+                self.status = "Pasted image as asset".into();
+                ui.notify_success("Clipboard image imported as asset");
             }
             Err(error) => self.show_error(ui, error),
         }
     }
 
     pub fn save_project(&mut self, ui: &mut Ui) {
-        let path = self.project.path.clone().or_else(|| {
+        let path = self.workspace.path.clone().or_else(|| {
             rfd::FileDialog::new()
                 .add_filter("Mega Image Project", &["mgimg"])
                 .set_file_name("project.mgimg")
@@ -181,7 +239,7 @@ impl EditorApp {
                 .map(ensure_project_extension)
         });
         let Some(path) = path else { return };
-        match self.project.save(&path) {
+        match self.workspace.save(&path) {
             Ok(()) => {
                 self.dirty = false;
                 self.status = format!("Saved {}", file_name(&path));
@@ -198,10 +256,10 @@ impl EditorApp {
         else {
             return;
         };
-        match Project::open(&path) {
-            Ok(project) => {
+        match Workspace::open(&path) {
+            Ok(workspace) => {
                 self.cancel_transform();
-                self.project = project;
+                self.workspace = workspace;
                 match self.refresh_image() {
                     Ok(()) => {
                         self.dirty = false;
@@ -210,6 +268,31 @@ impl EditorApp {
                     }
                     Err(error) => self.show_error(ui, error),
                 }
+            }
+            Err(error) => self.show_error(ui, error),
+        }
+    }
+
+    pub fn switch_document(&mut self, index: usize) {
+        if index == self.workspace.active_document {
+            return;
+        }
+        self.cancel_transform();
+        self.workspace.set_active_document(index);
+        self.history.clear();
+        let _ = self.refresh_image();
+        self.dirty = true;
+        self.status = format!("Document: {}", self.workspace.active_doc().name);
+    }
+
+    pub fn place_asset(&mut self, asset_index: usize, ui: &mut Ui) {
+        self.cancel_transform();
+        match self.workspace.place_asset_on_active(asset_index) {
+            Ok(()) => {
+                self.dirty = true;
+                let _ = self.refresh_image();
+                self.status = "Asset placed on document".into();
+                ui.notify_success("Asset placed as layer");
             }
             Err(error) => self.show_error(ui, error),
         }
@@ -224,7 +307,7 @@ impl EditorApp {
         else {
             return;
         };
-        match self.project.export_png(&path) {
+        match self.workspace.active_mut().export_png(&path) {
             Ok(()) => {
                 self.status = format!("Exported {}", file_name(&path));
                 ui.notify_success("PNG exported");
@@ -237,10 +320,11 @@ impl EditorApp {
         if self.image_size.is_none() {
             return;
         }
-        self.project.add_layer();
+        self.workspace.active_mut().add_layer();
         self.dirty = true;
         self.status = "Layer added".into();
-        self.invalidate_display();
+        self.layers_reload = true;
+        self.workspace.mark_active_thumb_dirty();
     }
 
     pub fn delete_layer(&mut self) {
@@ -248,43 +332,69 @@ impl EditorApp {
             return;
         }
         self.cancel_transform();
-        self.project.delete_active_layer();
+        self.workspace.active_mut().delete_active_layer();
         self.history.clear();
         self.dirty = true;
-        if self.project.layers.is_empty() {
+        if self.workspace.active_mut().layers.is_empty() {
             self.image_size = None;
-            self.display_pixels = None;
             self.dirty_tiles.clear();
+            self.dirty_layer = None;
+            self.layers_reload = false;
             self.canvas_cleared = true;
             self.clear_selection();
             self.status = "Last layer deleted".into();
         } else {
             self.status = "Layer deleted".into();
-            self.invalidate_display();
+            self.layers_reload = true;
         }
     }
 
     pub fn move_layer_to(&mut self, from: usize, to: usize) {
-        self.project.move_layer_to(from, to);
+        self.workspace.active_mut().move_layer_to(from, to);
         self.dirty = true;
-        self.invalidate_display();
+        self.layers_reload = true;
     }
 
     pub fn set_layer_visible(&mut self, index: usize, visible: bool) {
-        if let Some(layer) = self.project.layers.get_mut(index) {
+        if let Some(layer) = self.workspace.active_mut().layers.get_mut(index) {
             layer.visible = visible;
             self.dirty = true;
-            self.invalidate_display();
+            self.workspace.mark_active_thumb_dirty();
         }
     }
 
     pub fn set_active_layer_opacity(&mut self, opacity: f32) {
-        let index = self.project.active_layer;
-        if let Some(layer) = self.project.layers.get_mut(index) {
+        let index = self.workspace.active_mut().active_layer;
+        if let Some(layer) = self.workspace.active_mut().layers.get_mut(index) {
             layer.opacity = opacity.clamp(0.0, 1.0);
             self.dirty = true;
-            self.invalidate_display();
+            if let Some(floating) = self.floating.as_mut()
+                && floating.layer == index
+            {
+                floating.opacity = layer.opacity;
+            }
+            self.workspace.mark_active_thumb_dirty();
         }
+    }
+
+    pub fn resize_canvas(&mut self, ui: &mut Ui) {
+        let w = self.resize_w.max(1);
+        let h = self.resize_h.max(1);
+        self.cancel_transform();
+        match self.workspace.active_mut().resize_canvas(w, h) {
+            Ok(()) => {
+                self.history.clear();
+                self.dirty = true;
+                self.status = format!("Canvas resized to {w} × {h}");
+                ui.notify_success("Canvas resized");
+                let _ = self.refresh_image();
+            }
+            Err(error) => self.show_error(ui, error),
+        }
+    }
+
+    pub fn clear_history(&mut self) {
+        self.history.clear();
     }
 
     pub fn undo(&mut self) {
@@ -292,7 +402,7 @@ impl EditorApp {
         let Some((width, height)) = self.image_size else {
             return;
         };
-        if let Some((_, rect)) = self.history.undo(&mut self.project.layers, width, height) {
+        if let Some((_, rect)) = self.history.undo(&mut self.workspace.active_mut().layers, width, height) {
             self.dirty = true;
             self.status = "Undo".into();
             self.mark_dirty_rect(rect);
@@ -304,31 +414,35 @@ impl EditorApp {
         let Some((width, height)) = self.image_size else {
             return;
         };
-        if let Some((_, rect)) = self.history.redo(&mut self.project.layers, width, height) {
+        if let Some((_, rect)) = self.history.redo(&mut self.workspace.active_mut().layers, width, height) {
             self.dirty = true;
             self.status = "Redo".into();
             self.mark_dirty_rect(rect);
         }
     }
 
-    fn refresh_image(&mut self) -> Result<(), String> {
+    pub fn refresh_image(&mut self) -> Result<(), String> {
         self.cancel_transform();
         self.history.clear();
-        match self.project.decoded_rgba()? {
+        match self.workspace.active_mut().decoded_rgba()? {
             Some((_, width, height)) => {
                 self.image_size = Some((width, height));
+                self.resize_w = width;
+                self.resize_h = height;
                 self.stroke_marks = vec![0; width as usize * height as usize];
-                self.display_pixels = None;
                 self.dirty_tiles.resize(width, height);
+                self.dirty_layer = None;
+                self.layers_reload = true;
+                self.floating_reload = false;
                 self.canvas_cleared = false;
                 self.fit_image = true;
                 self.clear_selection();
-                self.invalidate_display();
             }
             None => {
                 self.image_size = None;
-                self.display_pixels = None;
                 self.dirty_tiles.clear();
+                self.dirty_layer = None;
+                self.layers_reload = false;
                 self.canvas_cleared = true;
                 self.clear_selection();
             }
@@ -336,71 +450,27 @@ impl EditorApp {
         Ok(())
     }
 
-    fn needs_composite(&self) -> bool {
-        let active = self.project.active_layer;
-        let multi = self.project.layers.len() > 1
-            && !self
-                .project
-                .layers
-                .iter()
-                .enumerate()
-                .all(|(i, layer)| i == active || !layer.visible);
-        let faded = self
-            .project
-            .layers
-            .iter()
-            .any(|layer| layer.visible && layer.opacity < 0.999);
-        multi || faded || self.floating.is_some()
-    }
-
-    fn invalidate_display(&mut self) {
-        let Some((width, height)) = self.image_size else {
-            return;
-        };
-        if self.needs_composite() {
-            let mut display = composite_layers(&self.project.layers, width, height);
-            if let Some(floating) = self.floating.as_ref() {
-                floating.blit_preview(&mut display, width, height);
-            }
-            self.display_pixels = Some(display);
-        } else {
-            self.display_pixels = None;
-        }
-        self.dirty_tiles.mark_all();
-        self.canvas_cleared = false;
-    }
-
     fn mark_dirty_rect(&mut self, rect: PixelRect) {
+        let layer = self
+            .floating
+            .as_ref()
+            .map(|f| f.layer)
+            .unwrap_or(self.workspace.active().active_layer);
+        self.mark_layer_dirty(layer, rect);
+        self.workspace.mark_active_thumb_dirty();
+    }
+
+    fn mark_layer_dirty(&mut self, layer: usize, rect: PixelRect) {
+        if self.dirty_layer.is_some_and(|l| l != layer) && !self.dirty_tiles.is_empty() {
+            // Different layer still pending upload — force full reload.
+            self.layers_reload = true;
+            self.dirty_tiles.clear();
+            self.dirty_layer = None;
+            return;
+        }
+        self.dirty_layer = Some(layer);
         self.dirty_tiles
             .mark_rect(rect.min_x, rect.min_y, rect.max_x, rect.max_y);
-        if !self.needs_composite() {
-            return;
-        }
-        let Some((width, height)) = self.image_size else {
-            return;
-        };
-        let len = width as usize * height as usize * 4;
-        let tw = rect.max_x.saturating_sub(rect.min_x);
-        let th = rect.max_y.saturating_sub(rect.min_y);
-        let mut display = self
-            .display_pixels
-            .take()
-            .filter(|p| p.len() == len)
-            .unwrap_or_else(|| vec![0u8; len]);
-        composite_region(
-            &self.project.layers,
-            width,
-            height,
-            rect.min_x,
-            rect.min_y,
-            tw,
-            th,
-            &mut display,
-        );
-        if let Some(floating) = self.floating.as_ref() {
-            floating.blit_preview(&mut display, width, height);
-        }
-        self.display_pixels = Some(display);
     }
 
     fn show_error(&mut self, ui: &mut Ui, error: String) {
@@ -474,15 +544,19 @@ impl EditorApp {
         };
         if let (Some(anchor), Some(current)) = (self.selection_anchor, self.selection_current) {
             let rect = PixelRect::from_points(anchor, current, width, height);
+            let mode = self.selection_mode;
             if rect.is_empty() {
-                self.clear_selection();
+                if mode == SelectMode::Replace {
+                    self.clear_selection();
+                }
             } else {
-                self.set_selection(Selection::from_rect(rect, width, height));
+                self.apply_selection(Selection::from_rect(rect, width, height), mode);
             }
         }
         self.selection_anchor = None;
         self.selection_current = None;
         self.selection_deselect_press = None;
+        self.selection_mode = SelectMode::Replace;
     }
 
     pub fn handle_canvas_edit(&mut self, view: CanvasView) {
@@ -501,11 +575,14 @@ impl EditorApp {
 
     fn handle_rect_select(&mut self, view: CanvasView) {
         if self.input.mouse_pressed {
+            let mode = self.select_mode();
+            self.selection_mode = mode;
             if let Some(point) = screen_to_pixel(self.input.mouse_pos, view) {
-                if self
-                    .selection
-                    .as_ref()
-                    .is_some_and(|sel| !sel.contains(point.0, point.1))
+                if mode == SelectMode::Replace
+                    && self
+                        .selection
+                        .as_ref()
+                        .is_some_and(|sel| !sel.contains(point.0, point.1))
                 {
                     self.clear_selection();
                     self.selection_deselect_press = Some(self.input.mouse_pos);
@@ -514,7 +591,10 @@ impl EditorApp {
                     self.selection_anchor = Some(point);
                     self.selection_current = Some(point);
                 }
-            } else if self.canvas_rect.contains(self.input.mouse_pos) && self.selection.is_some() {
+            } else if mode == SelectMode::Replace
+                && self.canvas_rect.contains(self.input.mouse_pos)
+                && self.selection.is_some()
+            {
                 self.clear_selection();
             }
         }
@@ -550,13 +630,14 @@ impl EditorApp {
         if !self.input.mouse_pressed {
             return;
         }
+        let mode = self.select_mode();
         let Some(point) = screen_to_pixel(self.input.mouse_pos, view) else {
-            if self.canvas_rect.contains(self.input.mouse_pos) {
+            if mode == SelectMode::Replace && self.canvas_rect.contains(self.input.mouse_pos) {
                 self.clear_selection();
             }
             return;
         };
-        let Some(pixels) = self.project.active_pixels() else {
+        let Some(pixels) = self.workspace.active_mut().active_pixels() else {
             return;
         };
         if let Some(selection) = flood_mask(
@@ -567,8 +648,13 @@ impl EditorApp {
             self.wand_threshold.round().clamp(0.0, 255.0) as u8,
             None,
         ) {
-            self.set_selection(selection);
-            self.status = "Magic wand selection".into();
+            self.apply_selection(selection, mode);
+            self.status = match mode {
+                SelectMode::Replace => "Magic wand selection",
+                SelectMode::Add => "Added to selection",
+                SelectMode::Subtract => "Subtracted from selection",
+            }
+            .into();
         }
     }
 
@@ -592,9 +678,9 @@ impl EditorApp {
         .clamp(0.0, 1.0);
         let threshold = self.fill_threshold.round().clamp(0.0, 255.0) as u8;
         let erase = self.erase_mode;
-        let layer = self.project.active_layer;
+        let layer = self.workspace.active_mut().active_layer;
         let selection = self.selection.take();
-        let Some(pixels) = self.project.active_pixels_mut() else {
+        let Some(pixels) = self.workspace.active_mut().active_pixels_mut() else {
             self.selection = selection;
             return;
         };
@@ -649,7 +735,7 @@ impl EditorApp {
                 self.stroke_marks.resize(need, 0);
             }
             self.stroke_capture = Some(EditCapture::new(
-                self.project.active_layer,
+                self.workspace.active_mut().active_layer,
                 view.width,
                 view.height,
             ));
@@ -667,7 +753,7 @@ impl EditorApp {
             self.brush_last = None;
             if let Some(capture) = self.stroke_capture.take() {
                 let layer = capture.layer();
-                if let Some(pixels) = self.project.layers.get(layer).map(|l| l.pixels.as_slice())
+                if let Some(pixels) = self.workspace.active_mut().layers.get(layer).map(|l| l.pixels.as_slice())
                     && let Some(edit) = capture.finish(pixels)
                 {
                     self.history.push(edit);
@@ -700,17 +786,17 @@ impl EditorApp {
             self.brush_color[2],
         ];
         let size = self.brush_size;
-        let active = self.project.active_layer;
+        let active = self.workspace.active_mut().active_layer;
         let stroke_id = self.stroke_id;
         let selection = self.selection.take();
         let mut marks = std::mem::take(&mut self.stroke_marks);
         let predicted = brush_dirty_bounds(from, to, size, width, height);
         if let Some(capture) = self.stroke_capture.as_mut()
-            && let Some(pixels) = self.project.layers.get(active).map(|l| l.pixels.as_slice())
+            && let Some(pixels) = self.workspace.active_mut().layers.get(active).map(|l| l.pixels.as_slice())
         {
             capture.touch_rect(pixels, predicted);
         }
-        let Some(pixels) = self.project.layers.get_mut(active).map(|l| &mut l.pixels) else {
+        let Some(pixels) = self.workspace.active_mut().layers.get_mut(active).map(|l| &mut l.pixels) else {
             self.selection = selection;
             self.stroke_marks = marks;
             return;
@@ -745,12 +831,19 @@ impl EditorApp {
             self.status = "No image".into();
             return;
         };
-        let Some(selection) = self.selection.clone() else {
-            self.status = "Select an area first".into();
-            return;
-        };
-        let layer = self.project.active_layer;
-        let Some(pixels) = self.project.layers.get_mut(layer).map(|l| &mut l.pixels) else {
+        let selection = self
+            .selection
+            .clone()
+            .unwrap_or_else(|| Selection::all(width, height));
+        let layer = self.workspace.active_mut().active_layer;
+        let opacity = self
+            .workspace
+            .active()
+            .layers
+            .get(layer)
+            .map(|l| l.opacity)
+            .unwrap_or(1.0);
+        let Some(pixels) = self.workspace.active_mut().layers.get_mut(layer).map(|l| &mut l.pixels) else {
             return;
         };
         let mut capture = EditCapture::new(layer, width, height);
@@ -758,20 +851,21 @@ impl EditorApp {
             capture.touch_rect(pixels, bounds);
         }
         let Some((floating, bounds)) =
-            FloatingTransform::extract(pixels, width, height, &selection, layer)
+            FloatingTransform::extract(pixels, width, height, &selection, layer, opacity)
         else {
             self.stroke_capture = None;
             return;
         };
         self.stroke_capture = Some(capture);
         self.floating = Some(floating);
+        self.floating_reload = true;
         self.clear_selection();
         self.dirty = true;
         self.status = "Transform — drag / handles · Enter commit · Esc cancel".into();
-        self.mark_dirty_rect(bounds);
+        self.mark_layer_dirty(layer, bounds);
     }
 
-    fn cancel_transform(&mut self) {
+    pub fn cancel_transform(&mut self) {
         if self.floating.take().is_none() {
             self.transform_drag = None;
             self.transform_last = None;
@@ -779,7 +873,7 @@ impl EditorApp {
         }
         if let Some(capture) = self.stroke_capture.take() {
             let layer = capture.layer();
-            if let Some(pixels) = self.project.layers.get_mut(layer).map(|l| &mut l.pixels) {
+            if let Some(pixels) = self.workspace.active_mut().layers.get_mut(layer).map(|l| &mut l.pixels) {
                 if let Some(rect) = capture.restore_before(pixels) {
                     self.mark_dirty_rect(rect);
                 }
@@ -787,8 +881,9 @@ impl EditorApp {
         }
         self.transform_drag = None;
         self.transform_last = None;
+        self.floating_reload = false;
         self.status = "Transform cancelled".into();
-        self.invalidate_display();
+        self.layers_reload = true;
     }
 
     fn commit_transform(&mut self) {
@@ -833,10 +928,10 @@ impl EditorApp {
                 .ceil()
                 .min(height as f32) as u32,
         };
-        if let Some(pixels) = self.project.layers.get(layer).map(|l| l.pixels.as_slice()) {
+        if let Some(pixels) = self.workspace.active_mut().layers.get(layer).map(|l| l.pixels.as_slice()) {
             capture.touch_rect(pixels, dest);
         }
-        let Some(pixels) = self.project.layers.get_mut(layer).map(|l| &mut l.pixels) else {
+        let Some(pixels) = self.workspace.active_mut().layers.get_mut(layer).map(|l| &mut l.pixels) else {
             return;
         };
         let (dirty, selection) = floating.stamp(pixels, width, height);
@@ -846,12 +941,13 @@ impl EditorApp {
         self.set_selection(selection);
         self.transform_drag = None;
         self.transform_last = None;
+        self.floating_reload = false;
         self.dirty = true;
         self.status = "Transform applied".into();
         if let Some(rect) = dirty {
-            self.mark_dirty_rect(rect);
+            self.mark_layer_dirty(layer, rect);
         } else {
-            self.invalidate_display();
+            self.layers_reload = true;
         }
     }
 
@@ -912,7 +1008,6 @@ impl EditorApp {
                 rotation = floating.rotation;
             }
             self.transform_last = Some(image_pos);
-            self.invalidate_display();
             self.status = format!(
                 "Transform  scale {:.2}  rot {:.0}°",
                 scale,
@@ -953,6 +1048,7 @@ impl Scene for EditorApp {
         if self.input.key_enter && self.floating.is_some() {
             self.commit_transform();
         }
+        let thumb_waiting = self.workspace.tick_thumbs();
         let paste = self.input.key_paste;
         ui::draw(ui, self, viewport);
         if paste {
@@ -961,6 +1057,8 @@ impl Scene for EditorApp {
         self.selection.is_some()
             || self.selection_anchor.is_some()
             || self.floating.is_some()
+            || self.workspace.asset_drag.is_some()
+            || thumb_waiting
             || (self.tool == Tool::Brush && self.canvas_rect.contains(self.input.mouse_pos))
             || !self.dirty_tiles.is_empty()
     }
@@ -976,6 +1074,7 @@ impl Scene for EditorApp {
                 canvas.clear();
                 self.canvas_cleared = false;
             }
+            canvas.clear_floating();
             canvas.set_selection_mask(device, queue, None, 0, 0);
             return;
         }
@@ -987,38 +1086,69 @@ impl Scene for EditorApp {
             canvas.set_selection_mask(device, queue, mask.as_deref(), width, height);
             self.selection_mask_dirty = false;
         }
-        if self.dirty_tiles.is_empty() {
-            return;
-        }
-        if self.needs_composite() {
-            let len = width as usize * height as usize * 4;
-            if self.display_pixels.as_ref().is_none_or(|p| p.len() != len) {
-                let mut display = composite_layers(&self.project.layers, width, height);
-                if let Some(floating) = self.floating.as_ref() {
-                    floating.blit_preview(&mut display, width, height);
-                }
-                self.display_pixels = Some(display);
-            }
-        }
-        let pixels: &[u8] = if self.needs_composite() {
-            self.display_pixels.as_deref().unwrap_or(&[])
-        } else {
-            let active = self.project.active_layer;
-            self.project
+        if self.layers_reload {
+            let pixels: Vec<&[u8]> = self
+                .workspace
+                .active()
                 .layers
-                .get(active)
+                .iter()
                 .map(|l| l.pixels.as_slice())
-                .unwrap_or(&[])
-        };
-        if pixels.len() < width as usize * height as usize * 4 {
-            return;
+                .collect();
+            canvas.upload_all_layers(device, queue, &pixels, width, height);
+            self.layers_reload = false;
+            self.dirty_tiles.clear();
+            self.dirty_layer = None;
+        } else if let Some(layer) = self.dirty_layer
+            && !self.dirty_tiles.is_empty()
+        {
+            if let Some(pixels) = self.workspace.active_mut().layers.get(layer).map(|l| l.pixels.as_slice()) {
+                canvas.upload_layer_dirty(
+                    device,
+                    queue,
+                    layer,
+                    pixels,
+                    width,
+                    height,
+                    &mut self.dirty_tiles,
+                );
+            } else {
+                self.dirty_tiles.clear();
+            }
+            self.dirty_layer = None;
         }
-        canvas.upload_dirty(device, queue, pixels, width, height, &mut self.dirty_tiles);
+        if self.floating.is_none() {
+            canvas.clear_floating();
+            self.floating_reload = false;
+        } else if self.floating_reload
+            && let Some(floating) = self.floating.as_ref()
+        {
+            canvas.set_floating(
+                device,
+                queue,
+                &floating.pixels,
+                floating.bw,
+                floating.bh,
+            );
+            self.floating_reload = false;
+        }
     }
 
     fn canvas_present(&self) -> Option<(Rect, CanvasView, CanvasOverlay)> {
         let view = self.canvas_view()?;
-        let mut overlay = CanvasOverlay::default();
+        let mut overlay = CanvasOverlay {
+            dim_outside: self.dim_outside_selection && self.selection.is_some(),
+            layers: self
+                .workspace
+                .active()
+                .layers
+                .iter()
+                .map(|l| LayerDraw {
+                    visible: l.visible,
+                    opacity: l.opacity,
+                })
+                .collect(),
+            ..Default::default()
+        };
         if self.tool == Tool::Brush {
             let radius = (self.brush_size * self.zoom * 0.5).max(2.5);
             let expanded = Rect {
@@ -1037,6 +1167,13 @@ impl Scene for EditorApp {
             }
         }
         if let Some(floating) = self.floating.as_ref() {
+            let half = floating.local_size() * 0.5;
+            overlay.floating = Some(FloatingDraw {
+                center: floating.center,
+                half,
+                rotation: floating.rotation,
+                opacity: floating.opacity,
+            });
             let corners = floating.corners().map(|p| view.image_to_screen(p));
             overlay.transform_corners = Some(corners);
             overlay.transform_rotate = Some(view.image_to_screen(floating.rotate_handle()));

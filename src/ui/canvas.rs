@@ -30,8 +30,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             ui.request_repaint();
         }
     } else {
-        let message = "Import or paste an image to begin";
-        let pos = app.canvas_rect.min + rect_size(app.canvas_rect) * 0.5 - Vec2::new(110.0, 8.0);
+        let message = "Place an asset or resize canvas to begin";
+        let pos = app.canvas_rect.min + rect_size(app.canvas_rect) * 0.5 - Vec2::new(130.0, 8.0);
         ui.text_at(pos, message);
     }
 }

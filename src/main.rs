@@ -7,6 +7,7 @@ mod project;
 mod tiles;
 mod ui;
 mod view;
+mod workspace;
 
 use app::EditorApp;
 use host::Host;

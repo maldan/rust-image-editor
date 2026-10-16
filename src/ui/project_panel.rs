@@ -1,24 +1,25 @@
 use mega_ui::Ui;
 
-use crate::app::{EditorApp, file_name};
+use crate::app::EditorApp;
 
 pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     ui.label("Layers");
     ui.separator();
     ui.space(8.0);
 
-    if app.project.layers.is_empty() {
+    let project = app.project();
+    if project.layers.is_empty() {
         ui.label("No layers");
     } else {
-        let count = app.project.layers.len();
+        let count = project.layers.len();
         let mut reorder: Option<(usize, usize)> = None;
         let mut select: Option<usize> = None;
         let mut visibility: Option<(usize, bool)> = None;
 
         for index in (0..count).rev() {
-            let name = app.project.layers[index].name.clone();
-            let mut visible = app.project.layers[index].visible;
-            let selected = app.project.active_layer == index;
+            let name = app.project().layers[index].name.clone();
+            let mut visible = app.project().layers[index].visible;
+            let selected = app.project().active_layer == index;
             let row_id = format!("layer_row_{index}");
 
             let response = ui.selectable(&row_id, selected, |ui| {
@@ -54,7 +55,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         }
 
         if let Some(index) = select {
-            app.project.active_layer = index;
+            app.project_mut().active_layer = index;
         }
         if let Some((index, visible)) = visibility {
             app.set_layer_visible(index, visible);
@@ -65,8 +66,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         }
 
         ui.space(12.0);
-        let active = app.project.active_layer;
-        if let Some(layer) = app.project.layers.get(active) {
+        let active = app.project().active_layer;
+        if let Some(layer) = app.project().layers.get(active) {
             let mut opacity = layer.opacity;
             ui.label(&format!("Opacity: {:.0}%", opacity * 100.0));
             if ui
@@ -104,14 +105,20 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         None => ui.label("No image"),
     }
 
+    ui.space(12.0);
+    ui.label("Resize canvas");
+    let mut w = app.resize_w as f32;
+    let mut h = app.resize_h as f32;
+    ui.drag_float("canvas_w", &mut w, 1.0);
+    ui.drag_float("canvas_h", &mut h, 1.0);
+    app.resize_w = w.round().clamp(1.0, 16384.0) as u32;
+    app.resize_h = h.round().clamp(1.0, 16384.0) as u32;
+    if ui.button("canvas_resize", "Apply size").clicked() {
+        app.resize_canvas(ui);
+    }
+
     ui.space(14.0);
-    let name = app
-        .project
-        .path
-        .as_deref()
-        .map(file_name)
-        .unwrap_or("Unsaved project");
-    ui.label(name);
+    ui.label(&app.workspace.active_doc().name);
     if app.dirty {
         ui.label("Modified");
     }

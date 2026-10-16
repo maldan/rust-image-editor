@@ -1,5 +1,6 @@
 //! Editor chrome: menus, dock tabs, status bar.
 
+mod assets_panel;
 mod canvas;
 mod menu_bar;
 mod project_panel;
@@ -13,11 +14,15 @@ use crate::app::EditorApp;
 
 pub fn default_dock() -> DockState {
     DockState::new(DockNode::split_h(
-        0.16,
+        0.18,
         DockNode::split_v(
-            0.38,
+            0.28,
             DockNode::leaf(&["Tools"]),
-            DockNode::leaf(&["Tool Options"]),
+            DockNode::split_v(
+                0.42,
+                DockNode::leaf(&["Tool Options"]),
+                DockNode::leaf(&["Library"]),
+            ),
         ),
         DockNode::split_h(
             0.76,
@@ -41,6 +46,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     ui.dock_space("main", dock_size, &mut dock, |ui, tab| match tab {
         "Tools" => tools_panel::draw(ui, app),
         "Tool Options" => tool_options::draw(ui, app),
+        "Library" => assets_panel::draw(ui, app),
         "Canvas" => canvas::draw(ui, app),
         "Layers" => project_panel::draw(ui, app),
         _ => {}

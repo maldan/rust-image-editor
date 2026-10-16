@@ -56,6 +56,13 @@ impl PixelRect {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectMode {
+    Replace,
+    Add,
+    Subtract,
+}
+
 #[derive(Debug, Clone)]
 pub struct Selection {
     pub width: u32,
@@ -75,6 +82,14 @@ impl Selection {
             width,
             height,
             mask,
+        }
+    }
+
+    pub fn all(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            mask: vec![1u8; width as usize * height as usize],
         }
     }
 
@@ -108,6 +123,32 @@ impl Selection {
             max_x,
             max_y,
         })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.mask.iter().all(|&v| v == 0)
+    }
+
+    pub fn union(&mut self, other: &Selection) {
+        if self.width != other.width || self.height != other.height {
+            return;
+        }
+        for (dst, &src) in self.mask.iter_mut().zip(other.mask.iter()) {
+            if src != 0 {
+                *dst = 1;
+            }
+        }
+    }
+
+    pub fn subtract(&mut self, other: &Selection) {
+        if self.width != other.width || self.height != other.height {
+            return;
+        }
+        for (dst, &src) in self.mask.iter_mut().zip(other.mask.iter()) {
+            if src != 0 {
+                *dst = 0;
+            }
+        }
     }
 
     /// Packed R8 mask (0/255) for GPU overlay upload.
@@ -481,6 +522,8 @@ pub struct FloatingTransform {
     pub center: glam::Vec2,
     pub scale: f32,
     pub rotation: f32,
+    /// Layer opacity baked into GPU preview; stamp writes raw pixels.
+    pub opacity: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,6 +540,7 @@ impl FloatingTransform {
         _height: u32,
         selection: &Selection,
         layer: usize,
+        opacity: f32,
     ) -> Option<(Self, PixelRect)> {
         let bounds = selection.bounds()?;
         let bw = bounds.max_x - bounds.min_x;
@@ -532,6 +576,7 @@ impl FloatingTransform {
                 center,
                 scale: 1.0,
                 rotation: 0.0,
+                opacity: opacity.clamp(0.0, 1.0),
             },
             bounds,
         ))
@@ -679,23 +724,6 @@ impl FloatingTransform {
         )
     }
 
-    /// Stamp into an RGBA buffer the size of the document for preview compositing.
-    pub fn blit_preview(&self, out: &mut [u8], width: u32, _height: u32) -> Option<PixelRect> {
-        let mut tmp = vec![0u8; out.len()];
-        let (dirty, _) = self.stamp(&mut tmp, width, _height);
-        if let Some(rect) = dirty {
-            for y in rect.min_y..rect.max_y {
-                for x in rect.min_x..rect.max_x {
-                    let o = ((y * width + x) * 4) as usize;
-                    if tmp[o + 3] == 0 {
-                        continue;
-                    }
-                    over(&mut out[o..o + 4], &tmp[o..o + 4], 1.0);
-                }
-            }
-        }
-        dirty
-    }
 }
 
 #[cfg(test)]
@@ -857,5 +885,36 @@ mod tests {
         );
         assert_eq!(pixels[3], 100);
         assert_eq!(pixels[7], 255);
+    }
+
+    #[test]
+    fn selection_union_and_subtract() {
+        let mut a = Selection::from_rect(
+            PixelRect {
+                min_x: 0,
+                min_y: 0,
+                max_x: 2,
+                max_y: 2,
+            },
+            4,
+            4,
+        );
+        let b = Selection::from_rect(
+            PixelRect {
+                min_x: 1,
+                min_y: 1,
+                max_x: 3,
+                max_y: 3,
+            },
+            4,
+            4,
+        );
+        a.union(&b);
+        assert!(a.contains(0, 0));
+        assert!(a.contains(2, 2));
+        a.subtract(&b);
+        assert!(a.contains(0, 0));
+        assert!(!a.contains(2, 2));
+        assert!(!a.contains(1, 1));
     }
 }

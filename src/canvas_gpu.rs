@@ -8,14 +8,42 @@ use crate::view::CanvasView;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Uniforms {
+struct ViewUniforms {
+    viewport: [f32; 2],
+    center: [f32; 2],
+    image_size: [f32; 2],
+    zoom: f32,
+    rotation: f32,
+    opacity: f32,
+    _pad: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct FloatUniforms {
+    viewport: [f32; 2],
+    view_center: [f32; 2],
+    image_size: [f32; 2],
+    zoom: f32,
+    view_rotation: f32,
+    float_center: [f32; 2],
+    float_half: [f32; 2],
+    float_rotation: f32,
+    opacity: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SelUniforms {
     viewport: [f32; 2],
     center: [f32; 2],
     image_size: [f32; 2],
     zoom: f32,
     rotation: f32,
     has_selection: f32,
+    dim_outside: f32,
     time: f32,
+    _pad: f32,
 }
 
 #[repr(C)]
@@ -32,35 +60,74 @@ struct SolidVertex {
     color: [f32; 4],
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct LayerDraw {
+    pub visible: bool,
+    pub opacity: f32,
+}
+
 #[derive(Clone, Default)]
 pub struct CanvasOverlay {
     pub brush_center: Option<Vec2>,
     pub brush_radius: f32,
-    /// Rectangle marquee while dragging a rect select (screen corners).
     pub selection_rect: Option<[Vec2; 4]>,
-    /// Transform tool handles in screen space.
     pub transform_corners: Option<[Vec2; 4]>,
     pub transform_rotate: Option<Vec2>,
+    pub dim_outside: bool,
+    pub floating: Option<FloatingDraw>,
+    pub layers: Vec<LayerDraw>,
+}
+
+#[derive(Clone, Copy)]
+pub struct FloatingDraw {
+    pub center: Vec2,
+    pub half: Vec2,
+    pub rotation: f32,
+    pub opacity: f32,
+}
+
+struct LayerGpu {
+    texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+    size: (u32, u32),
 }
 
 pub struct CanvasRenderer {
-    pipeline: wgpu::RenderPipeline,
+    checker_pipeline: wgpu::RenderPipeline,
+    layer_pipeline: wgpu::RenderPipeline,
+    float_pipeline: wgpu::RenderPipeline,
+    sel_pipeline: wgpu::RenderPipeline,
     solid_pipeline: wgpu::RenderPipeline,
-    bind_layout: wgpu::BindGroupLayout,
+    view_bind_layout: wgpu::BindGroupLayout,
+    float_bind_layout: wgpu::BindGroupLayout,
+    sel_bind_layout: wgpu::BindGroupLayout,
+    #[allow(dead_code)]
     solid_bind_layout: wgpu::BindGroupLayout,
-    uniform_buf: wgpu::Buffer,
+    view_uniform_buf: wgpu::Buffer,
+    float_uniform_buf: wgpu::Buffer,
+    sel_uniform_buf: wgpu::Buffer,
     solid_uniform_buf: wgpu::Buffer,
     solid_vertex_buf: wgpu::Buffer,
     sampler_near: wgpu::Sampler,
     sampler_linear: wgpu::Sampler,
-    texture: Option<wgpu::Texture>,
+    layers: Vec<Option<LayerGpu>>,
+    floating_texture: Option<wgpu::Texture>,
+    floating_bind_group: Option<wgpu::BindGroup>,
+    floating_size: (u32, u32),
     sel_texture: Option<wgpu::Texture>,
+    sel_bind_group: Option<wgpu::BindGroup>,
+    /// Kept alive for `checker_bind_group`.
+    #[allow(dead_code)]
+    empty_img_texture: wgpu::Texture,
+    /// Kept alive for `empty_sel_bind_group`.
+    #[allow(dead_code)]
     empty_sel_texture: wgpu::Texture,
-    bind_group: Option<wgpu::BindGroup>,
+    empty_sel_bind_group: wgpu::BindGroup,
+    checker_bind_group: wgpu::BindGroup,
     solid_bind_group: wgpu::BindGroup,
-    size: (u32, u32),
     sel_size: (u32, u32),
     has_selection: bool,
+    size: (u32, u32),
 }
 
 impl CanvasRenderer {
@@ -69,69 +136,49 @@ impl CanvasRenderer {
             label: Some("canvas"),
             source: wgpu::ShaderSource::Wgsl(include_str!("canvas_gpu.wgsl").into()),
         });
-        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("canvas bind"),
+
+        let view_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("canvas view bind"),
             entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
+                buffer_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
+                texture_entry(1, false),
+                sampler_entry(2, false),
+            ],
+        });
+        let float_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("canvas float bind"),
+            entries: &[
+                buffer_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
+                texture_entry(1, false),
+                sampler_entry(2, false),
+            ],
+        });
+        let sel_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("canvas sel bind"),
+            entries: &[
+                buffer_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
+                texture_entry(1, true),
+                sampler_entry(2, true),
             ],
         });
         let solid_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("canvas solid bind"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
+            entries: &[buffer_entry(0, wgpu::ShaderStages::VERTEX)],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("canvas pipeline layout"),
-            bind_group_layouts: &[Some(&bind_layout)],
+
+        let view_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("canvas view layout"),
+            bind_group_layouts: &[Some(&view_bind_layout)],
+            immediate_size: 0,
+        });
+        let float_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("canvas float layout"),
+            bind_group_layouts: &[Some(&float_bind_layout)],
+            immediate_size: 0,
+        });
+        let sel_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("canvas sel layout"),
+            bind_group_layouts: &[Some(&sel_bind_layout)],
             immediate_size: 0,
         });
         let solid_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -139,78 +186,79 @@ impl CanvasRenderer {
             bind_group_layouts: &[Some(&solid_bind_layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("canvas pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let solid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("canvas solid pipeline"),
-            layout: Some(&solid_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_solid"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<SolidVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
-                })],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_solid"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("canvas uniforms"),
-            contents: bytemuck::bytes_of(&Uniforms {
-                viewport: [1.0, 1.0],
-                center: [0.0, 0.0],
-                image_size: [1.0, 1.0],
-                zoom: 1.0,
-                rotation: 0.0,
-                has_selection: 0.0,
-                time: 0.0,
-            }),
+
+        let checker_pipeline = make_pipeline(
+            device,
+            &view_layout,
+            &shader,
+            "vs_image",
+            "fs_checker",
+            format,
+            wgpu::BlendState::REPLACE,
+            &[],
+        );
+        let layer_pipeline = make_pipeline(
+            device,
+            &view_layout,
+            &shader,
+            "vs_image",
+            "fs_layer",
+            format,
+            wgpu::BlendState::ALPHA_BLENDING,
+            &[],
+        );
+        let float_pipeline = make_pipeline(
+            device,
+            &float_layout,
+            &shader,
+            "vs_float",
+            "fs_float",
+            format,
+            wgpu::BlendState::ALPHA_BLENDING,
+            &[],
+        );
+        let sel_pipeline = make_pipeline(
+            device,
+            &sel_layout,
+            &shader,
+            "vs_sel",
+            "fs_sel",
+            format,
+            wgpu::BlendState::ALPHA_BLENDING,
+            &[],
+        );
+        let solid_pipeline = make_pipeline(
+            device,
+            &solid_layout,
+            &shader,
+            "vs_solid",
+            "fs_solid",
+            format,
+            wgpu::BlendState::ALPHA_BLENDING,
+            &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<SolidVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
+            })],
+        );
+
+        let view_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("canvas view uniforms"),
+            size: std::mem::size_of::<ViewUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let float_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("canvas float uniforms"),
+            size: std::mem::size_of::<FloatUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let sel_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("canvas sel uniforms"),
+            size: std::mem::size_of::<SelUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         let solid_uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("canvas solid uniforms"),
@@ -226,6 +274,7 @@ impl CanvasRenderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
         let sampler_near = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("canvas nearest"),
             mag_filter: wgpu::FilterMode::Nearest,
@@ -244,14 +293,41 @@ impl CanvasRenderer {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
         });
-        let solid_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("canvas solid bg"),
-            layout: &solid_bind_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: solid_uniform_buf.as_entire_binding(),
-            }],
+
+        let empty_img = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("canvas empty img"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
         });
+        let empty_img_view = empty_img.create_view(&Default::default());
+        let checker_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("canvas checker bg"),
+            layout: &view_bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: view_uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&empty_img_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler_near),
+                },
+            ],
+        });
+
         let empty_sel_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("canvas empty sel"),
             size: wgpu::Extent3d {
@@ -266,101 +342,294 @@ impl CanvasRenderer {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        let empty_sel_view = empty_sel_texture.create_view(&Default::default());
+        let empty_sel_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("canvas empty sel bg"),
+            layout: &sel_bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: sel_uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&empty_sel_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler_linear),
+                },
+            ],
+        });
+
+        let solid_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("canvas solid bg"),
+            layout: &solid_bind_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: solid_uniform_buf.as_entire_binding(),
+            }],
+        });
+
         Self {
-            pipeline,
+            checker_pipeline,
+            layer_pipeline,
+            float_pipeline,
+            sel_pipeline,
             solid_pipeline,
-            bind_layout,
+            view_bind_layout,
+            float_bind_layout,
+            sel_bind_layout,
             solid_bind_layout,
-            uniform_buf,
+            view_uniform_buf,
+            float_uniform_buf,
+            sel_uniform_buf,
             solid_uniform_buf,
             solid_vertex_buf,
             sampler_near,
             sampler_linear,
-            texture: None,
+            layers: Vec::new(),
+            floating_texture: None,
+            floating_bind_group: None,
+            floating_size: (0, 0),
             sel_texture: None,
+            sel_bind_group: None,
+            empty_img_texture: empty_img,
             empty_sel_texture,
-            bind_group: None,
+            empty_sel_bind_group,
+            checker_bind_group,
             solid_bind_group,
-            size: (0, 0),
             sel_size: (0, 0),
             has_selection: false,
+            size: (0, 0),
         }
     }
 
     pub fn clear(&mut self) {
-        self.texture = None;
-        self.bind_group = None;
+        self.layers.clear();
+        self.floating_texture = None;
+        self.floating_bind_group = None;
+        self.floating_size = (0, 0);
         self.size = (0, 0);
         self.has_selection = false;
     }
 
     pub fn has_image(&self) -> bool {
-        self.texture.is_some()
+        self.layers.iter().any(|l| l.is_some())
     }
 
-    fn rebuild_bind_group(&mut self, device: &wgpu::Device, image_view: &wgpu::TextureView) {
-        let sel_view = if self.has_selection {
-            self.sel_texture
-                .as_ref()
-                .unwrap_or(&self.empty_sel_texture)
-                .create_view(&wgpu::TextureViewDescriptor::default())
-        } else {
-            self.empty_sel_texture
-                .create_view(&wgpu::TextureViewDescriptor::default())
-        };
-        self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("canvas bind group"),
-            layout: &self.bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.uniform_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(image_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler_near),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&sel_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler_linear),
-                },
-            ],
-        }));
-    }
-
-    pub fn ensure_size(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+    pub fn ensure_layers(
+        &mut self,
+        device: &wgpu::Device,
+        count: usize,
+        width: u32,
+        height: u32,
+    ) {
         let width = width.max(1);
         let height = height.max(1);
-        if self.size == (width, height) && self.texture.is_some() {
+        let size_changed = self.size != (width, height);
+        if size_changed {
+            self.layers.clear();
+            self.size = (width, height);
+        }
+        while self.layers.len() < count {
+            self.layers.push(None);
+        }
+        if self.layers.len() > count {
+            self.layers.truncate(count);
+        }
+        for slot in self.layers.iter_mut() {
+            let need = match slot {
+                Some(layer) => layer.size != (width, height),
+                None => true,
+            };
+            if !need {
+                continue;
+            }
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("canvas layer"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("canvas layer bg"),
+                layout: &self.view_bind_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.view_uniform_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler_near),
+                    },
+                ],
+            });
+            *slot = Some(LayerGpu {
+                texture,
+                bind_group,
+                size: (width, height),
+            });
+        }
+    }
+
+    pub fn upload_layer_dirty(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layer_index: usize,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        dirty: &mut DirtyTiles,
+    ) {
+        if width == 0 || height == 0 || pixels.len() < width as usize * height as usize * 4 {
             return;
         }
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("canvas image"),
-            size: wgpu::Extent3d {
+        self.ensure_layers(device, layer_index + 1, width, height);
+        let Some(Some(layer)) = self.layers.get(layer_index) else {
+            return;
+        };
+        if dirty.is_empty() {
+            return;
+        }
+        let bytes_per_row = width * 4;
+        for (x, y, w, h) in dirty.drain() {
+            if w == 0 || h == 0 {
+                continue;
+            }
+            let offset = ((y * width + x) * 4) as usize;
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &layer.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x, y, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &pixels[offset..],
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+    }
+
+    pub fn upload_all_layers(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layer_pixels: &[&[u8]],
+        width: u32,
+        height: u32,
+    ) {
+        self.ensure_layers(device, layer_pixels.len(), width, height);
+        for (i, pixels) in layer_pixels.iter().enumerate() {
+            let mut dirty = DirtyTiles::default();
+            dirty.resize(width, height);
+            dirty.mark_all();
+            self.upload_layer_dirty(device, queue, i, pixels, width, height, &mut dirty);
+        }
+    }
+
+    pub fn set_floating(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+    ) {
+        if width == 0 || height == 0 || pixels.len() < width as usize * height as usize * 4 {
+            self.clear_floating();
+            return;
+        }
+        let need = self.floating_size != (width, height) || self.floating_texture.is_none();
+        if need {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("canvas floating"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            self.floating_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("canvas floating bg"),
+                layout: &self.float_bind_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.float_uniform_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler_near),
+                    },
+                ],
+            }));
+            self.floating_texture = Some(texture);
+            self.floating_size = (width, height);
+        }
+        let Some(texture) = self.floating_texture.as_ref() else {
+            return;
+        };
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
                 width,
                 height,
                 depth_or_array_layers: 1,
             },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.texture = Some(texture);
-        self.size = (width, height);
-        self.rebuild_bind_group(device, &view);
-        let _ = &self.solid_bind_layout;
+        );
+    }
+
+    pub fn clear_floating(&mut self) {
+        self.floating_texture = None;
+        self.floating_bind_group = None;
+        self.floating_size = (0, 0);
     }
 
     pub fn set_selection_mask(
@@ -372,18 +641,12 @@ impl CanvasRenderer {
         height: u32,
     ) {
         let Some(mask) = mask.filter(|m| !m.is_empty() && width > 0 && height > 0) else {
-            if self.has_selection {
-                self.has_selection = false;
-                if let Some(tex) = self.texture.as_ref() {
-                    let view = tex.create_view(&Default::default());
-                    self.rebuild_bind_group(device, &view);
-                }
-            }
+            self.has_selection = false;
             return;
         };
         let need_alloc = self.sel_size != (width, height) || self.sel_texture.is_none();
         if need_alloc {
-            self.sel_texture = Some(device.create_texture(&wgpu::TextureDescriptor {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("canvas selection"),
                 size: wgpu::Extent3d {
                     width,
@@ -396,17 +659,30 @@ impl CanvasRenderer {
                 format: wgpu::TextureFormat::R8Unorm,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            self.sel_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("canvas sel bg"),
+                layout: &self.sel_bind_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.sel_uniform_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler_linear),
+                    },
+                ],
             }));
+            self.sel_texture = Some(texture);
             self.sel_size = (width, height);
         }
-        let was = self.has_selection;
         self.has_selection = true;
-        if need_alloc || !was {
-            if let Some(tex) = self.texture.as_ref() {
-                let view = tex.create_view(&Default::default());
-                self.rebuild_bind_group(device, &view);
-            }
-        }
         let expected = width as usize * height as usize;
         if mask.len() < expected {
             return;
@@ -435,57 +711,6 @@ impl CanvasRenderer {
         );
     }
 
-    pub fn upload_dirty(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        pixels: &[u8],
-        width: u32,
-        height: u32,
-        dirty: &mut DirtyTiles,
-    ) {
-        if width == 0 || height == 0 || pixels.len() < width as usize * height as usize * 4 {
-            return;
-        }
-        let need_full = self.size != (width, height) || self.texture.is_none();
-        self.ensure_size(device, width, height);
-        let Some(texture) = self.texture.as_ref() else {
-            return;
-        };
-        if need_full {
-            dirty.mark_all();
-        }
-        if dirty.is_empty() {
-            return;
-        }
-        let bytes_per_row = width * 4;
-        for (x, y, w, h) in dirty.drain() {
-            if w == 0 || h == 0 {
-                continue;
-            }
-            let offset = ((y * width + x) * 4) as usize;
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d { x, y, z: 0 },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &pixels[offset..],
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bytes_per_row),
-                    rows_per_image: Some(h),
-                },
-                wgpu::Extent3d {
-                    width: w,
-                    height: h,
-                    depth_or_array_layers: 1,
-                },
-            );
-        }
-    }
-
     pub fn render(
         &self,
         queue: &wgpu::Queue,
@@ -496,7 +721,7 @@ impl CanvasRenderer {
         overlay: CanvasOverlay,
         time: f32,
     ) {
-        if canvas_rect.width() < 1.0 || canvas_rect.height() < 1.0 {
+        if canvas_rect.width() < 1.0 || canvas_rect.height() < 1.0 || view.width == 0 {
             return;
         }
         let x = canvas_rect.min.x.floor().max(0.0) as u32;
@@ -511,22 +736,73 @@ impl CanvasRenderer {
         let h = h.min(max_h.saturating_sub(y)).max(1);
         pass.set_scissor_rect(x, y, w, h);
 
-        if let Some(bind_group) = self.bind_group.as_ref() {
-            queue.write_buffer(
-                &self.uniform_buf,
-                0,
-                bytemuck::bytes_of(&Uniforms {
-                    viewport: [viewport.x, viewport.y],
-                    center: [view.center.x, view.center.y],
-                    image_size: [view.width as f32, view.height as f32],
-                    zoom: view.zoom,
-                    rotation: view.rotation,
-                    has_selection: if self.has_selection { 1.0 } else { 0.0 },
-                    time,
-                }),
-            );
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, bind_group, &[]);
+        let view_u = ViewUniforms {
+            viewport: [viewport.x, viewport.y],
+            center: [view.center.x, view.center.y],
+            image_size: [view.width as f32, view.height as f32],
+            zoom: view.zoom,
+            rotation: view.rotation,
+            opacity: 1.0,
+            _pad: 0.0,
+        };
+        queue.write_buffer(&self.view_uniform_buf, 0, bytemuck::bytes_of(&view_u));
+
+        pass.set_pipeline(&self.checker_pipeline);
+        pass.set_bind_group(0, &self.checker_bind_group, &[]);
+        pass.draw(0..6, 0..1);
+
+        pass.set_pipeline(&self.layer_pipeline);
+        for (i, layer) in overlay.layers.iter().enumerate() {
+            if !layer.visible || layer.opacity <= f32::EPSILON {
+                continue;
+            }
+            let Some(Some(gpu)) = self.layers.get(i) else {
+                continue;
+            };
+            let mut u = view_u;
+            u.opacity = layer.opacity.clamp(0.0, 1.0);
+            queue.write_buffer(&self.view_uniform_buf, 0, bytemuck::bytes_of(&u));
+            pass.set_bind_group(0, &gpu.bind_group, &[]);
+            pass.draw(0..6, 0..1);
+        }
+
+        if let (Some(draw), Some(bg)) = (overlay.floating, self.floating_bind_group.as_ref()) {
+            let fu = FloatUniforms {
+                viewport: [viewport.x, viewport.y],
+                view_center: [view.center.x, view.center.y],
+                image_size: [view.width as f32, view.height as f32],
+                zoom: view.zoom,
+                view_rotation: view.rotation,
+                float_center: [draw.center.x, draw.center.y],
+                float_half: [draw.half.x, draw.half.y],
+                float_rotation: draw.rotation,
+                opacity: draw.opacity.clamp(0.0, 1.0),
+            };
+            queue.write_buffer(&self.float_uniform_buf, 0, bytemuck::bytes_of(&fu));
+            pass.set_pipeline(&self.float_pipeline);
+            pass.set_bind_group(0, bg, &[]);
+            pass.draw(0..6, 0..1);
+        }
+
+        let sel_u = SelUniforms {
+            viewport: [viewport.x, viewport.y],
+            center: [view.center.x, view.center.y],
+            image_size: [view.width as f32, view.height as f32],
+            zoom: view.zoom,
+            rotation: view.rotation,
+            has_selection: if self.has_selection { 1.0 } else { 0.0 },
+            dim_outside: if overlay.dim_outside { 1.0 } else { 0.0 },
+            time,
+            _pad: 0.0,
+        };
+        queue.write_buffer(&self.sel_uniform_buf, 0, bytemuck::bytes_of(&sel_u));
+        if self.has_selection || overlay.dim_outside {
+            pass.set_pipeline(&self.sel_pipeline);
+            let bg = self
+                .sel_bind_group
+                .as_ref()
+                .unwrap_or(&self.empty_sel_bind_group);
+            pass.set_bind_group(0, bg, &[]);
             pass.draw(0..6, 0..1);
         }
 
@@ -578,6 +854,88 @@ impl CanvasRenderer {
     }
 }
 
+fn buffer_entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn texture_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn sampler_entry(binding: u32, filtering: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(if filtering {
+            wgpu::SamplerBindingType::Filtering
+        } else {
+            wgpu::SamplerBindingType::NonFiltering
+        }),
+        count: None,
+    }
+}
+
+fn make_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    vs: &str,
+    fs: &str,
+    format: wgpu::TextureFormat,
+    blend: wgpu::BlendState,
+    buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(fs),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some(vs),
+            compilation_options: Default::default(),
+            buffers,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(fs),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(blend),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 fn push_line(out: &mut Vec<SolidVertex>, a: Vec2, b: Vec2, thickness: f32, color: [f32; 4]) {
     let delta = b - a;
     let len = delta.length();
@@ -598,7 +956,6 @@ fn push_line(out: &mut Vec<SolidVertex>, a: Vec2, b: Vec2, thickness: f32, color
     }
 }
 
-/// 1px screen-space black/white marching ants along a segment.
 fn push_ants_line(out: &mut Vec<SolidVertex>, a: Vec2, b: Vec2, time: f32) {
     let delta = b - a;
     let len = delta.length();

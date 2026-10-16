@@ -14,7 +14,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             app.save_project(ui);
         }
         ui.separator();
-        if ui.menu_item("import", "Import PNG…").clicked() {
+        if ui.menu_item("import", "Import Asset PNG…").clicked() {
             app.import_png(ui);
         }
         if ui.menu_item("export", "Export PNG…").clicked() {

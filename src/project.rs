@@ -118,6 +118,46 @@ impl Project {
         self.sync_manifest();
     }
 
+    /// Resize canvas; content is kept top-left, cropped or padded with transparency.
+    pub fn resize_canvas(&mut self, width: u32, height: u32) -> Result<(), String> {
+        let width = width.max(1);
+        let height = height.max(1);
+        if self.layers.is_empty() {
+            self.width = width;
+            self.height = height;
+            self.layers.push(Layer {
+                name: "Layer 1".into(),
+                visible: true,
+                opacity: 1.0,
+                pixels: vec![0u8; width as usize * height as usize * 4],
+            });
+            self.active_layer = 0;
+            self.sync_manifest();
+            return Ok(());
+        }
+        let old_w = self.width;
+        let old_h = self.height;
+        if old_w == width && old_h == height {
+            return Ok(());
+        }
+        for layer in &mut self.layers {
+            let mut next = vec![0u8; width as usize * height as usize * 4];
+            let copy_w = old_w.min(width);
+            let copy_h = old_h.min(height);
+            for y in 0..copy_h {
+                let src = (y * old_w * 4) as usize;
+                let dst = (y * width * 4) as usize;
+                let bytes = (copy_w * 4) as usize;
+                next[dst..dst + bytes].copy_from_slice(&layer.pixels[src..src + bytes]);
+            }
+            layer.pixels = next;
+        }
+        self.width = width;
+        self.height = height;
+        self.sync_manifest();
+        Ok(())
+    }
+
     pub fn delete_active_layer(&mut self) {
         if self.layers.is_empty() {
             return;
@@ -158,6 +198,10 @@ impl Project {
         self.layers
             .get_mut(self.active_layer)
             .map(|layer| &mut layer.pixels)
+    }
+
+    pub fn sync_manifest_pub(&mut self) {
+        self.sync_manifest();
     }
 
     fn sync_manifest(&mut self) {
@@ -296,7 +340,7 @@ impl Project {
     }
 }
 
-fn encode_png_rgba(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+pub fn encode_png_rgba(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     let image = RgbaImage::from_raw(width, height, pixels.to_vec())
         .ok_or_else(|| "Invalid layer size".to_string())?;
     encode_png(&DynamicImage::ImageRgba8(image))

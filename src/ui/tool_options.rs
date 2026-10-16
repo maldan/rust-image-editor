@@ -26,9 +26,13 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         }
         Tool::RectangleSelect => {
             ui.label("Drag on the image to select an area.");
+            ui.space(8.0);
+            ui.label("Shift — add · Ctrl — subtract");
         }
         Tool::MagicWand => {
             ui.label("Click a pixel to select a connected region.");
+            ui.space(8.0);
+            ui.label("Shift — add · Ctrl — subtract");
             ui.space(12.0);
             ui.label(&format!("Threshold: {:.0}", app.wand_threshold));
             ui.slider_stepped("wand_threshold", &mut app.wand_threshold, 0.0..=255.0, 1.0);
@@ -51,16 +55,20 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             ui.label("Move, scale (corners), rotate (yellow handle).");
             ui.space(8.0);
             ui.label("Enter — apply · Esc — cancel");
-            if !app.has_floating_transform() {
-                ui.space(10.0);
-                ui.label("Needs an active selection.");
-            }
+            ui.space(8.0);
+            ui.label("No selection → transforms whole layer.");
         }
     }
 
     ui.space(16.0);
     ui.separator();
     ui.label("Selection");
+    ui.space(8.0);
+    ui.checkbox(
+        "dim_outside",
+        "Dim outside selection",
+        &mut app.dim_outside_selection,
+    );
     ui.space(8.0);
     if let Some(rect) = app.selection.as_ref().and_then(|sel| sel.bounds()) {
         ui.label(&format!(
