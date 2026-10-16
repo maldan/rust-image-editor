@@ -10,6 +10,9 @@ pub struct AiDialog {
     pub open: bool,
     pub whole_document: bool,
     pub scale: f32,
+    pub fit_image: bool,
+    /// Original input bounds in document coordinates, captured before input scaling.
+    pub input_region: Option<crate::editing::PixelRect>,
     pub prompt: String,
     pub config: Option<HostConfig>,
     pub job: Option<Job>,
@@ -29,6 +32,8 @@ impl Default for AiDialog {
             open: false,
             whole_document: false,
             scale: 1.0,
+            fit_image: true,
+            input_region: None,
             prompt: String::new(),
             config: None,
             job: None,
@@ -97,6 +102,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                         };
                         ui.label("Prompt");
                         ui.text_area("ai_prompt", &mut app.ai.prompt, Vec2::new(0.0, 110.0));
+                        ui.checkbox("ai_fit_image", "Fit Image", &mut app.ai.fit_image);
                     });
                     ui.space(8.0);
                     if running {

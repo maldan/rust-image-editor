@@ -689,6 +689,8 @@ pub struct FloatingTransform {
     pub mask: Vec<u8>,
     pub bw: u32,
     pub bh: u32,
+    pub origin_x: u32,
+    pub origin_y: u32,
     pub center: glam::Vec2,
     pub scale: f32,
     pub rotation: f32,
@@ -705,13 +707,13 @@ pub enum TransformHit {
 
 impl FloatingTransform {
     pub fn extract(
-        pixels: &mut [u8],
+        pixels: &[u8],
         width: u32,
         _height: u32,
         selection: &Selection,
         layer: usize,
         opacity: f32,
-    ) -> Option<(Self, PixelRect)> {
+    ) -> Option<Self> {
         let bounds = selection.bounds()?;
         let bw = bounds.max_x - bounds.min_x;
         let bh = bounds.max_y - bounds.min_y;
@@ -727,29 +729,53 @@ impl FloatingTransform {
                 }
                 let li = ((y - bounds.min_y) * bw + (x - bounds.min_x)) as usize;
                 let src = ((y * width + x) * 4) as usize;
+                if src + 4 > pixels.len() {
+                    continue;
+                }
                 fp[li * 4..li * 4 + 4].copy_from_slice(&pixels[src..src + 4]);
                 mask[li] = 1;
-                pixels[src..src + 4].fill(0);
             }
+        }
+        if mask.iter().all(|v| *v == 0) {
+            return None;
         }
         let center = glam::Vec2::new(
             bounds.min_x as f32 + bw as f32 * 0.5,
             bounds.min_y as f32 + bh as f32 * 0.5,
         );
-        Some((
-            Self {
-                layer,
-                pixels: fp,
-                mask,
-                bw,
-                bh,
-                center,
-                scale: 1.0,
-                rotation: 0.0,
-                opacity: opacity.clamp(0.0, 1.0),
-            },
-            bounds,
-        ))
+        Some(Self {
+            layer,
+            pixels: fp,
+            mask,
+            bw,
+            bh,
+            origin_x: bounds.min_x,
+            origin_y: bounds.min_y,
+            center,
+            scale: 1.0,
+            rotation: 0.0,
+            opacity: opacity.clamp(0.0, 1.0),
+        })
+    }
+
+    /// Erase grabbed pixels. Call on commit, after the preview has been sampling them.
+    pub fn clear_source(&self, pixels: &mut [u8], width: u32, height: u32) {
+        for y in 0..self.bh {
+            for x in 0..self.bw {
+                if self.mask[(y * self.bw + x) as usize] == 0 {
+                    continue;
+                }
+                let px = self.origin_x + x;
+                let py = self.origin_y + y;
+                if px >= width || py >= height {
+                    continue;
+                }
+                let dst = ((py * width + px) * 4) as usize;
+                if dst + 4 <= pixels.len() {
+                    pixels[dst..dst + 4].fill(0);
+                }
+            }
+        }
     }
 
     pub fn local_size(&self) -> glam::Vec2 {
@@ -911,6 +937,27 @@ impl FloatingTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transform_keeps_pixels_until_commit_clear() {
+        let mut pixels = vec![0u8; 4 * 4 * 4];
+        pixels[0..4].copy_from_slice(&[10, 20, 30, 255]);
+        let selection = Selection::from_rect(
+            PixelRect {
+                min_x: 0,
+                min_y: 0,
+                max_x: 2,
+                max_y: 2,
+            },
+            4,
+            4,
+        );
+        let floating = FloatingTransform::extract(&pixels, 4, 4, &selection, 0, 1.0).unwrap();
+        assert_eq!(&pixels[0..4], &[10, 20, 30, 255]);
+        floating.clear_source(&mut pixels, 4, 4);
+        assert_eq!(&pixels[0..4], &[0, 0, 0, 0]);
+        assert_eq!(floating.pixels[0..4], [10, 20, 30, 255]);
+    }
 
     #[test]
     fn selection_clips_brush_changes() {

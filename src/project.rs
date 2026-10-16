@@ -118,23 +118,30 @@ impl Project {
         self.sync_manifest();
     }
 
-    /// Preserve server pixels at their native size. Layers share canvas dimensions,
-    /// so expand the canvas if needed, and transparently pad the remaining area.
-    pub fn add_raster_layer(&mut self, image: &image::RgbaImage, name: String) -> Result<(), String> {
+    /// Insert into the existing canvas. Fit uses the original input bounds;
+    /// native-size insertion is clipped to the canvas, which is never enlarged.
+    pub fn add_raster_layer(&mut self, image: &image::RgbaImage, name: String, region: crate::editing::PixelRect, fit: bool) -> Result<(), String> {
+        if image.width() == 0 || image.height() == 0 { return Err("Result image is empty".into()); }
+        if region.is_empty() || region.max_x > self.width || region.max_y > self.height {
+            return Err("Result destination is outside the canvas".into());
+        }
+        let resized;
+        let image = if fit {
+            let size = (region.max_x - region.min_x, region.max_y - region.min_y);
+            if image.dimensions() != size {
+                resized = image::imageops::resize(image, size.0, size.1, image::imageops::FilterType::Lanczos3);
+                &resized
+            } else { image }
+        } else { image };
         let (w, h) = image.dimensions();
-        if w == 0 || h == 0 { return Err("Result image is empty".into()); }
-        let (width, height) = (self.width.max(w), self.height.max(h));
-        if self.layers.is_empty() {
-            self.import_rgba(image.as_raw(), w, h)?;
-        } else {
-            self.resize_canvas(width, height)?;
-            self.add_layer();
-            let target = &mut self.layers[self.active_layer].pixels;
-            for y in 0..h as usize {
-                let source = y * w as usize * 4;
-                let dest = y * width as usize * 4;
-                target[dest..dest + w as usize * 4].copy_from_slice(&image.as_raw()[source..source + w as usize * 4]);
-            }
+        let copy_w = w.min(self.width - region.min_x) as usize;
+        let copy_h = h.min(self.height - region.min_y) as usize;
+        self.add_layer();
+        let target = &mut self.layers[self.active_layer].pixels;
+        for y in 0..copy_h {
+            let source = y * w as usize * 4;
+            let dest = ((y + region.min_y as usize) * self.width as usize + region.min_x as usize) * 4;
+            target[dest..dest + copy_w * 4].copy_from_slice(&image.as_raw()[source..source + copy_w * 4]);
         }
         self.layers[self.active_layer].name = name;
         self.sync_manifest();
@@ -403,18 +410,36 @@ mod tests {
     }
 
     #[test]
-    fn server_result_is_never_rescaled_or_cropped() {
+    fn native_result_is_clipped_without_enlarging_canvas() {
         let mut project = Project::default();
-        project.import_rgba(&[10, 20, 30, 255], 1, 1).unwrap();
-        let result = RgbaImage::from_pixel(3, 2, Rgba([40, 50, 60, 128]));
-        project.add_raster_layer(&result, "AI Edit".into()).unwrap();
-        assert_eq!((project.width, project.height), (3, 2));
-        assert_eq!(project.layers[1].pixels, result.into_raw());
-        assert_eq!(&project.layers[0].pixels[..4], &[10, 20, 30, 255]);
-        assert!(project.layers[0].pixels[4..].iter().all(|b| *b == 0));
-        project.add_raster_layer(&RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 255])), "small".into()).unwrap();
+        let original = vec![10, 20, 30, 255].repeat(4);
+        project.import_rgba(&original, 2, 2).unwrap();
+        let result = RgbaImage::from_fn(3, 3, |x, y| Rgba([x as u8, y as u8, 60, 255]));
+        let region = crate::editing::PixelRect { min_x: 0, min_y: 0, max_x: 2, max_y: 2 };
+        project.add_raster_layer(&result, "AI Edit".into(), region, false).unwrap();
+        assert_eq!((project.width, project.height), (2, 2));
+        assert_eq!(project.layers[0].pixels, original);
+        assert_eq!(project.layers[1].pixels, [0, 0, 60, 255, 1, 0, 60, 255, 0, 1, 60, 255, 1, 1, 60, 255]);
+        project.add_raster_layer(&RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 255])), "small".into(), region, false).unwrap();
         assert_eq!(&project.layers[2].pixels[..4], &[1, 2, 3, 255]);
         assert!(project.layers[2].pixels[4..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn fit_result_matches_original_bounds_and_position() {
+        for side in [1, 4] {
+            let mut project = Project::default();
+            project.import_rgba(&vec![0; 5 * 4 * 4], 5, 4).unwrap();
+            let region = crate::editing::PixelRect { min_x: 2, min_y: 1, max_x: 4, max_y: 3 };
+            let result = RgbaImage::from_pixel(side, side, Rgba([40, 50, 60, 128]));
+            project.add_raster_layer(&result, "Fit".into(), region, true).unwrap();
+            assert_eq!((project.width, project.height), (5, 4));
+            let actual = RgbaImage::from_raw(5, 4, project.layers[1].pixels.clone()).unwrap();
+            for (x, y, pixel) in actual.enumerate_pixels() {
+                assert_eq!(*pixel, if (2..4).contains(&x) && (1..3).contains(&y) { Rgba([40, 50, 60, 128]) } else { Rgba([0; 4]) });
+            }
+            assert!(project.layers[0].pixels.iter().all(|b| *b == 0));
+        }
     }
 
     fn sample_png() -> Vec<u8> {

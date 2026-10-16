@@ -292,7 +292,10 @@ impl<S: Scene> Host<S> {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("editor frame"),
             });
-        {
+        let draw_canvas = canvas_present.as_ref().is_some_and(|(rect, view, _)| {
+            rect.width() >= 1.0 && rect.height() >= 1.0 && view.width > 0
+        });
+        if draw_canvas {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("canvas offscreen"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {

@@ -127,6 +127,7 @@ impl EditorApp {
         self.ai.close_when_stopped = false;
         self.ai.preview = None;
         self.ai.result = None;
+        self.ai.input_region = None;
         self.ai.preview_dirty = false;
         self.ai.fraction = None;
         match crate::comfyui::HostConfig::from_env() {
@@ -139,6 +140,7 @@ impl EditorApp {
         if self.ai.job.is_some() { return; }
         let Some(config) = self.ai.config.clone() else { return; };
         let p = self.project();
+        let input_region = PixelRect { min_x: 0, min_y: 0, max_x: p.width, max_y: p.height };
         let pixels = if self.ai.whole_document {
             crate::editing::composite_layers(&p.layers, p.width, p.height)
         } else {
@@ -150,6 +152,7 @@ impl EditorApp {
             return;
         };
         self.ai.document_id = self.workspace.active_doc().id.clone();
+        self.ai.input_region = Some(input_region);
         self.ai.message = "Preparing input…".into();
         self.ai.preview = None;
         self.ai.result = None;
@@ -173,6 +176,7 @@ impl EditorApp {
         } else {
             self.ai.open = false;
             self.ai.result = None;
+            self.ai.input_region = None;
             self.ai.preview = None;
             self.ai.preview_dirty = false;
             self.ai.fraction = None;
@@ -186,9 +190,13 @@ impl EditorApp {
             return;
         }
         let image = self.ai.result.as_ref().unwrap();
-        let size = image.dimensions();
+        let Some(region) = self.ai.input_region.filter(|r| !r.is_empty()) else {
+            self.ai.message = "Missing source bounds; regenerate the image".into();
+            return;
+        };
+        let size = if self.ai.fit_image { (region.max_x - region.min_x, region.max_y - region.min_y) } else { image.dimensions() };
         let name = format!("AI Edit {}", self.workspace.active().layers.len() + 1);
-        match self.workspace.active_mut().add_raster_layer(image, name) {
+        match self.workspace.active_mut().add_raster_layer(image, name, region, self.ai.fit_image) {
             Ok(()) => {
                 let _ = self.refresh_image();
                 self.workspace.mark_active_thumb_dirty();
@@ -968,26 +976,18 @@ impl EditorApp {
             .get(layer)
             .map(|l| l.opacity)
             .unwrap_or(1.0);
-        let Some(pixels) = self.workspace.active_mut().layers.get_mut(layer).map(|l| &mut l.pixels) else {
+        let Some(pixels) = self.workspace.active().layers.get(layer).map(|l| l.pixels.as_slice()) else {
             return;
         };
-        let mut capture = EditCapture::new(layer, width, height);
-        if let Some(bounds) = selection.bounds() {
-            capture.touch_rect(pixels, bounds);
-        }
-        let Some((floating, bounds)) =
-            FloatingTransform::extract(pixels, width, height, &selection, layer, opacity)
+        let Some(floating) = FloatingTransform::extract(pixels, width, height, &selection, layer, opacity)
         else {
-            self.stroke_capture = None;
             return;
         };
-        self.stroke_capture = Some(capture);
         self.floating = Some(floating);
         self.floating_reload = true;
         self.clear_selection();
         self.dirty = true;
         self.status = "Transform — drag / handles · Enter commit · Esc cancel".into();
-        self.mark_layer_dirty(layer, bounds);
     }
 
     pub fn cancel_transform(&mut self) {
@@ -996,19 +996,11 @@ impl EditorApp {
             self.transform_last = None;
             return;
         }
-        if let Some(capture) = self.stroke_capture.take() {
-            let layer = capture.layer();
-            if let Some(pixels) = self.workspace.active_mut().layers.get_mut(layer).map(|l| &mut l.pixels) {
-                if let Some(rect) = capture.restore_before(pixels) {
-                    self.mark_dirty_rect(rect);
-                }
-            }
-        }
+        self.stroke_capture = None;
         self.transform_drag = None;
         self.transform_last = None;
         self.floating_reload = false;
         self.status = "Transform cancelled".into();
-        self.layers_reload = true;
     }
 
     fn commit_transform(&mut self) {
@@ -1021,11 +1013,14 @@ impl EditorApp {
             return;
         };
         let layer = floating.layer;
-        let mut capture = self
-            .stroke_capture
-            .take()
-            .unwrap_or_else(|| EditCapture::new(layer, width, height));
-        // Expand capture to destination before stamping.
+        let mut capture = EditCapture::new(layer, width, height);
+        let source = PixelRect {
+            min_x: floating.origin_x,
+            min_y: floating.origin_y,
+            max_x: (floating.origin_x + floating.bw).min(width),
+            max_y: (floating.origin_y + floating.bh).min(height),
+        };
+        // Snapshot source and destination before stamping.
         let corners = floating.corners();
         let dest = PixelRect {
             min_x: corners
@@ -1053,12 +1048,14 @@ impl EditorApp {
                 .ceil()
                 .min(height as f32) as u32,
         };
-        if let Some(pixels) = self.workspace.active_mut().layers.get(layer).map(|l| l.pixels.as_slice()) {
+        if let Some(pixels) = self.workspace.active().layers.get(layer).map(|l| l.pixels.as_slice()) {
+            capture.touch_rect(pixels, source);
             capture.touch_rect(pixels, dest);
         }
         let Some(pixels) = self.workspace.active_mut().layers.get_mut(layer).map(|l| &mut l.pixels) else {
             return;
         };
+        floating.clear_source(pixels, width, height);
         let (dirty, selection) = floating.stamp(pixels, width, height);
         if let Some(edit) = capture.finish(pixels) {
             self.history.push(edit);
@@ -1070,10 +1067,9 @@ impl EditorApp {
         self.dirty = true;
         self.workspace.mark_active_thumb_dirty();
         self.status = "Transform applied".into();
+        self.mark_layer_dirty(layer, source);
         if let Some(rect) = dirty {
             self.mark_layer_dirty(layer, rect);
-        } else {
-            self.layers_reload = true;
         }
     }
 
@@ -1221,7 +1217,7 @@ impl Scene for EditorApp {
                 canvas.clear();
                 self.canvas_cleared = false;
             }
-            canvas.clear_floating();
+            canvas.clear_transform();
             canvas.set_selection_mask(device, queue, None, 0, 0);
             return;
         }
@@ -1264,19 +1260,21 @@ impl Scene for EditorApp {
             self.dirty_layer = None;
         }
         if self.floating.is_none() {
-            canvas.clear_floating();
+            canvas.clear_transform();
             self.floating_reload = false;
-        } else if self.floating_reload
-            && let Some(floating) = self.floating.as_ref()
-        {
-            canvas.set_floating(
+        } else if let Some(floating) = self.floating.as_ref() {
+            let ready = canvas.sync_transform(
                 device,
                 queue,
-                &floating.pixels,
+                floating.layer,
+                &floating.mask,
                 floating.bw,
                 floating.bh,
+                self.floating_reload,
             );
-            self.floating_reload = false;
+            if ready {
+                self.floating_reload = false;
+            }
         }
     }
 
@@ -1314,12 +1312,11 @@ impl Scene for EditorApp {
             }
         }
         if let Some(floating) = self.floating.as_ref() {
-            let half = floating.local_size() * 0.5;
             overlay.floating = Some(FloatingDraw {
-                center: floating.center,
-                half,
-                rotation: floating.rotation,
                 opacity: floating.opacity,
+                layer: floating.layer,
+                origin: Vec2::new(floating.origin_x as f32, floating.origin_y as f32),
+                size: Vec2::new(floating.bw as f32, floating.bh as f32),
             });
             let corners = floating.corners().map(|p| view.image_to_screen(p));
             overlay.transform_corners = Some(corners);
@@ -1419,6 +1416,7 @@ mod ai_tests {
         app.refresh_image().unwrap();
         app.ai.open = true;
         app.ai.document_id = app.workspace.active_doc().id.clone();
+        app.ai.input_region = Some(PixelRect { min_x: 0, min_y: 0, max_x: 1, max_y: 1 });
         let result = image::RgbaImage::from_pixel(2, 3, image::Rgba([100, 120, 140, 255]));
         app.ai.job = Some(crate::comfyui::Job::with_result(crate::comfyui::JobResult::Done(result.clone())));
         let mut ui = Ui::new();
@@ -1434,9 +1432,9 @@ mod ai_tests {
         app.accept_ai();
         assert!(!app.ai.open);
         assert!(app.ai.result.is_none());
-        assert_eq!(app.image_size, Some((2, 3)));
+        assert_eq!(app.image_size, Some((1, 1)));
         assert_eq!(app.project().active_layer, 1);
-        assert_eq!(app.project().layers[1].pixels, result.into_raw());
+        assert_eq!(app.project().layers[1].pixels, [100, 120, 140, 255]);
         assert_eq!(&app.project().layers[0].pixels[..4], &[20, 40, 60, 255]);
         assert!(app.dirty);
         app.accept_ai();
@@ -1459,12 +1457,38 @@ mod ai_tests {
     }
 
     #[test]
+    fn fit_uses_unscaled_input_bounds_and_can_be_disabled() {
+        for fit in [true, false] {
+            let mut app = EditorApp::default();
+            app.project_mut().import_rgba(&vec![20, 40, 60, 255].repeat(8), 4, 2).unwrap();
+            app.refresh_image().unwrap();
+            app.ai.open = true;
+            app.ai.document_id = app.workspace.active_doc().id.clone();
+            app.ai.input_region = Some(PixelRect { min_x: 0, min_y: 0, max_x: 4, max_y: 2 });
+            app.ai.scale = 0.5;
+            app.ai.fit_image = fit;
+            app.ai.result = Some(image::RgbaImage::from_pixel(2, 1, image::Rgba([100, 120, 140, 255])));
+            app.accept_ai();
+            assert_eq!(app.image_size, Some((4, 2)));
+            assert_eq!(app.project().layers.len(), 2);
+            let inserted = &app.project().layers[1].pixels;
+            if fit {
+                assert_eq!(*inserted, vec![100, 120, 140, 255].repeat(8));
+            } else {
+                assert_eq!(&inserted[..8], &[100, 120, 140, 255, 100, 120, 140, 255]);
+                assert!(inserted[8..].iter().all(|b| *b == 0));
+            }
+        }
+    }
+
+    #[test]
     fn only_latest_result_is_accepted_and_destination_is_checked_again() {
         let mut app = EditorApp::default();
         app.project_mut().import_rgba(&[20, 40, 60, 255], 1, 1).unwrap();
         app.refresh_image().unwrap();
         app.ai.open = true;
         app.ai.document_id = app.workspace.active_doc().id.clone();
+        app.ai.input_region = Some(PixelRect { min_x: 0, min_y: 0, max_x: 1, max_y: 1 });
         let mut ui = Ui::new();
         for color in [10, 80] {
             let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([color, 0, 0, 255]));

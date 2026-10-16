@@ -98,26 +98,28 @@ fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(tex.rgb, a);
 }
 
-// --- floating transform textured quad ---
+// Active layer during transform: same pixels, but the grabbed mask is hidden
+// so it can be redrawn as the floating quad. Color stays in this texture.
 
-struct FloatUniforms {
+struct PunchUniforms {
     viewport: vec2<f32>,
-    view_center: vec2<f32>,
+    center: vec2<f32>,
     image_size: vec2<f32>,
     zoom: f32,
-    view_rotation: f32,
-    float_center: vec2<f32>,
-    float_half: vec2<f32>,
-    float_rotation: f32,
+    rotation: f32,
     opacity: f32,
+    _pad: f32,
+    origin: vec2<f32>,
+    size: vec2<f32>,
 }
 
-@group(0) @binding(0) var<uniform> fu: FloatUniforms;
-@group(0) @binding(1) var fimg: texture_2d<f32>;
-@group(0) @binding(2) var fsamp: sampler;
+@group(0) @binding(0) var<uniform> pu: PunchUniforms;
+@group(0) @binding(1) var punch_img: texture_2d<f32>;
+@group(0) @binding(2) var punch_samp: sampler;
+@group(0) @binding(3) var punch_mask: texture_2d<f32>;
 
 @vertex
-fn vs_float(@builtin(vertex_index) idx: u32) -> VsOut {
+fn vs_punch(@builtin(vertex_index) idx: u32) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
         vec2<f32>(1.0, 0.0),
@@ -127,11 +129,62 @@ fn vs_float(@builtin(vertex_index) idx: u32) -> VsOut {
         vec2<f32>(0.0, 1.0),
     );
     let uv = corners[idx];
-    let local = (uv - vec2<f32>(0.5, 0.5)) * fu.float_half * 2.0;
-    let c = cos(fu.float_rotation);
-    let s = sin(fu.float_rotation);
-    let image = fu.float_center + vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
-    let screen = image_to_screen(image, fu.view_center, fu.image_size, fu.zoom, fu.view_rotation);
+    let screen = image_to_screen(uv * pu.image_size, pu.center, pu.image_size, pu.zoom, pu.rotation);
+    var out: VsOut;
+    out.pos = to_ndc(screen, pu.viewport);
+    out.uv = uv;
+    out.screen = screen;
+    return out;
+}
+
+@fragment
+fn fs_punch(in: VsOut) -> @location(0) vec4<f32> {
+    let tex = textureSampleLevel(punch_img, punch_samp, in.uv, 0.0);
+    let image = in.uv * pu.image_size;
+    let local = image - pu.origin;
+    if (local.x >= 0.0 && local.y >= 0.0 && local.x < pu.size.x && local.y < pu.size.y) {
+        let mc = vec2<i32>(floor(clamp(local, vec2<f32>(0.0), pu.size - vec2<f32>(1.0))));
+        if (textureLoad(punch_mask, mc, 0).r > 0.5) {
+            return vec4<f32>(0.0);
+        }
+    }
+    return vec4<f32>(tex.rgb, tex.a * pu.opacity);
+}
+
+// --- floating transform: same layer texture, placed on the CPU corner quad ---
+
+struct FloatUniforms {
+    viewport: vec2<f32>,
+    opacity: f32,
+    _pad: f32,
+    origin: vec2<f32>,
+    size: vec2<f32>,
+    image_size: vec2<f32>,
+    c0: vec2<f32>,
+    c1: vec2<f32>,
+    c2: vec2<f32>,
+    c3: vec2<f32>,
+}
+
+@group(0) @binding(0) var<uniform> fu: FloatUniforms;
+@group(0) @binding(1) var fimg: texture_2d<f32>;
+@group(0) @binding(2) var fsamp: sampler;
+@group(0) @binding(3) var fmask: texture_2d<f32>;
+
+@vertex
+fn vs_float(@builtin(vertex_index) idx: u32) -> VsOut {
+    var corner_uv = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 1.0),
+    );
+    var corner_i = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
+    var corners = array<vec2<f32>, 4>(fu.c0, fu.c1, fu.c2, fu.c3);
+    let uv = corner_uv[idx];
+    let screen = corners[corner_i[idx]];
     var out: VsOut;
     out.pos = to_ndc(screen, fu.viewport);
     out.uv = uv;
@@ -141,7 +194,13 @@ fn vs_float(@builtin(vertex_index) idx: u32) -> VsOut {
 
 @fragment
 fn fs_float(in: VsOut) -> @location(0) vec4<f32> {
-    let tex = textureSampleLevel(fimg, fsamp, in.uv, 0.0);
+    let texel = clamp(floor(in.uv * fu.size), vec2<f32>(0.0), fu.size - vec2<f32>(1.0));
+    let m = textureLoad(fmask, vec2<i32>(texel), 0).r;
+    if (m < 0.5) {
+        return vec4<f32>(0.0);
+    }
+    let src_uv = (fu.origin + texel + vec2<f32>(0.5)) / fu.image_size;
+    let tex = textureSampleLevel(fimg, fsamp, src_uv, 0.0);
     return vec4<f32>(tex.rgb, tex.a * fu.opacity);
 }
 
