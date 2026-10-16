@@ -46,13 +46,20 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
 
         let dock_size = Vec2::new(viewport.x, (viewport.y - menu_h - status_h).max(1.0));
         let mut dock = std::mem::replace(&mut app.dock, DockState::new(DockNode::leaf(&["tmp"])));
-        ui.dock_space("main", dock_size, &mut dock, |ui, tab| match tab {
-            "Tools" => tools_panel::draw(ui, app),
-            "Tool Options" => tool_options::draw(ui, app),
-            "Library" => assets_panel::draw(ui, app),
-            "Canvas" => canvas::draw(ui, app),
-            "Layers" => project_panel::draw(ui, app),
-            _ => {}
+        ui.dock_space("main", dock_size, &mut dock, |ui, tab| {
+            if tab == "Canvas" {
+                canvas::draw(ui, app);
+                return;
+            }
+            let size = ui.available_size().max(Vec2::splat(1.0));
+            let axes = if tab == "Library" { mega_ui::ScrollAxes::Vertical } else { mega_ui::ScrollAxes::Both };
+            ui.scroll_area(&format!("dock_scroll_{tab}"), size, axes, |ui| match tab {
+                "Tools" => tools_panel::draw(ui, app),
+                "Tool Options" => tool_options::draw(ui, app),
+                "Library" => assets_panel::draw(ui, app),
+                "Layers" => project_panel::draw(ui, app),
+                _ => {}
+            });
         });
         app.dock = dock;
 

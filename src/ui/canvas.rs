@@ -11,7 +11,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
 
     // Background only — image / checker / brush / selection are drawn by canvas wgpu.
     ui.fill_rect(app.canvas_rect, [0.075, 0.08, 0.095, 1.0]);
-    if app.image_size.is_some() {
+    if app.display_size().is_some() {
         // Host renders the canvas into a viewport-sized texture before UI composition.
         let viewport = app.viewport_size;
         if viewport.x > 0.0 && viewport.y > 0.0 {
@@ -32,10 +32,13 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         if area.hovered || area.active || app.brush_last_active() {
             app.handle_canvas_edit(view);
         }
+        if app.preview_asset.is_none() {
+            app.draw_lasso_path(ui, view);
+        }
         if app.selection.is_some() || app.selection_anchor.is_some() {
             ui.request_repaint();
         }
-        if (app.tool == Tool::Brush || app.has_floating_transform())
+        if (matches!(app.tool, Tool::Brush | Tool::SelectionBrush) || app.has_floating_transform())
             && app.canvas_rect.contains(app.input.mouse_pos)
         {
             ui.request_repaint();

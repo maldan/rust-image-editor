@@ -25,10 +25,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
 
             let response = ui.selectable(&row_id, selected, |ui| {
                 ui.horizontal(|ui| {
-                    if ui
-                        .checkbox(&format!("layer_vis_{index}"), "show", &mut visible)
-                        .changed()
-                    {
+                    if ui.icon_button(&format!("layer_vis_{index}"), if visible { "visibility" } else { "visibility_off" }, visible) {
+                        visible = !visible;
                         visibility = Some((index, visible));
                     }
                     let name_width = (ui.available_size().x / ui.scale() - 110.0).max(1.0);

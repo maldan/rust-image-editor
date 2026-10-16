@@ -27,6 +27,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     let mut delete_doc: Option<usize> = None;
     let mut place_asset: Option<usize> = None;
     let mut delete_asset: Option<usize> = None;
+    let mut preview_asset: Option<usize> = None;
     let mut sel = app.workspace.tree_selected.clone();
     let thumb_size = THUMB_VIEW * ui.scale();
 
@@ -52,9 +53,11 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                         start_drag = Some((index, app.input.mouse_pos));
                     }
 
-                    ui.vertical(|ui| {
-                        let _resp = ui.tree_leaf_icon(&id, "image", &label);
-                        if ui.button(&format!("asset_del_{index}"), "Del").clicked() {
+                    ui.flex(1.0, |ui| {
+                        if ui.tree_leaf_icon(&id, "image", &label).clicked() {
+                            preview_asset = Some(index);
+                        }
+                        if ui.icon_button(&format!("asset_del_{index}"), "delete", false) {
                             delete_asset = Some(index);
                         }
                     });
@@ -77,13 +80,14 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     let thumb = ui.area(&format!("doc_thumb_{index}"), Vec2::splat(thumb_size));
                     ui.fill_rect(thumb.rect, [0.12, 0.12, 0.14, 1.0]);
                     draw_thumb_in(ui, &doc.thumb, thumb.rect);
-                    ui.vertical(|ui| {
+                    if thumb.hovered && app.input.mouse_released { switch_doc = Some(index); }
+                    ui.flex(1.0, |ui| {
                         let resp = ui.tree_leaf_icon(&id, "file", &label);
                         if resp.clicked() {
                             switch_doc = Some(index);
                         }
                         if app.workspace.documents.len() > 1
-                            && ui.button(&format!("doc_del_{index}"), "Delete").clicked()
+                            && ui.icon_button(&format!("doc_del_{index}"), "delete", false)
                         {
                             delete_doc = Some(index);
                         }
@@ -119,17 +123,24 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
 
     if app.input.mouse_released {
         if let Some(asset) = app.workspace.asset_drag {
+            let clicked = !app.workspace.asset_dragging
+                && app.workspace.asset_drag_origin.is_some_and(|origin| app.input.mouse_pos.distance(origin) < 6.0 * ui.scale());
             let dropped = app.workspace.asset_dragging
                 && app.canvas_rect.contains(app.input.mouse_pos);
             app.workspace.clear_asset_drag();
             if dropped {
                 place_asset = Some(asset);
+            } else if clicked {
+                preview_asset = Some(asset);
             }
         }
     }
 
     if let Some(index) = switch_doc {
         app.switch_document(index);
+    }
+    if let Some(index) = preview_asset {
+        app.show_asset_preview(index);
     }
     if let Some(index) = delete_doc {
         app.cancel_transform();
@@ -142,6 +153,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         app.place_asset(index, ui);
     }
     if let Some(index) = delete_asset {
+        if app.preview_asset.as_ref() == app.workspace.assets.get(index).map(|a| &a.id) {
+            app.close_asset_preview();
+        }
         app.workspace.delete_asset(index);
         app.dirty = true;
     }

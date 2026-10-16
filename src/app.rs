@@ -45,6 +45,12 @@ pub struct EditorApp {
     pub wand_threshold: f32,
     pub fill_threshold: f32,
     pub dim_outside_selection: bool,
+    pub preview_asset: Option<String>,
+    preview_asset_dirty: bool,
+    preview_document_view: Option<(Vec2, f32, f32)>,
+    pub selection_brush_erase: bool,
+    lasso_points: Vec<Vec2>,
+    selection_brush_last: Option<Vec2>,
     pub selection: Option<Selection>,
     pub selection_anchor: Option<(u32, u32)>,
     pub selection_current: Option<(u32, u32)>,
@@ -93,7 +99,13 @@ impl Default for EditorApp {
             brush_color: [0.0, 0.0, 0.0, 1.0],
             wand_threshold: 32.0,
             fill_threshold: 32.0,
-            dim_outside_selection: false,
+            dim_outside_selection: true,
+            preview_asset: None,
+            preview_asset_dirty: false,
+            preview_document_view: None,
+            selection_brush_erase: false,
+            lasso_points: Vec::new(),
+            selection_brush_last: None,
             selection: None,
             selection_anchor: None,
             selection_current: None,
@@ -228,10 +240,15 @@ impl EditorApp {
         }
         if selection.is_empty() { return Err("Select an area to use as the inpaint mask".into()); }
         crate::comfyui::scaled_size(p.width, p.height, self.ai.scale)?;
-        Ok(image::RgbaImage::from_fn(p.width, p.height, |x, y| {
+        let mask = image::RgbaImage::from_fn(p.width, p.height, |x, y| {
             let value = if selection.contains(x, y) { 255 } else { 0 };
             image::Rgba([value, value, value, 255])
-        }))
+        });
+        let softness = self.ai.mask_softness;
+        if !softness.is_finite() || !(0.0..=256.0).contains(&softness) {
+            return Err("Mask softness must be between 0 and 256 px".into());
+        }
+        Ok(if softness > 0.0 { image::imageops::blur(&mask, softness) } else { mask })
     }
 
     /// Crop before worker-side scaling; retain document coordinates for Accept / Fit.
@@ -374,14 +391,54 @@ impl EditorApp {
 
     pub fn brush_last_active(&self) -> bool {
         self.brush_last.is_some() || self.transform_drag.is_some()
+            || !self.lasso_points.is_empty() || self.selection_brush_last.is_some()
     }
 
     pub fn has_floating_transform(&self) -> bool {
         self.floating.is_some()
     }
 
+    pub fn display_size(&self) -> Option<(u32, u32)> {
+        if let Some(id) = &self.preview_asset {
+            return self.workspace.assets.iter().find(|a| &a.id == id).map(|a| (a.width, a.height));
+        }
+        self.image_size
+    }
+
+    pub fn show_asset_preview(&mut self, index: usize) {
+        let Some(asset) = self.workspace.assets.get(index) else { return; };
+        let id = asset.id.clone();
+        if self.preview_asset.as_ref() == Some(&id) { return; }
+        self.commit_transform();
+        self.brush_last = None;
+        self.lasso_points.clear();
+        self.selection_brush_last = None;
+        self.selection_anchor = None;
+        self.selection_current = None;
+        if self.preview_asset.is_none() {
+            self.preview_document_view = Some((self.pan, self.zoom, self.rotation));
+        }
+        self.preview_asset = Some(id);
+        self.preview_asset_dirty = true;
+        self.rotation = 0.0;
+        self.fit_image = true;
+    }
+
+    pub fn close_asset_preview(&mut self) {
+        if self.preview_asset.take().is_some() {
+            self.layers_reload = true;
+            self.selection_mask_dirty = true;
+            if let Some((pan, zoom, rotation)) = self.preview_document_view.take() {
+                self.pan = pan;
+                self.zoom = zoom;
+                self.rotation = rotation;
+            }
+            self.fit_image = false;
+        }
+    }
+
     pub fn canvas_view(&self) -> Option<CanvasView> {
-        let (width, height) = self.image_size?;
+        let (width, height) = self.display_size()?;
         Some(CanvasView {
             center: self.canvas_rect.min + rect_size(self.canvas_rect) * 0.5 + self.pan,
             zoom: self.zoom,
@@ -392,6 +449,7 @@ impl EditorApp {
     }
 
     pub fn new_project(&mut self, ui: &mut Ui) {
+        self.close_asset_preview();
         self.cancel_transform();
         self.workspace = Workspace::default();
         self.image_size = None;
@@ -524,6 +582,7 @@ impl EditorApp {
     }
 
     pub fn switch_document(&mut self, index: usize) {
+        self.close_asset_preview();
         if index == self.workspace.active_document {
             return;
         }
@@ -536,6 +595,7 @@ impl EditorApp {
     }
 
     pub fn place_asset(&mut self, asset_index: usize, ui: &mut Ui) {
+        self.close_asset_preview();
         self.cancel_transform();
         match self.workspace.place_asset_on_active(asset_index) {
             Ok(()) => {
@@ -689,6 +749,7 @@ impl EditorApp {
     }
 
     pub fn refresh_image(&mut self) -> Result<(), String> {
+        self.close_asset_preview();
         self.cancel_transform();
         self.history.clear();
         match self.workspace.active_mut().decoded_rgba()? {
@@ -763,7 +824,7 @@ impl EditorApp {
     }
 
     pub fn fit_to_canvas(&mut self) {
-        let Some((width, height)) = self.image_size else {
+        let Some((width, height)) = self.display_size() else {
             return;
         };
         let available = (rect_size(self.canvas_rect) - Vec2::splat(32.0)).max(Vec2::splat(1.0));
@@ -782,14 +843,18 @@ impl EditorApp {
             self.commit_transform();
         }
         self.commit_selection_drag();
+        self.lasso_points.clear();
+        self.selection_brush_last = None;
         self.brush_last = None;
         self.tool = tool;
-        if tool == Tool::Transform {
+        if tool == Tool::Transform && self.preview_asset.is_none() {
             self.begin_transform();
         }
     }
 
     pub fn clear_selection(&mut self) {
+        self.lasso_points.clear();
+        self.selection_brush_last = None;
         self.selection = None;
         self.selection_anchor = None;
         self.selection_current = None;
@@ -827,16 +892,74 @@ impl EditorApp {
     }
 
     pub fn handle_canvas_edit(&mut self, view: CanvasView) {
+        if self.preview_asset.is_some() { return; }
         let (width, height) = (view.width, view.height);
         if width == 0 || height == 0 {
             return;
         }
         match self.tool {
             Tool::RectangleSelect => self.handle_rect_select(view),
+            Tool::Lasso => self.handle_lasso(view),
+            Tool::SelectionBrush => self.handle_selection_brush(view),
             Tool::MagicWand => self.handle_wand(view),
             Tool::Fill => self.handle_fill(view),
             Tool::Brush => self.handle_brush(view, self.erase_mode),
             Tool::Transform => self.handle_transform(view),
+        }
+    }
+
+    fn handle_lasso(&mut self, view: CanvasView) {
+        if self.input.key_escape {
+            self.lasso_points.clear();
+            return;
+        }
+        let point = view.screen_to_image(self.input.mouse_pos);
+        if self.input.mouse_pressed && self.canvas_rect.contains(self.input.mouse_pos) {
+            self.lasso_points.clear();
+            self.lasso_points.push(point);
+            self.selection_mode = self.select_mode();
+        }
+        if (self.input.mouse_down || self.input.mouse_released)
+            && let Some(last) = self.lasso_points.last()
+            && last.distance_squared(point) > 0.01
+        {
+            self.lasso_points.push(point);
+        }
+        if self.input.mouse_released && !self.lasso_points.is_empty() {
+            let selection = Selection::from_polygon(&self.lasso_points, view.width, view.height);
+            self.lasso_points.clear();
+            self.apply_selection(selection, self.selection_mode);
+        }
+    }
+
+    fn handle_selection_brush(&mut self, view: CanvasView) {
+        let point = view.screen_to_image(self.input.mouse_pos);
+        if self.input.mouse_pressed && brush_overlaps_image(self.input.mouse_pos, self.brush_size * view.zoom * 0.5, view) {
+            self.selection_brush_last = Some(point);
+        }
+        if (self.input.mouse_down || self.input.mouse_pressed || self.input.mouse_released)
+            && let Some(previous) = self.selection_brush_last
+        {
+            let selection = self.selection.get_or_insert_with(|| Selection {
+                width: view.width, height: view.height,
+                mask: vec![0; view.width as usize * view.height as usize],
+            });
+            selection.paint_segment(previous, point, self.brush_size, self.selection_brush_erase);
+            self.selection_brush_last = Some(point);
+            self.selection_mask_dirty = true;
+        }
+        if self.input.mouse_released {
+            self.selection_brush_last = None;
+            // Keep an empty mask: an erased selection must not turn into an unrestricted canvas.
+        }
+    }
+
+    pub fn draw_lasso_path(&self, ui: &mut Ui, view: CanvasView) {
+        for pair in self.lasso_points.windows(2) {
+            ui.line(view.image_to_screen(pair[0]), view.image_to_screen(pair[1]), 1.0, [1.0, 0.85, 0.2, 1.0]);
+        }
+        if let (Some(first), Some(last)) = (self.lasso_points.first(), self.lasso_points.last()) {
+            ui.line(view.image_to_screen(*last), view.image_to_screen(*first), 1.0, [1.0, 0.85, 0.2, 1.0]);
         }
     }
 
@@ -1326,7 +1449,7 @@ impl Scene for EditorApp {
             || self.floating.is_some()
             || self.workspace.asset_drag.is_some()
             || thumb_waiting
-            || (self.tool == Tool::Brush && self.canvas_rect.contains(self.input.mouse_pos))
+            || (matches!(self.tool, Tool::Brush | Tool::SelectionBrush) && self.canvas_rect.contains(self.input.mouse_pos))
             || !self.dirty_tiles.is_empty()
     }
 
@@ -1346,6 +1469,17 @@ impl Scene for EditorApp {
         queue: &wgpu::Queue,
         canvas: &mut CanvasRenderer,
     ) {
+        if let Some(id) = &self.preview_asset
+            && let Some(asset) = self.workspace.assets.iter().find(|a| &a.id == id)
+        {
+            if self.preview_asset_dirty {
+                canvas.upload_all_layers(device, queue, &[&asset.pixels], asset.width, asset.height);
+                self.preview_asset_dirty = false;
+            }
+            canvas.clear_transform();
+            canvas.set_selection_mask(device, queue, None, 0, 0);
+            return;
+        }
         if self.image_size.is_none() {
             if self.canvas_cleared || canvas.has_image() {
                 canvas.clear();
@@ -1414,6 +1548,12 @@ impl Scene for EditorApp {
 
     fn canvas_present(&self) -> Option<(Rect, CanvasView, CanvasOverlay)> {
         let view = self.canvas_view()?;
+        if self.preview_asset.is_some() {
+            return Some((self.canvas_rect, view, CanvasOverlay {
+                layers: vec![LayerDraw { visible: true, opacity: 1.0 }],
+                ..Default::default()
+            }));
+        }
         let mut overlay = CanvasOverlay {
             dim_outside: self.dim_outside_selection && self.selection.is_some(),
             layers: self
@@ -1428,7 +1568,7 @@ impl Scene for EditorApp {
                 .collect(),
             ..Default::default()
         };
-        if self.tool == Tool::Brush {
+        if matches!(self.tool, Tool::Brush | Tool::SelectionBrush) {
             let radius = (self.brush_size * self.zoom * 0.5).max(2.5);
             let expanded = Rect {
                 min: self.canvas_rect.min - Vec2::splat(radius),
@@ -1542,6 +1682,90 @@ fn brush_overlaps_image(point: Vec2, radius_screen: f32, view: CanvasView) -> bo
 #[cfg(test)]
 mod ai_tests {
     use super::*;
+
+    #[test]
+    fn asset_preview_is_read_only_and_switching_back_preserves_document_state() {
+        let mut app = EditorApp::default();
+        app.project_mut().import_rgba(&[10, 20, 30, 128].repeat(16), 4, 4).unwrap();
+        app.refresh_image().unwrap();
+        app.selection = Some(Selection::all(4, 4));
+        let asset = app.workspace.import_asset_rgba("preview".into(), &[255, 0, 0, 255].repeat(6), 3, 2).unwrap();
+        app.pan = Vec2::new(12.0, 34.0);
+        app.zoom = 2.0;
+        app.rotation = 37.0;
+        app.show_asset_preview(asset);
+        assert_eq!(app.display_size(), Some((3, 2)));
+        let view = app.canvas_view().unwrap();
+        app.input.mouse_pressed = true;
+        app.input.mouse_down = true;
+        app.input.mouse_pos = view.image_to_screen(Vec2::splat(0.5));
+        app.handle_canvas_edit(view);
+        assert_eq!(app.project().layers[0].pixels, [10, 20, 30, 128].repeat(16));
+        assert_eq!(app.workspace.assets[asset].pixels, [255, 0, 0, 255].repeat(6));
+        app.switch_document(0);
+        assert_eq!(app.display_size(), Some((4, 4)));
+        assert_eq!((app.pan, app.zoom, app.rotation), (Vec2::new(12.0, 34.0), 2.0, 37.0));
+        assert_eq!(app.selection.as_ref().unwrap().mask, vec![1; 16]);
+        assert!(app.layers_reload && app.selection_mask_dirty);
+    }
+
+    #[test]
+    fn inpaint_softness_blurs_mask_without_changing_selection_or_alpha() {
+        let mut app = EditorApp::default();
+        app.project_mut().import_rgba(&[1, 2, 3, 255].repeat(9 * 9), 9, 9).unwrap();
+        app.selection = Some(Selection::from_rect(PixelRect { min_x: 3, min_y: 3, max_x: 6, max_y: 6 }, 9, 9));
+        let original = app.selection.as_ref().unwrap().mask.clone();
+        let sharp = app.ai_mask().unwrap();
+        assert_eq!(sharp.get_pixel(2, 4).0, [0, 0, 0, 255]);
+        app.ai.mask_softness = 1.5;
+        let soft = app.ai_mask().unwrap();
+        assert!(soft.get_pixel(2, 4)[0] > 0);
+        assert!(soft.get_pixel(4, 4)[0] < 255);
+        assert!(soft.pixels().all(|p| p[3] == 255 && p[0] == p[1] && p[1] == p[2]));
+        assert_eq!(app.selection.as_ref().unwrap().mask, original);
+    }
+
+    #[test]
+    fn selection_tools_handle_rotated_view_modifiers_and_release_outside_canvas() {
+        let mut app = EditorApp::default();
+        app.project_mut().import_rgba(&[0, 0, 0, 255].repeat(100), 10, 10).unwrap();
+        app.refresh_image().unwrap();
+        app.canvas_rect = Rect::from_min_size(Vec2::ZERO, Vec2::splat(200.0));
+        app.rotation = 45.0;
+        app.zoom = 4.0;
+        app.set_tool(Tool::Lasso);
+        let view = app.canvas_view().unwrap();
+        for (i, point) in [Vec2::new(1.0, 1.0), Vec2::new(5.0, 1.0), Vec2::new(1.0, 5.0)].into_iter().enumerate() {
+            app.input = FrameInput::default();
+            app.input.mouse_pressed = i == 0;
+            app.input.mouse_down = true;
+            app.input.mouse_pos = view.image_to_screen(point);
+            app.handle_canvas_edit(view);
+        }
+        app.input.mouse_down = false;
+        app.input.mouse_released = true;
+        app.handle_canvas_edit(view);
+        assert!(app.selection.as_ref().unwrap().contains(1, 1));
+        assert!(!app.selection.as_ref().unwrap().contains(4, 4));
+        app.set_tool(Tool::SelectionBrush);
+        app.brush_size = 1.0;
+        app.input = FrameInput::default();
+        app.input.mouse_pressed = true;
+        app.input.mouse_down = true;
+        app.input.mouse_pos = view.image_to_screen(Vec2::new(8.5, 8.5));
+        app.handle_canvas_edit(view);
+        assert!(app.selection.as_ref().unwrap().contains(1, 1));
+        assert!(app.selection.as_ref().unwrap().contains(8, 8));
+        app.selection_brush_erase = true;
+        app.handle_canvas_edit(view);
+        assert!(!app.selection.as_ref().unwrap().contains(8, 8));
+        app.input = FrameInput::default();
+        app.input.mouse_released = true;
+        app.input.mouse_pos = Vec2::splat(300.0);
+        app.handle_canvas_edit(view);
+        assert!(!app.brush_last_active());
+        assert!(app.project().layers[0].pixels.chunks_exact(4).all(|p| p == [0, 0, 0, 255]));
+    }
 
     #[test]
     fn inpaint_requires_nonempty_matching_selection_and_full_image_source() {

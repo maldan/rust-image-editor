@@ -24,10 +24,16 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             ui.label(&format!("Opacity: {:.0}%", app.brush_opacity * 100.0));
             ui.slider("brush_opacity", &mut app.brush_opacity, 0.01..=1.0);
         }
-        Tool::RectangleSelect => {
-            ui.label("Drag on the image to select an area.");
+        Tool::RectangleSelect | Tool::Lasso => {
+            ui.label(if app.tool == Tool::Lasso { "Draw a freehand outline to select." } else { "Drag on the image to select an area." });
             ui.space(8.0);
             ui.label("Shift — add · Ctrl — subtract");
+        }
+        Tool::SelectionBrush => {
+            ui.checkbox("selection_brush_erase", "Erase selection", &mut app.selection_brush_erase);
+            ui.label("Paint to add to selection.");
+            ui.label(&format!("Size: {:.0} px", app.brush_size));
+            ui.slider_stepped("selection_brush_size", &mut app.brush_size, 1.0..=256.0, 1.0);
         }
         Tool::MagicWand => {
             ui.label("Click a pixel to select a connected region.");
@@ -77,10 +83,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             rect.max_y.saturating_sub(rect.min_y)
         ));
         ui.space(8.0);
-        if ui.button("clear_selection", "Clear selection").clicked() {
-            app.clear_selection();
-        }
     } else {
-        ui.label("None — whole image is editable.");
+        ui.label(if app.selection.is_some() { "Empty selection" } else { "None — whole image is editable." });
+    }
+    if app.selection.is_some() && ui.button("clear_selection", "Clear selection").clicked() {
+        app.clear_selection();
     }
 }

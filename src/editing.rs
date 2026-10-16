@@ -2,6 +2,8 @@
 pub enum Tool {
     Brush,
     RectangleSelect,
+    Lasso,
+    SelectionBrush,
     MagicWand,
     Fill,
     Transform,
@@ -12,16 +14,20 @@ impl Tool {
         match self {
             Tool::Brush => "Brush",
             Tool::RectangleSelect => "Select",
+            Tool::Lasso => "Lasso",
+            Tool::SelectionBrush => "Select Brush",
             Tool::MagicWand => "Wand",
             Tool::Fill => "Fill",
             Tool::Transform => "Transform",
         }
     }
 
-    pub fn all() -> [Tool; 5] {
+    pub fn all() -> [Tool; 7] {
         [
             Tool::Brush,
             Tool::RectangleSelect,
+            Tool::Lasso,
+            Tool::SelectionBrush,
             Tool::MagicWand,
             Tool::Fill,
             Tool::Transform,
@@ -71,6 +77,50 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// Scanline polygon fill, testing pixel centers and clipping to the canvas.
+    pub fn from_polygon(points: &[glam::Vec2], width: u32, height: u32) -> Self {
+        let mut result = Self { width, height, mask: vec![0; width as usize * height as usize] };
+        if points.len() < 3 { return result; }
+        let min_y = points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min).floor().max(0.0) as u32;
+        let max_y = points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max).ceil().min(height as f32) as u32;
+        let mut crossings = Vec::new();
+        for y in min_y..max_y {
+            crossings.clear();
+            let scan_y = y as f32 + 0.5;
+            let mut previous = points[points.len() - 1];
+            for &current in points {
+                if (previous.y > scan_y) != (current.y > scan_y) {
+                    crossings.push(previous.x + (scan_y - previous.y) * (current.x - previous.x) / (current.y - previous.y));
+                }
+                previous = current;
+            }
+            crossings.sort_by(f32::total_cmp);
+            for pair in crossings.chunks_exact(2) {
+                let start = (pair[0] - 0.5).ceil().clamp(0.0, width as f32) as u32;
+                let end = (pair[1] - 0.5).ceil().clamp(0.0, width as f32) as u32;
+                for x in start..end { result.mask[(y * width + x) as usize] = 1; }
+            }
+        }
+        result
+    }
+
+    /// Paint a continuous circular selection stroke directly into the mask.
+    pub fn paint_segment(&mut self, from: glam::Vec2, to: glam::Vec2, size: f32, erase: bool) {
+        let bounds = brush_dirty_bounds(from.into(), to.into(), size, self.width, self.height);
+        let delta = to - from;
+        let length_sq = delta.length_squared();
+        let radius_sq = (size * 0.5).max(0.5).powi(2);
+        for y in bounds.min_y..bounds.max_y {
+            for x in bounds.min_x..bounds.max_x {
+                let point = glam::Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+                let t = if length_sq > 0.0 { ((point - from).dot(delta) / length_sq).clamp(0.0, 1.0) } else { 0.0 };
+                if point.distance_squared(from + delta * t) <= radius_sq {
+                    self.mask[(y * self.width + x) as usize] = u8::from(!erase);
+                }
+            }
+        }
+    }
+
     pub fn from_rect(rect: PixelRect, width: u32, height: u32) -> Self {
         let mut mask = vec![0u8; width as usize * height as usize];
         for y in rect.min_y..rect.max_y {
@@ -937,6 +987,32 @@ impl FloatingTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lasso_fills_concave_polygon_and_clips_outside_canvas() {
+        let points = [(-2.0, -2.0), (4.0, -2.0), (4.0, 1.0), (1.0, 1.0), (1.0, 4.0), (-2.0, 4.0)].map(|(x, y)| glam::Vec2::new(x, y));
+        let selection = Selection::from_polygon(&points, 5, 5);
+        assert!(selection.contains(0, 3));
+        assert!(selection.contains(3, 0));
+        assert!(!selection.contains(2, 2));
+        assert!(!selection.contains(4, 0));
+        let reversed: Vec<_> = points.into_iter().rev().collect();
+        assert_eq!(selection.mask, Selection::from_polygon(&reversed, 5, 5).mask);
+        assert!(Selection::from_polygon(&points[..2], 5, 5).is_empty());
+    }
+
+    #[test]
+    fn selection_brush_has_continuous_coverage_adds_and_erases_locally() {
+        let mut selection = Selection::from_polygon(&[], 12, 8);
+        selection.paint_segment(glam::Vec2::new(-2.0, 2.5), glam::Vec2::new(10.5, 2.5), 3.0, false);
+        for x in 0..11 { assert!(selection.contains(x, 2)); }
+        selection.paint_segment(glam::Vec2::new(6.5, 2.5), glam::Vec2::new(6.5, 6.5), 1.0, false);
+        selection.paint_segment(glam::Vec2::new(3.5, 2.5), glam::Vec2::new(3.5, 2.5), 1.0, true);
+        assert!(!selection.contains(3, 2));
+        assert!(selection.contains(2, 2));
+        assert!(selection.contains(6, 6));
+        assert!(!selection.contains(11, 7));
+    }
 
     #[test]
     fn transform_keeps_pixels_until_commit_clear() {

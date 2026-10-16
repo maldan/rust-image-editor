@@ -52,6 +52,7 @@ pub struct AiDialog {
     pub open: bool,
     pub mode: AiMode,
     pub denoise: f32,
+    pub mask_softness: f32,
     pub draw_settings: crate::comfyui::DrawSettings,
     pub catalog: crate::comfyui::Catalog,
     pub catalog_load: Option<crate::comfyui::CatalogLoad>,
@@ -83,6 +84,7 @@ impl Default for AiDialog {
             open: false,
             mode: AiMode::Edit,
             denoise: 1.0,
+            mask_softness: 0.0,
             draw_settings: Default::default(),
             catalog: Default::default(),
             catalog_load: None,
@@ -372,6 +374,11 @@ fn source_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
     }
     if ai.mode == AiMode::Inpaint {
         ui.label("Mask: selection (white = selected, black = outside)");
+        ui.horizontal(|ui| {
+            ui.label("Mask softness (px)");
+            ui.drag_float("ai_mask_softness", &mut ai.mask_softness, 0.5);
+        });
+        ai.mask_softness = ai.mask_softness.clamp(0.0, 256.0);
     }
     ui.horizontal(|ui| {
         ui.label("Input scale");
