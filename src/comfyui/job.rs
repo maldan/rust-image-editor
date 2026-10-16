@@ -24,6 +24,28 @@ pub enum JobResult {
     Cancelled,
 }
 
+enum InputWorkflow {
+    Edit(String),
+    Inpaint {
+        settings: super::DrawSettings,
+        denoise: f32,
+        mask: RgbaImage,
+    },
+    Redraw {
+        settings: super::DrawSettings,
+        denoise: f32,
+    },
+}
+
+enum Request {
+    Input {
+        pixels: RgbaImage,
+        scale: f32,
+        workflow: InputWorkflow,
+    },
+    Draw(super::DrawSettings),
+}
+
 pub struct Job {
     receiver: mpsc::Receiver<JobResult>,
     pub progress: Arc<Mutex<Progress>>,
@@ -35,10 +57,68 @@ impl Job {
     pub(crate) fn with_result(result: JobResult) -> Self {
         let (sender, receiver) = mpsc::channel();
         sender.send(result).ok();
-        Self { receiver, progress: Arc::new(Mutex::new(Progress::default())), cancel: Arc::new(AtomicBool::new(false)) }
+        Self {
+            receiver,
+            progress: Arc::new(Mutex::new(Progress::default())),
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     pub fn start(config: HostConfig, pixels: RgbaImage, scale: f32, prompt: String) -> Self {
+        Self::start_request(
+            config,
+            Request::Input {
+                pixels,
+                scale,
+                workflow: InputWorkflow::Edit(prompt),
+            },
+        )
+    }
+
+    pub fn start_draw(config: HostConfig, settings: super::DrawSettings) -> Self {
+        Self::start_request(config, Request::Draw(settings))
+    }
+
+    pub fn start_redraw(
+        config: HostConfig,
+        pixels: RgbaImage,
+        scale: f32,
+        settings: super::DrawSettings,
+        denoise: f32,
+    ) -> Self {
+        Self::start_request(
+            config,
+            Request::Input {
+                pixels,
+                scale,
+                workflow: InputWorkflow::Redraw { settings, denoise },
+            },
+        )
+    }
+
+    pub fn start_inpaint(
+        config: HostConfig,
+        pixels: RgbaImage,
+        mask: RgbaImage,
+        scale: f32,
+        settings: super::DrawSettings,
+        denoise: f32,
+    ) -> Self {
+        Self::start_request(
+            config,
+            Request::Input {
+                pixels,
+                scale,
+                workflow: InputWorkflow::Inpaint {
+                    settings,
+                    denoise,
+                    mask,
+                },
+            },
+        )
+    }
+
+    fn start_request(config: HostConfig, request: Request) -> Self {
         let (sender, receiver) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(Mutex::new(Progress {
@@ -52,9 +132,7 @@ impl Job {
             let stop_ws = Arc::new(AtomicBool::new(false));
             let result = run(
                 config.clone(),
-                pixels,
-                scale,
-                prompt,
+                request,
                 &worker_cancel,
                 worker_progress,
                 prompt_id.clone(),
@@ -126,24 +204,13 @@ fn check_cancel(cancel: &AtomicBool) -> Result<(), String> {
 
 fn run(
     config: HostConfig,
-    pixels: RgbaImage,
-    scale: f32,
-    prompt: String,
+    request: Request,
     cancel: &AtomicBool,
     progress: Arc<Mutex<Progress>>,
     prompt_id: Arc<Mutex<Option<String>>>,
     stop_ws: Arc<AtomicBool>,
 ) -> Result<RgbaImage, String> {
     let client = Client::new(config.clone())?;
-    let (w, h) = super::scaled_size(pixels.width(), pixels.height(), scale)?;
-    check_cancel(cancel)?;
-    let pixels = if pixels.dimensions() == (w, h) {
-        pixels
-    } else {
-        image::imageops::resize(&pixels, w, h, image::imageops::FilterType::Lanczos3)
-    };
-    check_cancel(cancel)?;
-    let png = crate::project::encode_png_rgba(pixels.as_raw(), w, h)?;
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let client_id = format!(
         "mega-{}-{}-{}",
@@ -154,12 +221,70 @@ fn run(
             .as_nanos(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     );
-    progress.lock().unwrap().message = "Uploading input…".into();
-    let filename = client.upload(png, &format!("{client_id}.png"))?;
     check_cancel(cancel)?;
     // Fresh randomness for every Run/Regenerate; stay within exact JSON integer range.
     let seed = rand::random::<u64>() & ((1_u64 << 53) - 1);
-    let (graph, save_node) = super::workflow::prepare(&filename, &prompt, seed)?;
+    let (graph, save_node) = match request {
+        Request::Draw(settings) => super::workflow::prepare_draw(&settings, seed)?,
+        Request::Input {
+            pixels,
+            scale,
+            workflow,
+        } => {
+            if let InputWorkflow::Inpaint {
+                mask,
+                settings,
+                denoise,
+            } = &workflow
+            {
+                settings.validate_redraw(*denoise)?;
+                if mask.dimensions() != pixels.dimensions() {
+                    return Err("Inpaint mask must match the input image size".into());
+                }
+            }
+            let (w, h) = super::scaled_size(pixels.width(), pixels.height(), scale)?;
+            check_cancel(cancel)?;
+            let pixels = if pixels.dimensions() == (w, h) {
+                pixels
+            } else {
+                image::imageops::resize(&pixels, w, h, image::imageops::FilterType::Lanczos3)
+            };
+            check_cancel(cancel)?;
+            let png = crate::project::encode_png_rgba(pixels.as_raw(), w, h)?;
+            progress.lock().unwrap().message = "Uploading input...".into();
+            let filename = client.upload(png)?;
+            check_cancel(cancel)?;
+            match workflow {
+                InputWorkflow::Inpaint {
+                    settings,
+                    denoise,
+                    mask,
+                } => {
+                    let mask = if mask.dimensions() == (w, h) {
+                        mask
+                    } else {
+                        image::imageops::resize(&mask, w, h, image::imageops::FilterType::Nearest)
+                    };
+                    check_cancel(cancel)?;
+                    progress.lock().unwrap().message = "Uploading mask...".into();
+                    let png = crate::project::encode_png_rgba(mask.as_raw(), w, h)?;
+                    let mask_filename = client.upload_mask(png)?;
+                    check_cancel(cancel)?;
+                    super::workflow::prepare_inpaint(
+                        &filename,
+                        &mask_filename,
+                        &settings,
+                        denoise,
+                        seed,
+                    )?
+                }
+                InputWorkflow::Edit(prompt) => super::workflow::prepare(&filename, &prompt, seed)?,
+                InputWorkflow::Redraw { settings, denoise } => {
+                    super::workflow::prepare_redraw(&filename, &settings, denoise, seed)?
+                }
+            }
+        }
+    };
     super::ws::listen(
         config,
         client_id.clone(),

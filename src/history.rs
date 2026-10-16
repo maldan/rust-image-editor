@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::editing::PixelRect;
+use crate::project::{Layer, Project};
 use crate::tiles::TILE_SIZE;
 
 const MAX_ENTRIES: usize = 64;
@@ -87,47 +88,120 @@ impl EditCapture {
     }
 }
 
+enum HistoryEntry {
+    Pixels(HistoryEdit),
+    DeleteLayer {
+        index: usize,
+        // Ownership moves between the document and history on Undo / Redo.
+        removed: Option<Layer>,
+        active_before: usize,
+        active_after: usize,
+        width: u32,
+        height: u32,
+    },
+}
+
+pub enum HistoryChange {
+    Pixels { layer: usize, rect: PixelRect },
+    Layers,
+}
+
 #[derive(Default)]
 pub struct History {
-    undo: Vec<HistoryEdit>,
-    redo: Vec<HistoryEdit>,
+    undo: Vec<HistoryEntry>,
+    redo: Vec<HistoryEntry>,
 }
 
 impl History {
     pub fn push(&mut self, edit: HistoryEdit) {
-        self.undo.push(edit);
+        self.push_entry(HistoryEntry::Pixels(edit));
+    }
+
+    fn push_entry(&mut self, entry: HistoryEntry) {
+        self.undo.push(entry);
         if self.undo.len() > MAX_ENTRIES {
             self.undo.remove(0);
         }
         self.redo.clear();
     }
 
-    pub fn undo(
-        &mut self,
-        layers: &mut [crate::project::Layer],
-        width: u32,
-        height: u32,
-    ) -> Option<(usize, PixelRect)> {
-        let edit = self.undo.pop()?;
-        let layer = edit.layer;
-        let pixels = layers.get_mut(layer).map(|l| l.pixels.as_mut_slice())?;
-        let rect = apply_tiles(pixels, width, height, &edit.before)?;
-        self.redo.push(edit);
-        Some((layer, rect))
+    pub fn delete_layer(&mut self, project: &mut Project, index: usize) -> bool {
+        let (width, height, active_before) = (project.width, project.height, project.active_layer);
+        let Some(layer) = project.delete_layer(index) else {
+            return false;
+        };
+        self.push_entry(HistoryEntry::DeleteLayer {
+            index,
+            removed: Some(layer),
+            active_before,
+            active_after: project.active_layer,
+            width,
+            height,
+        });
+        true
     }
 
-    pub fn redo(
-        &mut self,
-        layers: &mut [crate::project::Layer],
-        width: u32,
-        height: u32,
-    ) -> Option<(usize, PixelRect)> {
-        let edit = self.redo.pop()?;
-        let layer = edit.layer;
-        let pixels = layers.get_mut(layer).map(|l| l.pixels.as_mut_slice())?;
-        let rect = apply_tiles(pixels, width, height, &edit.after)?;
-        self.undo.push(edit);
-        Some((layer, rect))
+    pub fn undo(&mut self, project: &mut Project) -> Option<HistoryChange> {
+        let change = match self.undo.last_mut()? {
+            HistoryEntry::Pixels(edit) => {
+                let pixels = &mut project.layers.get_mut(edit.layer)?.pixels;
+                let rect = apply_tiles(pixels, project.width, project.height, &edit.before)?;
+                HistoryChange::Pixels {
+                    layer: edit.layer,
+                    rect,
+                }
+            }
+            HistoryEntry::DeleteLayer {
+                index,
+                removed,
+                active_before,
+                width,
+                height,
+                ..
+            } => {
+                if *index > project.layers.len() {
+                    return None;
+                }
+                project.layers.insert(*index, removed.take()?);
+                project.width = *width;
+                project.height = *height;
+                project.active_layer = *active_before;
+                project.sync_manifest_pub();
+                HistoryChange::Layers
+            }
+        };
+        self.redo.push(self.undo.pop().unwrap());
+        Some(change)
+    }
+
+    pub fn redo(&mut self, project: &mut Project) -> Option<HistoryChange> {
+        let change = match self.redo.last_mut()? {
+            HistoryEntry::Pixels(edit) => {
+                let pixels = &mut project.layers.get_mut(edit.layer)?.pixels;
+                let rect = apply_tiles(pixels, project.width, project.height, &edit.after)?;
+                HistoryChange::Pixels {
+                    layer: edit.layer,
+                    rect,
+                }
+            }
+            HistoryEntry::DeleteLayer {
+                index,
+                removed,
+                active_after,
+                ..
+            } => {
+                *removed = Some(project.delete_layer(*index)?);
+                project.active_layer = *active_after;
+                project.sync_manifest_pub();
+                HistoryChange::Layers
+            }
+        };
+        self.undo.push(self.redo.pop().unwrap());
+        Some(change)
+    }
+
+    pub fn clear_redo(&mut self) {
+        self.redo.clear();
     }
 
     pub fn clear(&mut self) {
@@ -148,8 +222,7 @@ fn snapshot_tile(pixels: &[u8], width: u32, height: u32, tx: u32, ty: u32) -> Op
     for row in 0..h {
         let src = (((y + row) * width + x) * 4) as usize;
         let dst = (row * w * 4) as usize;
-        data[dst..dst + (w * 4) as usize]
-            .copy_from_slice(&pixels[src..src + (w * 4) as usize]);
+        data[dst..dst + (w * 4) as usize].copy_from_slice(&pixels[src..src + (w * 4) as usize]);
     }
     Some(TileSnapshot { tx, ty, w, h, data })
 }
@@ -218,16 +291,24 @@ mod tests {
         let edit = capture.finish(&pixels).unwrap();
         let mut history = History::default();
         history.push(edit);
-        let mut layers = vec![crate::project::Layer {
+        let layers = vec![crate::project::Layer {
             name: "L".into(),
             visible: true,
             opacity: 1.0,
             pixels: pixels.clone(),
         }];
-        let (_, rect) = history.undo(&mut layers, 128, 128).unwrap();
-        assert_eq!(layers[0].pixels[0], 9);
+        let mut project = Project {
+            layers,
+            width: 128,
+            height: 128,
+            ..Default::default()
+        };
+        let HistoryChange::Pixels { rect, .. } = history.undo(&mut project).unwrap() else {
+            panic!("Expected pixel edit")
+        };
+        assert_eq!(project.layers[0].pixels[0], 9);
         assert!(!rect.is_empty());
-        history.redo(&mut layers, 128, 128).unwrap();
-        assert_eq!(layers[0].pixels[0], 42);
+        history.redo(&mut project).unwrap();
+        assert_eq!(project.layers[0].pixels[0], 42);
     }
 }

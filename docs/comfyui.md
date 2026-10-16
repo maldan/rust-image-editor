@@ -1,5 +1,67 @@
 # ComfyUI backend — черновик спеки
 
+### Inpaint Image (`image.sd_inpaint`)
+
+**AI → Inpaint Image…** использует источник **Current layer / Whole document** без режима
+Selection. Изображение отправляется целиком; непустое текущее выделение служит маской на весь
+холст: выбранные пиксели белые, остальные чёрные, альфа маски всегда 255. Input scale применяется
+к обоим PNG с одинаковыми размерами; маска масштабируется nearest-neighbor без сглаживания.
+Файл изображения — `mega-image-editor-input.png`, маска — `mega-image-editor-mask.png`, оба
+загружаются с `overwrite=true`. Фактические имена из ответов загрузки подставляются в `Image`
+и `Mask` соответственно; `Mask.channel=red`, цепочка `SetLatentNoiseMask` сохраняется из схемы.
+Модель, LoRA, промпты, denoise, кеш списков и обработка результата общие с Redraw. Accept
+добавляет слой **AI Inpaint**, Fit Image подгоняет результат под исходный холст.
+
+В Draw / Redraw / Inpaint сначала видна только первая LoRA. Выбор первой открывает вторую,
+выбор второй — третью. Снятие выбора предыдущей скрывает следующие и очищает их имена,
+чтобы скрытые LoRA не участвовали в генерации.
+
+Вход Edit/Redraw (любой Source) загружается под постоянным именем
+`mega-image-editor-input.png` с `overwrite=true`: повторные Run/Regenerate заменяют этот файл.
+`client_id` и seed по-прежнему новые для каждого запуска. Имена серверных результатов остаются
+под управлением Save-ноды workflow.
+
+### Selection как источник (Edit Image и Redraw Image)
+
+В Source доступны **Current layer / Whole document / Selection**. Selection берёт композицию
+видимых слоёв в AABB выделения. Пиксели внутри AABB, не входящие в маску выделения, отправляются
+как прозрачные RGBA; прозрачность выбранных пикселей сохраняется. Без непустого выделения запуск
+недоступен. Input scale применяется после обрезки; размер входа в модалке считается от AABB.
+
+Границы AABB в координатах документа сохраняются при запуске. **Accept + Fit Image** подгоняет
+результат под этот прямоугольник и вставляет в его исходную позицию новым слоем. Без Fit результат
+вставляется в натуральном размере от верхнего левого угла AABB, с обрезкой по холсту.
+
+### Redraw Image (`image.sd_redraw`)
+
+**AI → Redraw Image…** использует тот же выбор источника, что Edit Image: текущий слой
+(сырые пиксели без opacity) или композиция видимых слоёв всего документа. Input scale меняет
+размер отправляемого PNG; итоговый размер показывается рядом. Вместо Width/Height используется
+размер входа: `Image` (`LoadImage`) → `VAE Encode` → `Sampler.latent_image`.
+
+Модель, до трёх LoRA с общей силой для model/clip, positive/negative prompt и обновляемый кеш
+списков общие с Draw. Дополнительный слайдер **Denoise** (0–1, default 1) записывается в
+`Sampler.inputs.denoise`. Preview, Cancel, Regenerate и Accept общие с другими AI-режимами;
+Accept добавляет слой **AI Redraw**. Fit Image использует исходные границы до Input scale.
+
+### Draw Image (`image.sd_draw`)
+
+Меню **AI → Draw Image…** открывает генерацию без входного изображения; доступно и в пустом документе.
+Модалка содержит модель (Default сохраняет `Model.inputs.ckpt_name` из embedded workflow),
+до трёх необязательных LoRA, positive/negative prompt и width/height (от 64 px, кратно 8,
+с общими ограничениями размера изображения). Одна сила LoRA от 0 до 1 записывается одновременно
+в `strength_model` и `strength_clip`. Невыбранные LoRA обходятся в графе без проверки их файлов сервером.
+
+Списки берутся из `/object_info/CheckpointLoaderSimple` и `/object_info/LoraLoader` в фоне.
+Кеш хранится в `%LOCALAPPDATA%/mega-image-editor/comfyui-catalog-<host hash>.json`, отдельно для каждого
+HTTP-хоста. Повторное открытие читает кеш; **Refresh models / LoRAs** запрашивает списки заново
+и обновляет кеш. При ошибке запроса прежние списки и кеш сохраняются.
+
+Run/Regenerate, случайный seed, preview, Cancel и Accept используют общий механизм Edit Image.
+Accept добавляет слой **AI Draw**; в пустом документе создаёт холст по размеру результата.
+В существующем документе Fit Image подгоняет результат под холст; без него сохраняет натуральный
+размер с обрезкой по холсту. До Accept документ не меняется.
+
 Статус: зафиксированные решения (черновик)  
 Референс клиента: `F:/python/brain/lib/comfyui.py`  
 Связь с продуктом: `SPEC.md` §5.2 (AI-сценарий), §8 (AI workflow / backend boundary)  

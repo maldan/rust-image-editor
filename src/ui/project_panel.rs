@@ -14,6 +14,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         let count = project.layers.len();
         let mut reorder: Option<(usize, usize)> = None;
         let mut select: Option<usize> = None;
+        let mut delete: Option<usize> = None;
         let mut visibility: Option<(usize, bool)> = None;
 
         for index in (0..count).rev() {
@@ -30,7 +31,12 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     {
                         visibility = Some((index, visible));
                     }
-                    ui.label(&name);
+                    let name_width = (ui.available_size().x / ui.scale() - 110.0).max(1.0);
+                    ui.label_fixed(name_width, &name);
+                    ui.spacer();
+                    if ui.icon_button(&format!("layer_delete_{index}"), "delete", false) {
+                        delete = Some(index);
+                    }
                 });
             });
 
@@ -60,7 +66,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         if let Some((index, visible)) = visibility {
             app.set_layer_visible(index, visible);
         }
-        if let Some((from, to)) = reorder {
+        if let Some(index) = delete {
+            app.delete_layer(index);
+        } else if let Some((from, to)) = reorder {
             app.move_layer_to(from, to);
             app.layer_drag = Some(to);
         }
@@ -82,9 +90,6 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     ui.space(12.0);
     if ui.button("layer_new", "New Layer").clicked() {
         app.add_layer();
-    }
-    if ui.button("layer_delete", "Delete Layer").clicked() {
-        app.delete_layer();
     }
 
     ui.space(16.0);
@@ -121,5 +126,68 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     ui.label(&app.workspace.active_doc().name);
     if app.dirty {
         ui.label("Modified");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::Vec2;
+
+    #[test]
+    fn right_hand_icon_deletes_its_row_without_changing_active_layer_and_can_undo() {
+        let mut app = EditorApp::default();
+        app.project_mut()
+            .import_rgba(&[1, 2, 3, 255], 1, 1)
+            .unwrap();
+        app.project_mut().add_layer();
+        app.project_mut().active_layer = 0;
+        app.refresh_image().unwrap();
+        let mut ui = Ui::new();
+        ui.load_builtin_icons();
+        let mut output = mega_ui::UiOutput::default();
+        for _ in 0..3 {
+            ui.begin_frame(mega_ui::UiInput {
+                viewport: Vec2::new(400.0, 900.0),
+                ..Default::default()
+            });
+            ui.horizontal(|ui| ui.flex_width(360.0, |ui| draw(ui, &mut app)));
+            output = ui.end_frame();
+        }
+        let icon = output
+            .draw_list
+            .iter()
+            .find(|c| {
+                c.rect.min.x > 320.0
+                    && c.rect.max.y < 200.0
+                    && (c.rect.width() - 16.0).abs() < 0.1
+                    && (c.rect.height() - 16.0).abs() < 0.1
+            })
+            .expect("Delete icon pinned to the right of the top row");
+        let position = (icon.rect.min + icon.rect.max) * 0.5;
+        for pressed in [true, false] {
+            app.input.mouse_pos = position;
+            app.input.mouse_pressed = pressed;
+            app.input.mouse_down = pressed;
+            app.input.mouse_released = !pressed;
+            ui.begin_frame(mega_ui::UiInput {
+                viewport: Vec2::new(400.0, 900.0),
+                mouse_pos: position,
+                mouse_pressed: pressed,
+                mouse_down: pressed,
+                mouse_released: !pressed,
+                ..Default::default()
+            });
+            ui.horizontal(|ui| ui.flex_width(360.0, |ui| draw(ui, &mut app)));
+            ui.end_frame();
+        }
+        assert_eq!(app.project().layers.len(), 1);
+        assert_eq!(app.project().layers[0].name, "Layer 1");
+        assert_eq!(app.project().active_layer, 0);
+        app.undo();
+        assert_eq!(app.project().layers.len(), 2);
+        assert_eq!(app.project().active_layer, 0);
+        app.redo();
+        assert_eq!(app.project().layers.len(), 1);
     }
 }

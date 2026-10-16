@@ -1,10 +1,13 @@
 mod client;
+mod catalog;
 mod config;
 mod job;
 mod workflow;
 mod ws;
 
 pub use config::HostConfig;
+pub use catalog::{Catalog, CatalogLoad};
+pub use workflow::DrawSettings;
 pub use job::{Job, JobResult};
 
 /// Shared by input size feedback and worker-side resizing.

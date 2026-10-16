@@ -188,19 +188,20 @@ impl Project {
         Ok(())
     }
 
-    pub fn delete_active_layer(&mut self) {
-        if self.layers.is_empty() {
-            return;
-        }
-        self.layers.remove(self.active_layer);
+    pub fn delete_layer(&mut self, index: usize) -> Option<Layer> {
+        if index >= self.layers.len() { return None; }
+        let layer = self.layers.remove(index);
         if self.layers.is_empty() {
             self.width = 0;
             self.height = 0;
             self.active_layer = 0;
+        } else if index < self.active_layer {
+            self.active_layer -= 1;
         } else {
             self.active_layer = self.active_layer.min(self.layers.len() - 1);
         }
         self.sync_manifest();
+        Some(layer)
     }
 
     pub fn move_layer_to(&mut self, from: usize, to: usize) {
@@ -503,7 +504,7 @@ mod tests {
         assert_eq!(project.active_layer, 1);
         project.move_layer_to(1, 0);
         assert_eq!(project.active_layer, 0);
-        project.delete_active_layer();
+        project.delete_layer(project.active_layer);
         assert_eq!(project.layers.len(), 1);
     }
 }

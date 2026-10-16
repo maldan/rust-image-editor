@@ -52,14 +52,22 @@ impl Client {
             .map_err(|_| "Invalid ComfyUI JSON response".into())
     }
 
-    pub fn upload(&self, bytes: Vec<u8>, name: &str) -> Result<String, String> {
+    pub fn upload(&self, bytes: Vec<u8>) -> Result<String, String> {
+        self.upload_named(bytes, "mega-image-editor-input.png")
+    }
+
+    pub fn upload_mask(&self, bytes: Vec<u8>) -> Result<String, String> {
+        self.upload_named(bytes, "mega-image-editor-mask.png")
+    }
+
+    fn upload_named(&self, bytes: Vec<u8>, name: &'static str) -> Result<String, String> {
         let part = multipart::Part::bytes(bytes)
-            .file_name(name.to_string())
+            .file_name(name)
             .mime_str("image/png")
             .map_err(|e| e.to_string())?;
         let form = multipart::Form::new()
             .part("image", part)
-            .text("overwrite", "false");
+            .text("overwrite", "true");
         let response = self.json(
             self.request(reqwest::Method::POST, "/upload/image")
                 .multipart(form),
@@ -104,6 +112,10 @@ impl Client {
 
     pub fn history(&self, id: &str) -> Result<Value, String> {
         self.json(self.request(reqwest::Method::GET, &format!("/history/{id}")))
+    }
+
+    pub fn object_info(&self, class: &str) -> Result<Value, String> {
+        self.json(self.request(reqwest::Method::GET, &format!("/object_info/{class}")))
     }
 
     pub fn download(&self, output: &Value) -> Result<Vec<u8>, String> {

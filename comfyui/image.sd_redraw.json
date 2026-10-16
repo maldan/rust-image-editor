@@ -1,0 +1,170 @@
+{
+  "4": {
+    "inputs": {
+      "ckpt_name": "blendermixIllustrious_v01.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Model"
+    }
+  },
+  "6": {
+    "inputs": {
+      "text": "beautiful scenery nature glass bottle landscape, , purple galaxy bottle,",
+      "clip": [
+        "10",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Positive"
+    }
+  },
+  "7": {
+    "inputs": {
+      "text": "text, watermark",
+      "clip": [
+        "10",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Negative"
+    }
+  },
+  "10": {
+    "inputs": {
+      "lora_name": "2B_clean.safetensors",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": [
+        "16",
+        0
+      ],
+      "clip": [
+        "16",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "Lora3"
+    }
+  },
+  "11": {
+    "inputs": {
+      "seed": 205638098271855,
+      "steps": 20,
+      "cfg": 7,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "preview_method": "auto",
+      "vae_decode": "true",
+      "model": [
+        "10",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "latent_image": [
+        "14",
+        0
+      ],
+      "optional_vae": [
+        "4",
+        2
+      ]
+    },
+    "class_type": "KSampler (Efficient)",
+    "_meta": {
+      "title": "Sampler"
+    }
+  },
+  "12": {
+    "inputs": {
+      "name": "img",
+      "image_format": "webp",
+      "quality": 0.95,
+      "images": [
+        "11",
+        5
+      ]
+    },
+    "class_type": "ImageSaveWithFormat (maga)",
+    "_meta": {
+      "title": "ImageSaveWithFormat (maga)"
+    }
+  },
+  "13": {
+    "inputs": {
+      "image": "image.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Image"
+    }
+  },
+  "14": {
+    "inputs": {
+      "pixels": [
+        "13",
+        0
+      ],
+      "vae": [
+        "4",
+        2
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE Encode"
+    }
+  },
+  "15": {
+    "inputs": {
+      "lora_name": "2B_clean.safetensors",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": [
+        "4",
+        0
+      ],
+      "clip": [
+        "4",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "Lora1"
+    }
+  },
+  "16": {
+    "inputs": {
+      "lora_name": "2B_clean.safetensors",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": [
+        "15",
+        0
+      ],
+      "clip": [
+        "15",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "Lora2"
+    }
+  }
+}
