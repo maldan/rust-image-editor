@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use glam::Vec2;
 use mega_ui::wgpu::{DrawStats, UiRenderer};
-use mega_ui::{CursorIcon, Ui, UiInput};
+use mega_ui::{CursorIcon, Rect, Ui, UiInput};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -11,12 +11,16 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use crate::canvas_gpu::{CanvasOverlay, CanvasRenderer};
+use crate::view::CanvasView;
+
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     renderer: UiRenderer,
+    canvas: CanvasRenderer,
 }
 
 #[derive(Clone, Default)]
@@ -83,7 +87,13 @@ pub trait Scene {
     fn init(ui: &mut Ui);
     fn begin_frame(&mut self, input: &FrameInput);
     fn build(&mut self, ui: &mut Ui, viewport: Vec2, stats: DrawStats) -> bool;
-    fn sync_gpu(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut UiRenderer);
+    fn sync_canvas(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        canvas: &mut CanvasRenderer,
+    );
+    fn canvas_present(&self) -> Option<(Rect, CanvasView, CanvasOverlay)>;
 }
 
 pub struct Host<S: Scene> {
@@ -165,12 +175,14 @@ impl<S: Scene> Host<S> {
         surface.configure(&device, &config);
         let renderer = UiRenderer::new(&device, &queue, format, &self.ui);
         renderer.set_viewport(&queue, config.width as f32, config.height as f32);
+        let canvas = CanvasRenderer::new(&device, format);
         self.gpu = Some(Gpu {
             device,
             queue,
             surface,
             config,
             renderer,
+            canvas,
         });
         self.window = Some(window);
     }
@@ -204,10 +216,11 @@ impl<S: Scene> Host<S> {
         self.ui.begin_frame(self.input.to_ui(viewport, dt));
         let keep_redrawing = self.scene.build(&mut self.ui, viewport, self.draw_stats);
         let output = self.ui.end_frame();
+        let canvas_present = self.scene.canvas_present();
 
         let Some(gpu) = self.gpu.as_mut() else { return };
         self.scene
-            .sync_gpu(&gpu.device, &gpu.queue, &mut gpu.renderer);
+            .sync_canvas(&gpu.device, &gpu.queue, &mut gpu.canvas);
         gpu.renderer
             .sync_atlases(&gpu.device, &gpu.queue, &mut self.ui);
 
@@ -229,7 +242,7 @@ impl<S: Scene> Host<S> {
             });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("editor UI"),
+                label: Some("editor frame"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -249,7 +262,18 @@ impl<S: Scene> Host<S> {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // UI chrome first, then canvas image (scissored) on top of the canvas dock pane.
             self.draw_stats = gpu.renderer.draw(&gpu.queue, &mut pass, &output.draw_list);
+            if let Some((canvas_rect, canvas_view, overlay)) = canvas_present {
+                gpu.canvas.render(
+                    &gpu.queue,
+                    &mut pass,
+                    viewport,
+                    canvas_rect,
+                    canvas_view,
+                    overlay,
+                );
+            }
         }
         gpu.queue.submit(Some(encoder.finish()));
         gpu.queue.present(frame);

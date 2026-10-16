@@ -1290,6 +1290,7 @@ name = "image-editor"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "bytemuck",
  "env_logger",
  "glam",
  "image",
