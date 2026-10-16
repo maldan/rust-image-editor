@@ -1,5 +1,6 @@
 //! Editor chrome: menus, dock tabs, status bar.
 
+pub mod ai_dialog;
 mod assets_panel;
 mod canvas;
 mod menu_bar;
@@ -37,25 +38,29 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     let menu_h = 28.0 * scale;
     let status_h = 24.0 * scale;
 
-    ui.menu_bar(|ui| {
-        menu_bar::draw(ui, app);
-    });
+    let modal_open = app.ai.open;
+    ui.add_enabled(!modal_open, |ui| {
+        ui.menu_bar(|ui| {
+            menu_bar::draw(ui, app);
+        });
 
-    let dock_size = Vec2::new(viewport.x, (viewport.y - menu_h - status_h).max(1.0));
-    let mut dock = std::mem::replace(&mut app.dock, DockState::new(DockNode::leaf(&["tmp"])));
-    ui.dock_space("main", dock_size, &mut dock, |ui, tab| match tab {
-        "Tools" => tools_panel::draw(ui, app),
-        "Tool Options" => tool_options::draw(ui, app),
-        "Library" => assets_panel::draw(ui, app),
-        "Canvas" => canvas::draw(ui, app),
-        "Layers" => project_panel::draw(ui, app),
-        _ => {}
-    });
-    app.dock = dock;
+        let dock_size = Vec2::new(viewport.x, (viewport.y - menu_h - status_h).max(1.0));
+        let mut dock = std::mem::replace(&mut app.dock, DockState::new(DockNode::leaf(&["tmp"])));
+        ui.dock_space("main", dock_size, &mut dock, |ui, tab| match tab {
+            "Tools" => tools_panel::draw(ui, app),
+            "Tool Options" => tool_options::draw(ui, app),
+            "Library" => assets_panel::draw(ui, app),
+            "Canvas" => canvas::draw(ui, app),
+            "Layers" => project_panel::draw(ui, app),
+            _ => {}
+        });
+        app.dock = dock;
 
-    ui.status_bar(|ui| {
-        ui.label(&app.status.clone());
-        ui.spacer();
-        ui.label("Middle drag: pan · Wheel: zoom · Ctrl+Z/Y: undo/redo · Ctrl+V: paste");
+        ui.status_bar(|ui| {
+            ui.label(&app.status.clone());
+            ui.spacer();
+            ui.label("Middle drag: pan · Wheel: zoom · Ctrl+Z/Y: undo/redo · Ctrl+V: paste");
+        });
     });
+    ai_dialog::draw(ui, app);
 }

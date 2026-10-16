@@ -11,6 +11,17 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
 
     // Background only — image / checker / brush / selection are drawn by canvas wgpu.
     ui.fill_rect(app.canvas_rect, [0.075, 0.08, 0.095, 1.0]);
+    if app.image_size.is_some() {
+        // Host renders the canvas into a viewport-sized texture before UI composition.
+        let viewport = app.viewport_size;
+        if viewport.x > 0.0 && viewport.y > 0.0 {
+            let min = app.canvas_rect.min / viewport;
+            let max = app.canvas_rect.max / viewport;
+            ui.texture_rect(crate::host::CANVAS_TEXTURE, app.canvas_rect, min.to_array(), max.to_array());
+        }
+    }
+
+    if app.ai.open { return; }
 
     if app.fit_image {
         app.fit_to_canvas();

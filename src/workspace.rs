@@ -10,9 +10,9 @@ use crate::project::{Layer, LayerMeta, Project, encode_png_rgba};
 const MANIFEST_PATH: &str = "/manifest.json";
 const MANIFEST_KIND: &str = "mega-image-editor/manifest+json";
 const IMAGE_KIND: &str = "image/png";
-pub const THUMB_SIZE: u32 = 32;
+pub const THUMB_SIZE: u32 = 84;
 /// On-screen library thumb size (logical px before UI scale).
-pub const THUMB_VIEW: f32 = 56.0;
+pub const THUMB_VIEW: f32 = 73.0;
 
 #[derive(Debug, Clone)]
 pub struct ImageAsset {
@@ -226,10 +226,10 @@ impl Workspace {
         }
     }
 
-    pub fn import_asset_png(&mut self, path: &Path) -> Result<usize, String> {
+    pub fn import_asset_image(&mut self, path: &Path) -> Result<usize, String> {
         let bytes = fs::read(path).map_err(|e| format!("Cannot read image: {e}"))?;
-        let decoded = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
-            .map_err(|e| format!("Invalid PNG: {e}"))?;
+        let decoded = image::load_from_memory(&bytes)
+            .map_err(|e| format!("Invalid image: {e}"))?;
         let name = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -490,18 +490,23 @@ fn bump_id(id: &str, next: &mut u64) {
 }
 
 pub fn make_thumb(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
-    let mut thumb = vec![0u8; (THUMB_SIZE * THUMB_SIZE * 4) as usize];
+    let mut thumb = empty_thumb();
     if width == 0 || height == 0 {
         return thumb;
     }
-    for ty in 0..THUMB_SIZE {
-        for tx in 0..THUMB_SIZE {
-            let sx = (tx as u64 * width as u64 / THUMB_SIZE as u64) as u32;
-            let sy = (ty as u64 * height as u64 / THUMB_SIZE as u64) as u32;
-            let src = ((sy * width + sx) * 4) as usize;
-            let dst = ((ty * THUMB_SIZE + tx) * 4) as usize;
-            if src + 4 <= pixels.len() {
-                thumb[dst..dst + 4].copy_from_slice(&pixels[src..src + 4]);
+    // Fit inside square, preserve aspect, area-average resample (anti-aliased).
+    let scale = (THUMB_SIZE as f32 / width as f32).min(THUMB_SIZE as f32 / height as f32);
+    let dw = ((width as f32 * scale).round() as u32).clamp(1, THUMB_SIZE);
+    let dh = ((height as f32 * scale).round() as u32).clamp(1, THUMB_SIZE);
+    let resized = crate::editing::resize_rgba(pixels, width, height, dw, dh);
+    let ox = (THUMB_SIZE - dw) / 2;
+    let oy = (THUMB_SIZE - dh) / 2;
+    for y in 0..dh {
+        for x in 0..dw {
+            let src = ((y * dw + x) * 4) as usize;
+            let dst = (((oy + y) * THUMB_SIZE + (ox + x)) * 4) as usize;
+            if src + 4 <= resized.len() && dst + 4 <= thumb.len() {
+                thumb[dst..dst + 4].copy_from_slice(&resized[src..src + 4]);
             }
         }
     }

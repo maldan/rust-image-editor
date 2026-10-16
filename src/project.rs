@@ -118,6 +118,29 @@ impl Project {
         self.sync_manifest();
     }
 
+    /// Preserve server pixels at their native size. Layers share canvas dimensions,
+    /// so expand the canvas if needed, and transparently pad the remaining area.
+    pub fn add_raster_layer(&mut self, image: &image::RgbaImage, name: String) -> Result<(), String> {
+        let (w, h) = image.dimensions();
+        if w == 0 || h == 0 { return Err("Result image is empty".into()); }
+        let (width, height) = (self.width.max(w), self.height.max(h));
+        if self.layers.is_empty() {
+            self.import_rgba(image.as_raw(), w, h)?;
+        } else {
+            self.resize_canvas(width, height)?;
+            self.add_layer();
+            let target = &mut self.layers[self.active_layer].pixels;
+            for y in 0..h as usize {
+                let source = y * w as usize * 4;
+                let dest = y * width as usize * 4;
+                target[dest..dest + w as usize * 4].copy_from_slice(&image.as_raw()[source..source + w as usize * 4]);
+            }
+        }
+        self.layers[self.active_layer].name = name;
+        self.sync_manifest();
+        Ok(())
+    }
+
     /// Resize canvas; content is kept top-left, cropped or padded with transparency.
     pub fn resize_canvas(&mut self, width: u32, height: u32) -> Result<(), String> {
         let width = width.max(1);
@@ -332,11 +355,16 @@ impl Project {
     }
 
     pub fn export_png(&self, path: &Path) -> Result<(), String> {
+        self.export_image(path, ImageFormat::Png)
+    }
+
+    pub fn export_image(&self, path: &Path, format: ImageFormat) -> Result<(), String> {
         let (pixels, width, height) = self
             .decoded_rgba()?
-            .ok_or_else(|| "Import a PNG before exporting".to_string())?;
-        fs::write(path, encode_png_rgba(&pixels, width, height)?)
-            .map_err(|e| format!("Cannot export PNG: {e}"))
+            .ok_or_else(|| "Document is empty".to_string())?;
+        let image = RgbaImage::from_raw(width, height, pixels).ok_or("Invalid document raster")?;
+        DynamicImage::ImageRgba8(image).save_with_format(path, format)
+            .map_err(|e| format!("Cannot export image: {e}"))
     }
 }
 
@@ -358,6 +386,36 @@ fn encode_png(image: &DynamicImage) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn webp_export_and_import_preserve_rgba() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("image.webp");
+        let pixels = vec![10, 20, 30, 128, 40, 50, 60, 255];
+        let mut project = Project::default();
+        project.import_rgba(&pixels, 2, 1).unwrap();
+        project.export_image(&path, ImageFormat::WebP).unwrap();
+        let mut workspace = crate::workspace::Workspace::default();
+        let index = workspace.import_asset_image(&path).unwrap();
+        assert_eq!(workspace.assets[index].pixels, pixels);
+        let decoded = crate::comfyui::decode_image(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(decoded.into_raw(), pixels);
+    }
+
+    #[test]
+    fn server_result_is_never_rescaled_or_cropped() {
+        let mut project = Project::default();
+        project.import_rgba(&[10, 20, 30, 255], 1, 1).unwrap();
+        let result = RgbaImage::from_pixel(3, 2, Rgba([40, 50, 60, 128]));
+        project.add_raster_layer(&result, "AI Edit".into()).unwrap();
+        assert_eq!((project.width, project.height), (3, 2));
+        assert_eq!(project.layers[1].pixels, result.into_raw());
+        assert_eq!(&project.layers[0].pixels[..4], &[10, 20, 30, 255]);
+        assert!(project.layers[0].pixels[4..].iter().all(|b| *b == 0));
+        project.add_raster_layer(&RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 255])), "small".into()).unwrap();
+        assert_eq!(&project.layers[2].pixels[..4], &[1, 2, 3, 255]);
+        assert!(project.layers[2].pixels[4..].iter().all(|b| *b == 0));
+    }
 
     fn sample_png() -> Vec<u8> {
         let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(2, 3, Rgba([10, 20, 30, 255])));

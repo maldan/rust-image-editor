@@ -10,7 +10,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     ui.space(6.0);
 
     if ui.button("asset_import", "Import Asset…").clicked() {
-        app.import_png(ui);
+        app.import_image(ui);
     }
     ui.space(4.0);
     if ui.button("doc_new", "New Document").clicked() {
@@ -148,15 +148,12 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
 }
 
 fn draw_thumb_in(ui: &mut Ui, thumb: &[u8], rect: mega_ui::Rect) {
-    const DRAW: u32 = 16;
-    let cell_w = rect.width() / DRAW as f32;
-    let cell_h = rect.height() / DRAW as f32;
-    let step = (workspace::THUMB_SIZE / DRAW).max(1);
-    for y in 0..DRAW {
-        for x in 0..DRAW {
-            let sx = x * step;
-            let sy = y * step;
-            let o = ((sy * workspace::THUMB_SIZE + sx) * 4) as usize;
+    let n = workspace::THUMB_SIZE;
+    let cell_w = rect.width() / n as f32;
+    let cell_h = rect.height() / n as f32;
+    for y in 0..n {
+        for x in 0..n {
+            let o = ((y * n + x) * 4) as usize;
             if o + 4 > thumb.len() {
                 continue;
             }

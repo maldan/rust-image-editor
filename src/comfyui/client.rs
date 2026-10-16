@@ -1,0 +1,229 @@
+use std::io::Read;
+use std::time::Duration;
+
+use super::HostConfig;
+use reqwest::blocking::{Client as HttpClient, RequestBuilder, Response, multipart};
+use serde_json::{Value, json};
+
+pub struct Client {
+    http: HttpClient,
+    config: HostConfig,
+}
+
+impl Client {
+    pub fn new(config: HostConfig) -> Result<Self, String> {
+        let http = HttpClient::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| "Cannot initialize HTTP client".to_string())?;
+        Ok(Self { http, config })
+    }
+
+    fn request(&self, method: reqwest::Method, path: &str) -> RequestBuilder {
+        let request = self
+            .http
+            .request(method, format!("{}{path}", self.config.host));
+        if self.config.login.is_empty() {
+            request
+        } else {
+            request.basic_auth(&self.config.login, Some(&self.config.password))
+        }
+    }
+
+    fn send(&self, request: RequestBuilder) -> Result<Response, String> {
+        let response = request.send().map_err(|e| {
+            if e.is_timeout() {
+                "ComfyUI request timed out".to_string()
+            } else {
+                "Cannot reach ComfyUI server".to_string()
+            }
+        })?;
+        if !response.status().is_success() {
+            return Err(format!("ComfyUI HTTP {}", response.status().as_u16()));
+        }
+        Ok(response)
+    }
+
+    fn json(&self, request: RequestBuilder) -> Result<Value, String> {
+        self.send(request)?
+            .json()
+            .map_err(|_| "Invalid ComfyUI JSON response".into())
+    }
+
+    pub fn upload(&self, bytes: Vec<u8>, name: &str) -> Result<String, String> {
+        let part = multipart::Part::bytes(bytes)
+            .file_name(name.to_string())
+            .mime_str("image/png")
+            .map_err(|e| e.to_string())?;
+        let form = multipart::Form::new()
+            .part("image", part)
+            .text("overwrite", "false");
+        let response = self.json(
+            self.request(reqwest::Method::POST, "/upload/image")
+                .multipart(form),
+        )?;
+        let filename = response["name"]
+            .as_str()
+            .ok_or("Upload response has no filename")?;
+        let folder = response["subfolder"].as_str().unwrap_or("");
+        Ok(if folder.is_empty() {
+            filename.into()
+        } else {
+            format!("{folder}/{filename}")
+        })
+    }
+
+    pub fn prompt(&self, graph: Value, client_id: &str) -> Result<String, String> {
+        let request = self
+            .request(reqwest::Method::POST, "/prompt")
+            .json(&json!({"prompt": graph, "client_id": client_id}));
+        // Validation errors are useful to the user, but avoid logging the full request/graph.
+        let response = request
+            .send()
+            .map_err(|_| "Cannot submit ComfyUI workflow".to_string())?;
+        let status = response.status();
+        let body: Value = response
+            .json()
+            .map_err(|_| format!("ComfyUI HTTP {}", status.as_u16()))?;
+        if !status.is_success() || body.get("error").is_some() {
+            return Err(format!(
+                "ComfyUI rejected workflow: {}",
+                body.get("node_errors")
+                    .filter(|v| v.as_object().is_some_and(|v| !v.is_empty()))
+                    .or(body.get("error"))
+                    .unwrap_or(&body)
+            ));
+        }
+        body["prompt_id"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| "Missing prompt_id".into())
+    }
+
+    pub fn history(&self, id: &str) -> Result<Value, String> {
+        self.json(self.request(reqwest::Method::GET, &format!("/history/{id}")))
+    }
+
+    pub fn download(&self, output: &Value) -> Result<Vec<u8>, String> {
+        let filename = output["filename"]
+            .as_str()
+            .ok_or("Output has no filename")?;
+        let request = self.request(reqwest::Method::GET, "/view").query(&[
+            ("filename", filename),
+            ("subfolder", output["subfolder"].as_str().unwrap_or("")),
+            ("type", output["type"].as_str().unwrap_or("output")),
+        ]);
+        let mut bytes = Vec::new();
+        self.send(request)?
+            .take(128 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Cannot download output".to_string())?;
+        if bytes.len() > 128 * 1024 * 1024 {
+            return Err("ComfyUI output exceeds 128 MiB".into());
+        }
+        Ok(bytes)
+    }
+
+    pub fn cancel(&self, id: &str) -> Result<(), String> {
+        // Remove this prompt if still queued; never clear another client's queue.
+        self.send(
+            self.request(reqwest::Method::POST, "/queue")
+                .timeout(Duration::from_secs(5))
+                .json(&json!({"delete": [id]})),
+        )?;
+        let queue = self.json(
+            self.request(reqwest::Method::GET, "/queue")
+                .timeout(Duration::from_secs(5)),
+        )?;
+        if !queue["queue_running"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item[1] == id))
+        {
+            return Ok(());
+        }
+        let response = self
+            .request(reqwest::Method::POST, "/api/interrupt")
+            .timeout(Duration::from_secs(5))
+            .json(&json!({"prompt_id": id}))
+            .send()
+            .map_err(|_| "Cannot interrupt ComfyUI".to_string())?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            self.send(
+                self.request(reqwest::Method::POST, "/interrupt")
+                    .timeout(Duration::from_secs(5))
+                    .json(&json!({"prompt_id": id})),
+            )?;
+        } else if !response.status().is_success() {
+            return Err("ComfyUI interrupt failed".into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_uses_save_node_and_reports_failures() {
+        let history = json!({"job": {"outputs": {"preview": {"images": [{"filename": "wrong.png"}]}, "save": {"images": [{"filename": "right.webp"}]}}, "status": {"completed": true}}});
+        assert_eq!(
+            output_from_history(&history, "job", "save")
+                .unwrap()
+                .unwrap()["filename"],
+            "right.webp"
+        );
+        assert!(
+            output_from_history(&history, "missing", "save")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            output_from_history(&history, "job", "missing")
+                .unwrap_err()
+                .contains("without")
+        );
+        let error = json!({"job": {"status": {"status_str": "error", "messages": [["execution_error", {"node_type": "Sampler", "exception_message": "Out of memory"}]]}}});
+        assert!(
+            output_from_history(&error, "job", "save")
+                .unwrap_err()
+                .contains("Out of memory")
+        );
+    }
+}
+
+pub fn output_from_history(
+    history: &Value,
+    id: &str,
+    save_node: &str,
+) -> Result<Option<Value>, String> {
+    let Some(item) = history.get(id) else {
+        return Ok(None);
+    };
+    if item["status"]["status_str"] == "error" {
+        let messages = item["status"]["messages"].as_array();
+        let error = messages
+            .and_then(|messages| messages.iter().find(|m| m[0] == "execution_error"))
+            .map(|m| {
+                format!(
+                    "{}: {}",
+                    m[1]["node_type"].as_str().unwrap_or("node"),
+                    m[1]["exception_message"]
+                        .as_str()
+                        .unwrap_or("Execution failed")
+                )
+            })
+            .unwrap_or_else(|| "ComfyUI execution failed or was interrupted".into());
+        return Err(error);
+    }
+    let output = item["outputs"][save_node]["images"]
+        .as_array()
+        .and_then(|images| images.first())
+        .cloned();
+    if output.is_none() && item["status"]["completed"] == true {
+        return Err("ComfyUI finished without a SaveImage result".into());
+    }
+    Ok(output)
+}

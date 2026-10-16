@@ -27,6 +27,7 @@ pub struct EditorApp {
     layers_reload: bool,
     floating_reload: bool,
     pub canvas_rect: Rect,
+    pub viewport_size: Vec2,
     pub pan: Vec2,
     pub zoom: f32,
     pub rotation: f32,
@@ -62,6 +63,7 @@ pub struct EditorApp {
     canvas_cleared: bool,
     pub resize_w: u32,
     pub resize_h: u32,
+    pub ai: ui::ai_dialog::AiDialog,
 }
 
 impl Default for EditorApp {
@@ -75,6 +77,7 @@ impl Default for EditorApp {
             layers_reload: false,
             floating_reload: false,
             canvas_rect: Rect::from_min_size(Vec2::ZERO, Vec2::ZERO),
+            viewport_size: Vec2::ZERO,
             pan: Vec2::ZERO,
             zoom: 1.0,
             rotation: 0.0,
@@ -109,11 +112,131 @@ impl Default for EditorApp {
             canvas_cleared: true,
             resize_w: 512,
             resize_h: 512,
+            ai: ui::ai_dialog::AiDialog::default(),
         }
     }
 }
 
 impl EditorApp {
+    pub fn open_ai(&mut self) {
+        if self.image_size.is_none() || self.ai.job.is_some() { return; }
+        self.commit_transform();
+        self.workspace.clear_asset_drag();
+        self.layer_drag = None;
+        self.ai.open = true;
+        self.ai.close_when_stopped = false;
+        self.ai.preview = None;
+        self.ai.result = None;
+        self.ai.preview_dirty = false;
+        self.ai.fraction = None;
+        match crate::comfyui::HostConfig::from_env() {
+            Ok(config) => { self.ai.config = Some(config); self.ai.message.clear(); }
+            Err(error) => { self.ai.config = None; self.ai.message = error; }
+        }
+    }
+
+    pub fn start_ai(&mut self) {
+        if self.ai.job.is_some() { return; }
+        let Some(config) = self.ai.config.clone() else { return; };
+        let p = self.project();
+        let pixels = if self.ai.whole_document {
+            crate::editing::composite_layers(&p.layers, p.width, p.height)
+        } else {
+            let Some(pixels) = p.active_pixels() else { return; };
+            pixels.to_vec()
+        };
+        let Some(image) = image::RgbaImage::from_raw(p.width, p.height, pixels) else {
+            self.ai.message = "Invalid input raster".into();
+            return;
+        };
+        self.ai.document_id = self.workspace.active_doc().id.clone();
+        self.ai.message = "Preparing input…".into();
+        self.ai.preview = None;
+        self.ai.result = None;
+        self.ai.preview_dirty = false;
+        self.ai.fraction = None;
+        self.ai.close_when_stopped = false;
+        self.ai.job = Some(crate::comfyui::Job::start(config, image, self.ai.scale, self.ai.prompt.clone()));
+    }
+
+    pub fn cancel_ai(&mut self) {
+        if let Some(job) = &self.ai.job {
+            job.cancel();
+            self.ai.message = "Cancelling…".into();
+        }
+    }
+
+    pub fn close_ai(&mut self) {
+        if self.ai.job.is_some() {
+            self.ai.close_when_stopped = true;
+            self.cancel_ai();
+        } else {
+            self.ai.open = false;
+            self.ai.result = None;
+            self.ai.preview = None;
+            self.ai.preview_dirty = false;
+            self.ai.fraction = None;
+        }
+    }
+
+    pub fn accept_ai(&mut self) {
+        if self.ai.job.is_some() || self.ai.result.is_none() { return; }
+        if self.workspace.active_doc().id != self.ai.document_id {
+            self.ai.message = "Destination document changed; result was not inserted".into();
+            return;
+        }
+        let image = self.ai.result.as_ref().unwrap();
+        let size = image.dimensions();
+        let name = format!("AI Edit {}", self.workspace.active().layers.len() + 1);
+        match self.workspace.active_mut().add_raster_layer(image, name) {
+            Ok(()) => {
+                let _ = self.refresh_image();
+                self.workspace.mark_active_thumb_dirty();
+                self.dirty = true;
+                self.status = format!("AI Edit added: {} × {} px", size.0, size.1);
+                self.close_ai();
+            }
+            Err(error) => self.ai.message = error,
+        }
+    }
+
+    fn poll_ai(&mut self, ui: &mut Ui) {
+        let Some(job) = self.ai.job.as_ref() else { return; };
+        if let Ok(mut progress) = job.progress.try_lock() {
+            if !job.is_cancelling() { self.ai.message = progress.message.clone(); }
+            self.ai.fraction = progress.fraction;
+            if let Some(preview) = progress.preview.take() {
+                self.ai.preview = Some(preview);
+                self.ai.preview_dirty = true;
+            }
+        }
+        let Some(result) = job.poll() else { return; };
+        self.ai.job = None;
+        match result {
+            crate::comfyui::JobResult::Done(image) => {
+                if self.workspace.active_doc().id != self.ai.document_id {
+                    self.ai.message = "Destination document changed; result was not inserted".into();
+                    return;
+                }
+                self.ai.message = format!("Result: {} × {} px — accept or regenerate", image.width(), image.height());
+                self.ai.preview = Some(image::imageops::thumbnail(&image, 1024, 1024));
+                self.ai.preview_dirty = true;
+                self.ai.fraction = None;
+                self.ai.result = Some(image);
+            }
+            crate::comfyui::JobResult::Failed(error) => {
+                self.ai.message = error.clone();
+                self.status = error.clone();
+                ui.notify_error(&error);
+            }
+            crate::comfyui::JobResult::Cancelled => {
+                self.ai.message = "Cancelled".into();
+                self.ai.fraction = None;
+                if self.ai.close_when_stopped { self.close_ai(); }
+            }
+        }
+    }
+
     pub fn project(&self) -> &Project {
         self.workspace.active()
     }
@@ -198,18 +321,18 @@ impl EditorApp {
         }
     }
 
-    pub fn import_png(&mut self, ui: &mut Ui) {
+    pub fn import_image(&mut self, ui: &mut Ui) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("PNG image", &["png"])
+            .add_filter("Images", &["png", "webp"])
             .pick_file()
         else {
             return;
         };
-        match self.workspace.import_asset_png(&path) {
+        match self.workspace.import_asset_image(&path) {
             Ok(_) => {
                 self.dirty = true;
                 self.status = format!("Imported asset {}", file_name(&path));
-                ui.notify_success("PNG imported as asset (not placed on document)");
+                ui.notify_success("Image imported as asset (not placed on document)");
             }
             Err(error) => self.show_error(ui, error),
         }
@@ -298,19 +421,21 @@ impl EditorApp {
         }
     }
 
-    pub fn export_png(&mut self, ui: &mut Ui) {
+    pub fn export_image(&mut self, ui: &mut Ui, webp: bool) {
+        let extension = if webp { "webp" } else { "png" };
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("PNG image", &["png"])
-            .set_file_name("export.png")
+            .add_filter(if webp { "WebP image" } else { "PNG image" }, &[extension])
+            .set_file_name(format!("export.{extension}"))
             .save_file()
-            .map(ensure_png_extension)
+            .map(|p| ensure_extension(p, extension))
         else {
             return;
         };
-        match self.workspace.active_mut().export_png(&path) {
+        let format = if webp { image::ImageFormat::WebP } else { image::ImageFormat::Png };
+        match self.workspace.active_mut().export_image(&path, format) {
             Ok(()) => {
                 self.status = format!("Exported {}", file_name(&path));
-                ui.notify_success("PNG exported");
+                ui.notify_success("Image exported");
             }
             Err(error) => self.show_error(ui, error),
         }
@@ -943,6 +1068,7 @@ impl EditorApp {
         self.transform_last = None;
         self.floating_reload = false;
         self.dirty = true;
+        self.workspace.mark_active_thumb_dirty();
         self.status = "Transform applied".into();
         if let Some(rect) = dirty {
             self.mark_layer_dirty(layer, rect);
@@ -1022,6 +1148,10 @@ impl EditorApp {
 }
 
 impl Scene for EditorApp {
+    fn request_close(&mut self) -> bool {
+        if self.ai.job.is_some() { self.cancel_ai(); false } else { true }
+    }
+
     fn title() -> &'static str {
         "Mega Image Editor"
     }
@@ -1032,10 +1162,16 @@ impl Scene for EditorApp {
     }
 
     fn begin_frame(&mut self, input: &FrameInput) {
-        self.input = input.clone();
+        self.input = if self.ai.open {
+            let mut blocked = FrameInput::default();
+            blocked.key_escape = input.key_escape;
+            blocked
+        } else { input.clone() };
     }
 
     fn build(&mut self, ui: &mut Ui, viewport: Vec2, _stats: DrawStats) -> bool {
+        self.viewport_size = viewport;
+        self.poll_ai(ui);
         if self.input.key_undo {
             self.undo();
         }
@@ -1054,13 +1190,24 @@ impl Scene for EditorApp {
         if paste {
             self.paste_image(ui);
         }
-        self.selection.is_some()
+        self.ai.open
+            || self.selection.is_some()
             || self.selection_anchor.is_some()
             || self.floating.is_some()
             || self.workspace.asset_drag.is_some()
             || thumb_waiting
             || (self.tool == Tool::Brush && self.canvas_rect.contains(self.input.mouse_pos))
             || !self.dirty_tiles.is_empty()
+    }
+
+    fn sync_ui_textures(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut mega_ui::wgpu::UiRenderer) {
+        if self.ai.preview_dirty {
+            if let Some(preview) = &self.ai.preview {
+                renderer.set_texture_rgba(device, queue, crate::host::AI_PREVIEW_TEXTURE,
+                    preview.as_raw(), preview.width(), preview.height(), "AI preview");
+            }
+            self.ai.preview_dirty = false;
+        }
     }
 
     fn sync_canvas(
@@ -1215,10 +1362,6 @@ fn ensure_project_extension(path: PathBuf) -> PathBuf {
     ensure_extension(path, "mgimg")
 }
 
-fn ensure_png_extension(path: PathBuf) -> PathBuf {
-    ensure_extension(path, "png")
-}
-
 fn ensure_extension(path: PathBuf, extension: &str) -> PathBuf {
     if path
         .extension()
@@ -1263,4 +1406,108 @@ fn brush_overlaps_image(point: Vec2, radius_screen: f32, view: CanvasView) -> bo
         && image.y >= -radius_image
         && image.x < view.width as f32 + radius_image
         && image.y < view.height as f32 + radius_image
+}
+
+#[cfg(test)]
+mod ai_tests {
+    use super::*;
+
+    #[test]
+    fn completed_job_waits_for_acceptance_and_adds_exactly_once() {
+        let mut app = EditorApp::default();
+        app.project_mut().import_rgba(&[20, 40, 60, 255], 1, 1).unwrap();
+        app.refresh_image().unwrap();
+        app.ai.open = true;
+        app.ai.document_id = app.workspace.active_doc().id.clone();
+        let result = image::RgbaImage::from_pixel(2, 3, image::Rgba([100, 120, 140, 255]));
+        app.ai.job = Some(crate::comfyui::Job::with_result(crate::comfyui::JobResult::Done(result.clone())));
+        let mut ui = Ui::new();
+        app.poll_ai(&mut ui);
+        assert!(app.ai.open);
+        assert!(app.ai.job.is_none());
+        assert_eq!(app.image_size, Some((1, 1)));
+        assert_eq!(app.project().layers.len(), 1);
+        assert_eq!(app.ai.result.as_ref(), Some(&result));
+        assert!(app.ai.preview_dirty);
+        assert!(!app.dirty);
+
+        app.accept_ai();
+        assert!(!app.ai.open);
+        assert!(app.ai.result.is_none());
+        assert_eq!(app.image_size, Some((2, 3)));
+        assert_eq!(app.project().active_layer, 1);
+        assert_eq!(app.project().layers[1].pixels, result.into_raw());
+        assert_eq!(&app.project().layers[0].pixels[..4], &[20, 40, 60, 255]);
+        assert!(app.dirty);
+        app.accept_ai();
+        assert_eq!(app.project().layers.len(), 2);
+    }
+
+    #[test]
+    fn closing_unaccepted_result_does_not_change_document() {
+        let mut app = EditorApp::default();
+        app.project_mut().import_rgba(&[20, 40, 60, 255], 1, 1).unwrap();
+        app.refresh_image().unwrap();
+        app.ai.open = true;
+        app.ai.result = Some(image::RgbaImage::new(2, 3));
+        app.close_ai();
+        assert!(!app.ai.open);
+        assert!(app.ai.result.is_none());
+        assert_eq!(app.image_size, Some((1, 1)));
+        assert_eq!(app.project().layers.len(), 1);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn only_latest_result_is_accepted_and_destination_is_checked_again() {
+        let mut app = EditorApp::default();
+        app.project_mut().import_rgba(&[20, 40, 60, 255], 1, 1).unwrap();
+        app.refresh_image().unwrap();
+        app.ai.open = true;
+        app.ai.document_id = app.workspace.active_doc().id.clone();
+        let mut ui = Ui::new();
+        for color in [10, 80] {
+            let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([color, 0, 0, 255]));
+            app.ai.job = Some(crate::comfyui::Job::with_result(crate::comfyui::JobResult::Done(image)));
+            app.poll_ai(&mut ui);
+        }
+        assert_eq!(app.project().layers.len(), 1);
+        app.workspace.create_document("Other document");
+        app.accept_ai();
+        assert!(app.project().layers.is_empty());
+        assert!(app.ai.result.is_some());
+        assert!(app.ai.open);
+        app.workspace.set_active_document(0);
+        app.accept_ai();
+        assert_eq!(app.project().layers[1].pixels, [80, 0, 0, 255]);
+    }
+
+    #[test]
+    fn modal_blocks_editor_input_and_composes_preview_above_canvas() {
+        let mut app = EditorApp::default();
+        app.project_mut().import_rgba(&[20, 40, 60, 255], 1, 1).unwrap();
+        app.refresh_image().unwrap();
+        app.ai.open = true;
+        app.ai.preview = Some(image::RgbaImage::from_pixel(10, 10, image::Rgba([1, 2, 3, 255])));
+        app.ai.fraction = Some(0.4);
+        let mut input = FrameInput::default();
+        input.mouse_down = true;
+        input.key_undo = true;
+        input.key_paste = true;
+        input.mouse_pos = Vec2::new(600.0, 400.0);
+        app.begin_frame(&input);
+        assert!(!app.input.mouse_down && !app.input.key_undo && !app.input.key_paste);
+
+        let mut ui = Ui::new();
+        EditorApp::init(&mut ui);
+        let viewport = Vec2::new(1280.0, 800.0);
+        ui.begin_frame(mega_ui::UiInput { viewport, ..Default::default() });
+        assert!(app.build(&mut ui, viewport, DrawStats::default()));
+        let output = ui.end_frame();
+        let canvas = output.draw_list.iter().position(|c| c.kind == 1.0 && c.tex == crate::host::CANVAS_TEXTURE).unwrap();
+        let preview = output.draw_list.iter().position(|c| c.kind == 1.0 && c.tex == crate::host::AI_PREVIEW_TEXTURE).unwrap();
+        assert!(preview > canvas);
+        assert!(ui.input_debug().modal_open);
+        assert_eq!(app.project().layers[0].pixels, [20, 40, 60, 255]);
+    }
 }

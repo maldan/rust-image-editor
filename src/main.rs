@@ -1,4 +1,5 @@
 mod app;
+mod comfyui;
 mod canvas_gpu;
 mod editing;
 mod history;

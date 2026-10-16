@@ -14,6 +14,9 @@ use winit::window::{Window, WindowId};
 use crate::canvas_gpu::{CanvasOverlay, CanvasRenderer};
 use crate::view::CanvasView;
 
+pub const CANVAS_TEXTURE: u32 = 1;
+pub const AI_PREVIEW_TEXTURE: u32 = 2;
+
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -21,6 +24,8 @@ struct Gpu {
     config: wgpu::SurfaceConfiguration,
     renderer: UiRenderer,
     canvas: CanvasRenderer,
+    canvas_target: wgpu::Texture,
+    canvas_target_view: wgpu::TextureView,
 }
 
 #[derive(Clone, Default)]
@@ -114,6 +119,19 @@ pub trait Scene {
         canvas: &mut CanvasRenderer,
     );
     fn canvas_present(&self) -> Option<(Rect, CanvasView, CanvasOverlay)>;
+    fn sync_ui_textures(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut UiRenderer);
+    /// Return false while outstanding work is being cancelled before exit.
+    fn request_close(&mut self) -> bool;
+}
+
+fn canvas_target(device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("canvas composition target"),
+        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+        mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    })
 }
 
 pub struct Host<S: Scene> {
@@ -127,6 +145,7 @@ pub struct Host<S: Scene> {
     elapsed: f32,
     cursor: CursorIcon,
     draw_stats: DrawStats,
+    closing: bool,
 }
 
 impl<S: Scene> Host<S> {
@@ -147,6 +166,7 @@ impl<S: Scene> Host<S> {
             elapsed: 0.0,
             cursor: CursorIcon::Default,
             draw_stats: DrawStats::default(),
+            closing: false,
         };
         event_loop.run_app(&mut host).expect("run application");
     }
@@ -195,9 +215,12 @@ impl<S: Scene> Host<S> {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
-        let renderer = UiRenderer::new(&device, &queue, format, &self.ui);
+        let mut renderer = UiRenderer::new(&device, &queue, format, &self.ui);
         renderer.set_viewport(&queue, config.width as f32, config.height as f32);
         let canvas = CanvasRenderer::new(&device, format);
+        let canvas_target = canvas_target(&device, config.width, config.height, format);
+        let canvas_target_view = canvas_target.create_view(&Default::default());
+        renderer.bind_texture_view(&device, CANVAS_TEXTURE, canvas_target.create_view(&Default::default()));
         self.gpu = Some(Gpu {
             device,
             queue,
@@ -205,6 +228,8 @@ impl<S: Scene> Host<S> {
             config,
             renderer,
             canvas,
+            canvas_target,
+            canvas_target_view,
         });
         self.window = Some(window);
     }
@@ -217,6 +242,9 @@ impl<S: Scene> Host<S> {
             gpu.config.width = width;
             gpu.config.height = height;
             gpu.surface.configure(&gpu.device, &gpu.config);
+            gpu.canvas_target = canvas_target(&gpu.device, width, height, gpu.config.format);
+            gpu.canvas_target_view = gpu.canvas_target.create_view(&Default::default());
+            gpu.renderer.bind_texture_view(&gpu.device, CANVAS_TEXTURE, gpu.canvas_target.create_view(&Default::default()));
             gpu.renderer
                 .set_viewport(&gpu.queue, width as f32, height as f32);
         }
@@ -244,6 +272,7 @@ impl<S: Scene> Host<S> {
         let Some(gpu) = self.gpu.as_mut() else { return };
         self.scene
             .sync_canvas(&gpu.device, &gpu.queue, &mut gpu.canvas);
+        self.scene.sync_ui_textures(&gpu.device, &gpu.queue, &mut gpu.renderer);
         gpu.renderer
             .sync_atlases(&gpu.device, &gpu.queue, &mut self.ui);
 
@@ -263,6 +292,19 @@ impl<S: Scene> Host<S> {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("editor frame"),
             });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("canvas offscreen"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &gpu.canvas_target_view, resolve_target: None, depth_slice: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+            });
+            if let Some((canvas_rect, canvas_view, overlay)) = canvas_present {
+                gpu.canvas.render(&gpu.queue, &mut pass, viewport, canvas_rect, canvas_view, overlay, self.elapsed);
+            }
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("editor frame"),
@@ -285,19 +327,8 @@ impl<S: Scene> Host<S> {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            // UI chrome first, then canvas image (scissored) on top of the canvas dock pane.
+            // Canvas is sampled by its UI pane; menus and modal windows compose above it.
             self.draw_stats = gpu.renderer.draw(&gpu.queue, &mut pass, &output.draw_list);
-            if let Some((canvas_rect, canvas_view, overlay)) = canvas_present {
-                gpu.canvas.render(
-                    &gpu.queue,
-                    &mut pass,
-                    viewport,
-                    canvas_rect,
-                    canvas_view,
-                    overlay,
-                    self.elapsed,
-                );
-            }
         }
         gpu.queue.submit(Some(encoder.finish()));
         gpu.queue.present(frame);
@@ -336,14 +367,23 @@ impl<S: Scene> ApplicationHandler for Host<S> {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if self.scene.request_close() { event_loop.exit(); }
+                else {
+                    self.closing = true;
+                    if let Some(window) = &self.window { window.request_redraw(); }
+                }
+            }
             WindowEvent::Resized(size) => {
                 self.resize(size.width, size.height);
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
             }
-            WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::RedrawRequested => {
+                self.redraw();
+                if self.closing && self.scene.request_close() { event_loop.exit(); }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let pos = Vec2::new(position.x as f32, position.y as f32);
                 if let Some(previous) = self.last_mouse {
