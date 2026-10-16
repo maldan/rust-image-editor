@@ -8,7 +8,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::canvas_gpu::{CanvasOverlay, CanvasRenderer};
@@ -37,8 +37,16 @@ pub struct FrameInput {
     pub mouse_middle_pressed: bool,
     pub mouse_middle_released: bool,
     pub scroll_delta: Vec2,
+    pub text: String,
+    pub key_backspace: bool,
+    pub key_delete: bool,
+    pub key_enter: bool,
+    pub key_escape: bool,
     pub key_paste: bool,
+    pub key_undo: bool,
+    pub key_redo: bool,
     pub key_ctrl: bool,
+    pub key_shift: bool,
     modifiers: ModifiersState,
 }
 
@@ -58,8 +66,13 @@ impl FrameInput {
             mouse_middle_released: self.mouse_middle_released,
             viewport,
             scroll_delta: self.scroll_delta,
+            text: self.text.clone(),
+            key_backspace: self.key_backspace,
+            key_delete: self.key_delete,
+            key_enter: self.key_enter,
             key_paste: self.key_paste,
             key_ctrl: self.key_ctrl,
+            key_shift: self.key_shift,
             dt,
             ..UiInput::default()
         }
@@ -78,7 +91,14 @@ impl FrameInput {
         self.mouse_middle_pressed = false;
         self.mouse_middle_released = false;
         self.scroll_delta = Vec2::ZERO;
+        self.text.clear();
+        self.key_backspace = false;
+        self.key_delete = false;
+        self.key_enter = false;
+        self.key_escape = false;
         self.key_paste = false;
+        self.key_undo = false;
+        self.key_redo = false;
     }
 }
 
@@ -104,6 +124,7 @@ pub struct Host<S: Scene> {
     input: FrameInput,
     last_mouse: Option<Vec2>,
     last_frame: Instant,
+    elapsed: f32,
     cursor: CursorIcon,
     draw_stats: DrawStats,
 }
@@ -123,6 +144,7 @@ impl<S: Scene> Host<S> {
             input: FrameInput::default(),
             last_mouse: None,
             last_frame: Instant::now(),
+            elapsed: 0.0,
             cursor: CursorIcon::Default,
             draw_stats: DrawStats::default(),
         };
@@ -211,6 +233,7 @@ impl<S: Scene> Host<S> {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
+        self.elapsed += dt;
         let viewport = Vec2::new(size.width as f32, size.height as f32);
         self.scene.begin_frame(&self.input);
         self.ui.begin_frame(self.input.to_ui(viewport, dt));
@@ -272,6 +295,7 @@ impl<S: Scene> Host<S> {
                     canvas_rect,
                     canvas_view,
                     overlay,
+                    self.elapsed,
                 );
             }
         }
@@ -374,23 +398,53 @@ impl<S: Scene> ApplicationHandler for Host<S> {
             WindowEvent::ModifiersChanged(mods) => {
                 self.input.modifiers = mods.state();
                 self.input.key_ctrl = mods.state().control_key() || mods.state().super_key();
+                self.input.key_shift = mods.state().shift_key();
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return;
                 }
                 let shortcut = self.input.shortcut_mod();
-                if shortcut {
-                    match &event.logical_key {
-                        Key::Character(c) if c.eq_ignore_ascii_case("v") => {
-                            self.input.key_paste = true;
-                        }
+                match &event.logical_key {
+                    Key::Named(NamedKey::Backspace) => self.input.key_backspace = true,
+                    Key::Named(NamedKey::Delete) => self.input.key_delete = true,
+                    Key::Named(NamedKey::Enter) => self.input.key_enter = true,
+                    Key::Named(NamedKey::Escape) => self.input.key_escape = true,
+                    Key::Character(c) if shortcut => match c.to_lowercase().as_str() {
+                        "v" => self.input.key_paste = true,
+                        "z" if self.input.key_shift => self.input.key_redo = true,
+                        "z" => self.input.key_undo = true,
+                        "y" => self.input.key_redo = true,
                         _ => {}
-                    }
-                    if let PhysicalKey::Code(KeyCode::KeyV) = event.physical_key {
-                        self.input.key_paste = true;
+                    },
+                    _ => {}
+                }
+                if shortcut {
+                    if let PhysicalKey::Code(code) = event.physical_key {
+                        match code {
+                            KeyCode::KeyV => self.input.key_paste = true,
+                            KeyCode::KeyZ if self.input.key_shift => self.input.key_redo = true,
+                            KeyCode::KeyZ => self.input.key_undo = true,
+                            KeyCode::KeyY => self.input.key_redo = true,
+                            _ => {}
+                        }
                     }
                 }
+                if !shortcut {
+                    if let Some(text) = event.text.as_ref() {
+                        for ch in text.chars() {
+                            if !ch.is_control() {
+                                self.input.text.push(ch);
+                            }
+                        }
+                    }
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                self.input.text.push_str(&text);
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }

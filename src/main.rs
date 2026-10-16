@@ -1,6 +1,7 @@
 mod app;
 mod canvas_gpu;
 mod editing;
+mod history;
 mod host;
 mod project;
 mod tiles;

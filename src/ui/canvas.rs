@@ -24,7 +24,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         if app.selection.is_some() || app.selection_anchor.is_some() {
             ui.request_repaint();
         }
-        if matches!(app.tool, Tool::Brush | Tool::Eraser)
+        if (app.tool == Tool::Brush || app.has_floating_transform())
             && app.canvas_rect.contains(app.input.mouse_pos)
         {
             ui.request_repaint();

@@ -14,6 +14,8 @@ struct Uniforms {
     image_size: [f32; 2],
     zoom: f32,
     rotation: f32,
+    has_selection: f32,
+    time: f32,
 }
 
 #[repr(C)]
@@ -30,11 +32,15 @@ struct SolidVertex {
     color: [f32; 4],
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct CanvasOverlay {
     pub brush_center: Option<Vec2>,
     pub brush_radius: f32,
-    pub selection: Option<[Vec2; 4]>,
+    /// Rectangle marquee while dragging a rect select (screen corners).
+    pub selection_rect: Option<[Vec2; 4]>,
+    /// Transform tool handles in screen space.
+    pub transform_corners: Option<[Vec2; 4]>,
+    pub transform_rotate: Option<Vec2>,
 }
 
 pub struct CanvasRenderer {
@@ -45,11 +51,16 @@ pub struct CanvasRenderer {
     uniform_buf: wgpu::Buffer,
     solid_uniform_buf: wgpu::Buffer,
     solid_vertex_buf: wgpu::Buffer,
-    sampler: wgpu::Sampler,
+    sampler_near: wgpu::Sampler,
+    sampler_linear: wgpu::Sampler,
     texture: Option<wgpu::Texture>,
+    sel_texture: Option<wgpu::Texture>,
+    empty_sel_texture: wgpu::Texture,
     bind_group: Option<wgpu::BindGroup>,
     solid_bind_group: wgpu::BindGroup,
     size: (u32, u32),
+    sel_size: (u32, u32),
+    has_selection: bool,
 }
 
 impl CanvasRenderer {
@@ -85,6 +96,22 @@ impl CanvasRenderer {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -180,6 +207,8 @@ impl CanvasRenderer {
                 image_size: [1.0, 1.0],
                 zoom: 1.0,
                 rotation: 0.0,
+                has_selection: 0.0,
+                time: 0.0,
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -193,14 +222,23 @@ impl CanvasRenderer {
         });
         let solid_vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("canvas solid verts"),
-            size: (std::mem::size_of::<SolidVertex>() * 4096) as u64,
+            size: (std::mem::size_of::<SolidVertex>() * 16384) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        let sampler_near = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("canvas nearest"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        let sampler_linear = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("canvas sel linear"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -214,6 +252,20 @@ impl CanvasRenderer {
                 resource: solid_uniform_buf.as_entire_binding(),
             }],
         });
+        let empty_sel_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("canvas empty sel"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
         Self {
             pipeline,
             solid_pipeline,
@@ -222,11 +274,16 @@ impl CanvasRenderer {
             uniform_buf,
             solid_uniform_buf,
             solid_vertex_buf,
-            sampler,
+            sampler_near,
+            sampler_linear,
             texture: None,
+            sel_texture: None,
+            empty_sel_texture,
             bind_group: None,
             solid_bind_group,
             size: (0, 0),
+            sel_size: (0, 0),
+            has_selection: false,
         }
     }
 
@@ -234,10 +291,49 @@ impl CanvasRenderer {
         self.texture = None;
         self.bind_group = None;
         self.size = (0, 0);
+        self.has_selection = false;
     }
 
     pub fn has_image(&self) -> bool {
         self.texture.is_some()
+    }
+
+    fn rebuild_bind_group(&mut self, device: &wgpu::Device, image_view: &wgpu::TextureView) {
+        let sel_view = if self.has_selection {
+            self.sel_texture
+                .as_ref()
+                .unwrap_or(&self.empty_sel_texture)
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        } else {
+            self.empty_sel_texture
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("canvas bind group"),
+            layout: &self.bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(image_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler_near),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&sel_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler_linear),
+                },
+            ],
+        }));
     }
 
     pub fn ensure_size(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -261,28 +357,82 @@ impl CanvasRenderer {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("canvas bind group"),
-            layout: &self.bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.uniform_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
         self.texture = Some(texture);
-        self.bind_group = Some(bind_group);
         self.size = (width, height);
+        self.rebuild_bind_group(device, &view);
         let _ = &self.solid_bind_layout;
+    }
+
+    pub fn set_selection_mask(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        mask: Option<&[u8]>,
+        width: u32,
+        height: u32,
+    ) {
+        let Some(mask) = mask.filter(|m| !m.is_empty() && width > 0 && height > 0) else {
+            if self.has_selection {
+                self.has_selection = false;
+                if let Some(tex) = self.texture.as_ref() {
+                    let view = tex.create_view(&Default::default());
+                    self.rebuild_bind_group(device, &view);
+                }
+            }
+            return;
+        };
+        let need_alloc = self.sel_size != (width, height) || self.sel_texture.is_none();
+        if need_alloc {
+            self.sel_texture = Some(device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("canvas selection"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            }));
+            self.sel_size = (width, height);
+        }
+        let was = self.has_selection;
+        self.has_selection = true;
+        if need_alloc || !was {
+            if let Some(tex) = self.texture.as_ref() {
+                let view = tex.create_view(&Default::default());
+                self.rebuild_bind_group(device, &view);
+            }
+        }
+        let expected = width as usize * height as usize;
+        if mask.len() < expected {
+            return;
+        }
+        let Some(sel_texture) = self.sel_texture.as_ref() else {
+            return;
+        };
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: sel_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &mask[..expected],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     pub fn upload_dirty(
@@ -344,6 +494,7 @@ impl CanvasRenderer {
         canvas_rect: Rect,
         view: CanvasView,
         overlay: CanvasOverlay,
+        time: f32,
     ) {
         if canvas_rect.width() < 1.0 || canvas_rect.height() < 1.0 {
             return;
@@ -370,6 +521,8 @@ impl CanvasRenderer {
                     image_size: [view.width as f32, view.height as f32],
                     zoom: view.zoom,
                     rotation: view.rotation,
+                    has_selection: if self.has_selection { 1.0 } else { 0.0 },
+                    time,
                 }),
             );
             pass.set_pipeline(&self.pipeline);
@@ -378,12 +531,23 @@ impl CanvasRenderer {
         }
 
         let mut verts = Vec::new();
-        if let Some(corners) = overlay.selection {
-            let white = [0.95, 0.95, 0.95, 1.0];
+        if let Some(corners) = overlay.selection_rect {
+            for i in 0..4 {
+                push_ants_line(&mut verts, corners[i], corners[(i + 1) % 4], time);
+            }
+        }
+        if let Some(corners) = overlay.transform_corners {
+            let cyan = [0.2, 0.85, 0.95, 1.0];
             let black = [0.02, 0.02, 0.02, 1.0];
             for i in 0..4 {
                 push_line(&mut verts, corners[i], corners[(i + 1) % 4], 2.0, black);
-                push_line(&mut verts, corners[i], corners[(i + 1) % 4], 1.0, white);
+                push_line(&mut verts, corners[i], corners[(i + 1) % 4], 1.0, cyan);
+                push_handle(&mut verts, corners[i], 5.0, cyan);
+            }
+            if let Some(rot) = overlay.transform_rotate {
+                let top = (corners[0] + corners[1]) * 0.5;
+                push_line(&mut verts, top, rot, 1.5, cyan);
+                push_handle(&mut verts, rot, 5.0, [1.0, 0.85, 0.2, 1.0]);
             }
         }
         if let Some(center) = overlay.brush_center {
@@ -398,10 +562,14 @@ impl CanvasRenderer {
         if bytes.len() as u64 > self.solid_vertex_buf.size() {
             return;
         }
-        queue.write_buffer(&self.solid_uniform_buf, 0, bytemuck::bytes_of(&SolidUniforms {
-            viewport: [viewport.x, viewport.y],
-            _pad: [0.0; 2],
-        }));
+        queue.write_buffer(
+            &self.solid_uniform_buf,
+            0,
+            bytemuck::bytes_of(&SolidUniforms {
+                viewport: [viewport.x, viewport.y],
+                _pad: [0.0; 2],
+            }),
+        );
         queue.write_buffer(&self.solid_vertex_buf, 0, bytes);
         pass.set_pipeline(&self.solid_pipeline);
         pass.set_bind_group(0, &self.solid_bind_group, &[]);
@@ -422,6 +590,49 @@ fn push_line(out: &mut Vec<SolidVertex>, a: Vec2, b: Vec2, thickness: f32, color
     let p1 = a + n;
     let p2 = b + n;
     let p3 = b - n;
+    for p in [p0, p1, p2, p0, p2, p3] {
+        out.push(SolidVertex {
+            pos: [p.x, p.y],
+            color,
+        });
+    }
+}
+
+/// 1px screen-space black/white marching ants along a segment.
+fn push_ants_line(out: &mut Vec<SolidVertex>, a: Vec2, b: Vec2, time: f32) {
+    let delta = b - a;
+    let len = delta.length();
+    if len < 0.5 {
+        return;
+    }
+    let dir = delta / len;
+    let dash = 4.0;
+    let period = dash * 2.0;
+    let offset = (time * 48.0).rem_euclid(period);
+    let mut t = -offset;
+    let mut black = true;
+    while t < len {
+        let t0 = t.max(0.0);
+        let t1 = (t + dash).min(len);
+        if t1 > t0 + 0.25 {
+            let color = if black {
+                [0.0, 0.0, 0.0, 1.0]
+            } else {
+                [1.0, 1.0, 1.0, 1.0]
+            };
+            push_line(out, a + dir * t0, a + dir * t1, 1.0, color);
+        }
+        black = !black;
+        t += dash;
+    }
+}
+
+fn push_handle(out: &mut Vec<SolidVertex>, center: Vec2, radius: f32, color: [f32; 4]) {
+    let r = radius;
+    let p0 = center + Vec2::new(-r, -r);
+    let p1 = center + Vec2::new(r, -r);
+    let p2 = center + Vec2::new(r, r);
+    let p3 = center + Vec2::new(-r, r);
     for p in [p0, p1, p2, p0, p2, p3] {
         out.push(SolidVertex {
             pos: [p.x, p.y],

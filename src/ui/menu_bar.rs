@@ -23,6 +23,13 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     });
 
     ui.menu("edit", "Edit", |ui| {
+        if ui.menu_item("undo", "Undo").clicked() {
+            app.undo();
+        }
+        if ui.menu_item("redo", "Redo").clicked() {
+            app.redo();
+        }
+        ui.separator();
         if ui.menu_item("paste_image", "Paste Image").clicked() {
             app.paste_image(ui);
         }

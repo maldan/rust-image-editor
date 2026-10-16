@@ -6,9 +6,10 @@ use mega_ui::{DockState, Rect, Theme, Ui};
 
 use crate::canvas_gpu::{CanvasOverlay, CanvasRenderer};
 use crate::editing::{
-    BrushStroke, PixelRect, Selection, Tool, apply_brush, composite_layers, composite_region,
-    fill_bucket, flood_mask,
+    BrushStroke, FloatingTransform, PixelRect, Selection, Tool, TransformHit, apply_brush,
+    brush_dirty_bounds, composite_layers, composite_region, fill_bucket, flood_mask,
 };
+use crate::history::{EditCapture, History};
 use crate::host::{FrameInput, Scene};
 use crate::project::Project;
 use crate::tiles::DirtyTiles;
@@ -31,6 +32,8 @@ pub struct EditorApp {
     pub status: String,
     pub dock: DockState,
     pub tool: Tool,
+    /// Erase mode for Brush and Fill (not a separate tool).
+    pub erase_mode: bool,
     pub brush_size: f32,
     pub brush_opacity: f32,
     pub brush_color: [f32; 4],
@@ -40,10 +43,16 @@ pub struct EditorApp {
     pub selection_anchor: Option<(u32, u32)>,
     pub selection_current: Option<(u32, u32)>,
     selection_deselect_press: Option<Vec2>,
+    selection_mask_dirty: bool,
     brush_last: Option<(f32, f32)>,
     brush_dirty: bool,
     stroke_marks: Vec<u32>,
     stroke_id: u32,
+    stroke_capture: Option<EditCapture>,
+    history: History,
+    floating: Option<FloatingTransform>,
+    transform_drag: Option<TransformHit>,
+    transform_last: Option<Vec2>,
     pub layer_drag: Option<usize>,
     canvas_cleared: bool,
 }
@@ -65,6 +74,7 @@ impl Default for EditorApp {
             status: "Create a project, then import or paste an image".into(),
             dock: ui::default_dock(),
             tool: Tool::Brush,
+            erase_mode: false,
             brush_size: 24.0,
             brush_opacity: 1.0,
             brush_color: [0.0, 0.0, 0.0, 1.0],
@@ -74,10 +84,16 @@ impl Default for EditorApp {
             selection_anchor: None,
             selection_current: None,
             selection_deselect_press: None,
+            selection_mask_dirty: true,
             brush_last: None,
             brush_dirty: false,
             stroke_marks: Vec::new(),
             stroke_id: 1,
+            stroke_capture: None,
+            history: History::default(),
+            floating: None,
+            transform_drag: None,
+            transform_last: None,
             layer_drag: None,
             canvas_cleared: true,
         }
@@ -86,7 +102,11 @@ impl Default for EditorApp {
 
 impl EditorApp {
     pub fn brush_last_active(&self) -> bool {
-        self.brush_last.is_some()
+        self.brush_last.is_some() || self.transform_drag.is_some()
+    }
+
+    pub fn has_floating_transform(&self) -> bool {
+        self.floating.is_some()
     }
 
     pub fn canvas_view(&self) -> Option<CanvasView> {
@@ -101,11 +121,13 @@ impl EditorApp {
     }
 
     pub fn new_project(&mut self, ui: &mut Ui) {
+        self.cancel_transform();
         self.project = Project::default();
         self.image_size = None;
         self.display_pixels = None;
         self.dirty_tiles.clear();
         self.canvas_cleared = true;
+        self.history.clear();
         self.clear_selection();
         self.pan = Vec2::ZERO;
         self.zoom = 1.0;
@@ -178,6 +200,7 @@ impl EditorApp {
         };
         match Project::open(&path) {
             Ok(project) => {
+                self.cancel_transform();
                 self.project = project;
                 match self.refresh_image() {
                     Ok(()) => {
@@ -224,7 +247,9 @@ impl EditorApp {
         if self.image_size.is_none() {
             return;
         }
+        self.cancel_transform();
         self.project.delete_active_layer();
+        self.history.clear();
         self.dirty = true;
         if self.project.layers.is_empty() {
             self.image_size = None;
@@ -253,7 +278,42 @@ impl EditorApp {
         }
     }
 
+    pub fn set_active_layer_opacity(&mut self, opacity: f32) {
+        let index = self.project.active_layer;
+        if let Some(layer) = self.project.layers.get_mut(index) {
+            layer.opacity = opacity.clamp(0.0, 1.0);
+            self.dirty = true;
+            self.invalidate_display();
+        }
+    }
+
+    pub fn undo(&mut self) {
+        self.cancel_transform();
+        let Some((width, height)) = self.image_size else {
+            return;
+        };
+        if let Some((_, rect)) = self.history.undo(&mut self.project.layers, width, height) {
+            self.dirty = true;
+            self.status = "Undo".into();
+            self.mark_dirty_rect(rect);
+        }
+    }
+
+    pub fn redo(&mut self) {
+        self.cancel_transform();
+        let Some((width, height)) = self.image_size else {
+            return;
+        };
+        if let Some((_, rect)) = self.history.redo(&mut self.project.layers, width, height) {
+            self.dirty = true;
+            self.status = "Redo".into();
+            self.mark_dirty_rect(rect);
+        }
+    }
+
     fn refresh_image(&mut self) -> Result<(), String> {
+        self.cancel_transform();
+        self.history.clear();
         match self.project.decoded_rgba()? {
             Some((_, width, height)) => {
                 self.image_size = Some((width, height));
@@ -278,13 +338,19 @@ impl EditorApp {
 
     fn needs_composite(&self) -> bool {
         let active = self.project.active_layer;
-        self.project.layers.len() > 1
+        let multi = self.project.layers.len() > 1
             && !self
                 .project
                 .layers
                 .iter()
                 .enumerate()
-                .all(|(i, layer)| i == active || !layer.visible)
+                .all(|(i, layer)| i == active || !layer.visible);
+        let faded = self
+            .project
+            .layers
+            .iter()
+            .any(|layer| layer.visible && layer.opacity < 0.999);
+        multi || faded || self.floating.is_some()
     }
 
     fn invalidate_display(&mut self) {
@@ -292,7 +358,11 @@ impl EditorApp {
             return;
         };
         if self.needs_composite() {
-            self.display_pixels = Some(composite_layers(&self.project.layers, width, height));
+            let mut display = composite_layers(&self.project.layers, width, height);
+            if let Some(floating) = self.floating.as_ref() {
+                floating.blit_preview(&mut display, width, height);
+            }
+            self.display_pixels = Some(display);
         } else {
             self.display_pixels = None;
         }
@@ -327,6 +397,9 @@ impl EditorApp {
             th,
             &mut display,
         );
+        if let Some(floating) = self.floating.as_ref() {
+            floating.blit_preview(&mut display, width, height);
+        }
         self.display_pixels = Some(display);
     }
 
@@ -368,9 +441,15 @@ impl EditorApp {
         if self.tool == tool {
             return;
         }
+        if self.tool == Tool::Transform && tool != Tool::Transform {
+            self.commit_transform();
+        }
         self.commit_selection_drag();
         self.brush_last = None;
         self.tool = tool;
+        if tool == Tool::Transform {
+            self.begin_transform();
+        }
     }
 
     pub fn clear_selection(&mut self) {
@@ -378,10 +457,12 @@ impl EditorApp {
         self.selection_anchor = None;
         self.selection_current = None;
         self.selection_deselect_press = None;
+        self.selection_mask_dirty = true;
     }
 
     fn set_selection(&mut self, selection: Selection) {
         self.selection = Some(selection);
+        self.selection_mask_dirty = true;
     }
 
     fn commit_selection_drag(&mut self) {
@@ -413,7 +494,8 @@ impl EditorApp {
             Tool::RectangleSelect => self.handle_rect_select(view),
             Tool::MagicWand => self.handle_wand(view),
             Tool::Fill => self.handle_fill(view),
-            Tool::Brush | Tool::Eraser => self.handle_brush(view, self.tool == Tool::Eraser),
+            Tool::Brush => self.handle_brush(view, self.erase_mode),
+            Tool::Transform => self.handle_transform(view),
         }
     }
 
@@ -502,13 +584,34 @@ impl EditorApp {
             self.brush_color[1],
             self.brush_color[2],
         ];
-        let opacity = (self.brush_opacity * self.brush_color[3]).clamp(0.0, 1.0);
+        let opacity = if self.erase_mode {
+            self.brush_opacity
+        } else {
+            self.brush_opacity * self.brush_color[3]
+        }
+        .clamp(0.0, 1.0);
         let threshold = self.fill_threshold.round().clamp(0.0, 255.0) as u8;
+        let erase = self.erase_mode;
+        let layer = self.project.active_layer;
         let selection = self.selection.take();
         let Some(pixels) = self.project.active_pixels_mut() else {
             self.selection = selection;
             return;
         };
+        let mut capture = EditCapture::new(layer, view.width, view.height);
+        // Touch a generous area; flood bounds are applied after we know them via dry mask.
+        if let Some(region) = flood_mask(
+            pixels,
+            view.width,
+            view.height,
+            point,
+            threshold,
+            selection.as_ref(),
+        ) {
+            if let Some(bounds) = region.bounds() {
+                capture.touch_rect(pixels, bounds);
+            }
+        }
         let changed = fill_bucket(
             pixels,
             view.width,
@@ -517,13 +620,19 @@ impl EditorApp {
             threshold,
             color,
             opacity,
+            erase,
             selection.as_ref(),
         );
-        self.selection = selection;
-        if changed {
+        if let Some(rect) = changed {
+            if let Some(edit) = capture.finish(pixels) {
+                self.history.push(edit);
+            }
             self.dirty = true;
-            self.status = "Filled".into();
-            self.invalidate_display();
+            self.status = if erase { "Erased fill" } else { "Filled" }.into();
+            self.selection = selection;
+            self.mark_dirty_rect(rect);
+        } else {
+            self.selection = selection;
         }
     }
 
@@ -539,6 +648,11 @@ impl EditorApp {
             if self.stroke_marks.len() != need {
                 self.stroke_marks.resize(need, 0);
             }
+            self.stroke_capture = Some(EditCapture::new(
+                self.project.active_layer,
+                view.width,
+                view.height,
+            ));
             let point = screen_to_image(self.input.mouse_pos, view);
             self.brush_last = Some(point);
             self.apply_brush_segment(point, point, view.width, view.height, erase);
@@ -551,6 +665,14 @@ impl EditorApp {
         }
         if self.input.mouse_released {
             self.brush_last = None;
+            if let Some(capture) = self.stroke_capture.take() {
+                let layer = capture.layer();
+                if let Some(pixels) = self.project.layers.get(layer).map(|l| l.pixels.as_slice())
+                    && let Some(edit) = capture.finish(pixels)
+                {
+                    self.history.push(edit);
+                }
+            }
             if self.brush_dirty {
                 self.status = "Image modified".into();
                 self.brush_dirty = false;
@@ -582,6 +704,12 @@ impl EditorApp {
         let stroke_id = self.stroke_id;
         let selection = self.selection.take();
         let mut marks = std::mem::take(&mut self.stroke_marks);
+        let predicted = brush_dirty_bounds(from, to, size, width, height);
+        if let Some(capture) = self.stroke_capture.as_mut()
+            && let Some(pixels) = self.project.layers.get(active).map(|l| l.pixels.as_slice())
+        {
+            capture.touch_rect(pixels, predicted);
+        }
         let Some(pixels) = self.project.layers.get_mut(active).map(|l| &mut l.pixels) else {
             self.selection = selection;
             self.stroke_marks = marks;
@@ -608,6 +736,194 @@ impl EditorApp {
             self.mark_dirty_rect(rect);
         }
     }
+
+    fn begin_transform(&mut self) {
+        if self.floating.is_some() {
+            return;
+        }
+        let Some((width, height)) = self.image_size else {
+            self.status = "No image".into();
+            return;
+        };
+        let Some(selection) = self.selection.clone() else {
+            self.status = "Select an area first".into();
+            return;
+        };
+        let layer = self.project.active_layer;
+        let Some(pixels) = self.project.layers.get_mut(layer).map(|l| &mut l.pixels) else {
+            return;
+        };
+        let mut capture = EditCapture::new(layer, width, height);
+        if let Some(bounds) = selection.bounds() {
+            capture.touch_rect(pixels, bounds);
+        }
+        let Some((floating, bounds)) =
+            FloatingTransform::extract(pixels, width, height, &selection, layer)
+        else {
+            self.stroke_capture = None;
+            return;
+        };
+        self.stroke_capture = Some(capture);
+        self.floating = Some(floating);
+        self.clear_selection();
+        self.dirty = true;
+        self.status = "Transform — drag / handles · Enter commit · Esc cancel".into();
+        self.mark_dirty_rect(bounds);
+    }
+
+    fn cancel_transform(&mut self) {
+        if self.floating.take().is_none() {
+            self.transform_drag = None;
+            self.transform_last = None;
+            return;
+        }
+        if let Some(capture) = self.stroke_capture.take() {
+            let layer = capture.layer();
+            if let Some(pixels) = self.project.layers.get_mut(layer).map(|l| &mut l.pixels) {
+                if let Some(rect) = capture.restore_before(pixels) {
+                    self.mark_dirty_rect(rect);
+                }
+            }
+        }
+        self.transform_drag = None;
+        self.transform_last = None;
+        self.status = "Transform cancelled".into();
+        self.invalidate_display();
+    }
+
+    fn commit_transform(&mut self) {
+        let Some(floating) = self.floating.take() else {
+            self.transform_drag = None;
+            self.transform_last = None;
+            return;
+        };
+        let Some((width, height)) = self.image_size else {
+            return;
+        };
+        let layer = floating.layer;
+        let mut capture = self
+            .stroke_capture
+            .take()
+            .unwrap_or_else(|| EditCapture::new(layer, width, height));
+        // Expand capture to destination before stamping.
+        let corners = floating.corners();
+        let dest = PixelRect {
+            min_x: corners
+                .iter()
+                .map(|p| p.x)
+                .fold(f32::INFINITY, f32::min)
+                .floor()
+                .max(0.0) as u32,
+            min_y: corners
+                .iter()
+                .map(|p| p.y)
+                .fold(f32::INFINITY, f32::min)
+                .floor()
+                .max(0.0) as u32,
+            max_x: corners
+                .iter()
+                .map(|p| p.x)
+                .fold(f32::NEG_INFINITY, f32::max)
+                .ceil()
+                .min(width as f32) as u32,
+            max_y: corners
+                .iter()
+                .map(|p| p.y)
+                .fold(f32::NEG_INFINITY, f32::max)
+                .ceil()
+                .min(height as f32) as u32,
+        };
+        if let Some(pixels) = self.project.layers.get(layer).map(|l| l.pixels.as_slice()) {
+            capture.touch_rect(pixels, dest);
+        }
+        let Some(pixels) = self.project.layers.get_mut(layer).map(|l| &mut l.pixels) else {
+            return;
+        };
+        let (dirty, selection) = floating.stamp(pixels, width, height);
+        if let Some(edit) = capture.finish(pixels) {
+            self.history.push(edit);
+        }
+        self.set_selection(selection);
+        self.transform_drag = None;
+        self.transform_last = None;
+        self.dirty = true;
+        self.status = "Transform applied".into();
+        if let Some(rect) = dirty {
+            self.mark_dirty_rect(rect);
+        } else {
+            self.invalidate_display();
+        }
+    }
+
+    fn handle_transform(&mut self, view: CanvasView) {
+        if self.floating.is_none() {
+            if self.input.mouse_pressed {
+                self.begin_transform();
+            }
+            return;
+        }
+        if self.input.key_enter {
+            self.commit_transform();
+            return;
+        }
+        if self.input.key_escape {
+            self.cancel_transform();
+            return;
+        }
+        let image_pos = view.screen_to_image(self.input.mouse_pos);
+        let handle_r = (8.0 / view.zoom.max(1e-6)).max(4.0);
+
+        if self.input.mouse_pressed {
+            let hit = self
+                .floating
+                .as_ref()
+                .and_then(|f| f.hit_test(image_pos, handle_r));
+            if let Some(hit) = hit {
+                self.transform_drag = Some(hit);
+                self.transform_last = Some(image_pos);
+            } else if self.canvas_rect.contains(self.input.mouse_pos) {
+                self.commit_transform();
+            }
+        }
+        if self.input.mouse_down
+            && let (Some(hit), Some(prev)) = (self.transform_drag, self.transform_last)
+        {
+            let mut scale = 1.0f32;
+            let mut rotation = 0.0f32;
+            if let Some(floating) = self.floating.as_mut() {
+                match hit {
+                    TransformHit::Body => {
+                        floating.center += image_pos - prev;
+                    }
+                    TransformHit::Rotate => {
+                        let a0 = (prev - floating.center).y.atan2((prev - floating.center).x);
+                        let a1 = (image_pos - floating.center)
+                            .y
+                            .atan2((image_pos - floating.center).x);
+                        floating.rotation += a1 - a0;
+                    }
+                    TransformHit::Scale(_) => {
+                        let d0 = (prev - floating.center).length().max(1.0);
+                        let d1 = (image_pos - floating.center).length().max(1.0);
+                        floating.scale = (floating.scale * (d1 / d0)).clamp(0.05, 32.0);
+                    }
+                }
+                scale = floating.scale;
+                rotation = floating.rotation;
+            }
+            self.transform_last = Some(image_pos);
+            self.invalidate_display();
+            self.status = format!(
+                "Transform  scale {:.2}  rot {:.0}°",
+                scale,
+                rotation.to_degrees()
+            );
+        }
+        if self.input.mouse_released {
+            self.transform_drag = None;
+            self.transform_last = None;
+        }
+    }
 }
 
 impl Scene for EditorApp {
@@ -625,6 +941,18 @@ impl Scene for EditorApp {
     }
 
     fn build(&mut self, ui: &mut Ui, viewport: Vec2, _stats: DrawStats) -> bool {
+        if self.input.key_undo {
+            self.undo();
+        }
+        if self.input.key_redo {
+            self.redo();
+        }
+        if self.input.key_escape && self.floating.is_some() {
+            self.cancel_transform();
+        }
+        if self.input.key_enter && self.floating.is_some() {
+            self.commit_transform();
+        }
         let paste = self.input.key_paste;
         ui::draw(ui, self, viewport);
         if paste {
@@ -632,8 +960,8 @@ impl Scene for EditorApp {
         }
         self.selection.is_some()
             || self.selection_anchor.is_some()
-            || ((self.tool == Tool::Brush || self.tool == Tool::Eraser)
-                && self.canvas_rect.contains(self.input.mouse_pos))
+            || self.floating.is_some()
+            || (self.tool == Tool::Brush && self.canvas_rect.contains(self.input.mouse_pos))
             || !self.dirty_tiles.is_empty()
     }
 
@@ -648,21 +976,28 @@ impl Scene for EditorApp {
                 canvas.clear();
                 self.canvas_cleared = false;
             }
+            canvas.set_selection_mask(device, queue, None, 0, 0);
             return;
         }
         let Some((width, height)) = self.image_size else {
             return;
         };
+        if self.selection_mask_dirty {
+            let mask = self.selection.as_ref().map(|s| s.mask_r8());
+            canvas.set_selection_mask(device, queue, mask.as_deref(), width, height);
+            self.selection_mask_dirty = false;
+        }
         if self.dirty_tiles.is_empty() {
             return;
         }
-        // For multi-layer, display_pixels is kept in sync by mark_dirty_rect / invalidate.
-        // Clone tile list first if we need to refresh composite regions that were marked
-        // only via mark_all without going through mark_dirty_rect's composite path.
         if self.needs_composite() {
             let len = width as usize * height as usize * 4;
             if self.display_pixels.as_ref().is_none_or(|p| p.len() != len) {
-                self.display_pixels = Some(composite_layers(&self.project.layers, width, height));
+                let mut display = composite_layers(&self.project.layers, width, height);
+                if let Some(floating) = self.floating.as_ref() {
+                    floating.blit_preview(&mut display, width, height);
+                }
+                self.display_pixels = Some(display);
             }
         }
         let pixels: &[u8] = if self.needs_composite() {
@@ -684,7 +1019,7 @@ impl Scene for EditorApp {
     fn canvas_present(&self) -> Option<(Rect, CanvasView, CanvasOverlay)> {
         let view = self.canvas_view()?;
         let mut overlay = CanvasOverlay::default();
-        if matches!(self.tool, Tool::Brush | Tool::Eraser) {
+        if self.tool == Tool::Brush {
             let radius = (self.brush_size * self.zoom * 0.5).max(2.5);
             let expanded = Rect {
                 min: self.canvas_rect.min - Vec2::splat(radius),
@@ -695,17 +1030,16 @@ impl Scene for EditorApp {
                 overlay.brush_radius = radius;
             }
         }
-        let selection = match (self.selection_anchor, self.selection_current) {
-            (Some(anchor), Some(current)) => Some(PixelRect::from_points(
-                anchor,
-                current,
-                view.width,
-                view.height,
-            )),
-            _ => self.selection.as_ref().and_then(|sel| sel.bounds()),
-        };
-        if let Some(rect) = selection.filter(|r| !r.is_empty()) {
-            overlay.selection = Some(view.pixel_corners(rect));
+        if let (Some(anchor), Some(current)) = (self.selection_anchor, self.selection_current) {
+            let rect = PixelRect::from_points(anchor, current, view.width, view.height);
+            if !rect.is_empty() {
+                overlay.selection_rect = Some(view.pixel_corners(rect));
+            }
+        }
+        if let Some(floating) = self.floating.as_ref() {
+            let corners = floating.corners().map(|p| view.image_to_screen(p));
+            overlay.transform_corners = Some(corners);
+            overlay.transform_rotate = Some(view.image_to_screen(floating.rotate_handle()));
         }
         Some((self.canvas_rect, view, overlay))
     }

@@ -1,30 +1,30 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Brush,
-    Eraser,
     RectangleSelect,
     MagicWand,
     Fill,
+    Transform,
 }
 
 impl Tool {
     pub fn label(self) -> &'static str {
         match self {
             Tool::Brush => "Brush",
-            Tool::Eraser => "Eraser",
             Tool::RectangleSelect => "Select",
             Tool::MagicWand => "Wand",
             Tool::Fill => "Fill",
+            Tool::Transform => "Transform",
         }
     }
 
     pub fn all() -> [Tool; 5] {
         [
             Tool::Brush,
-            Tool::Eraser,
             Tool::RectangleSelect,
             Tool::MagicWand,
             Tool::Fill,
+            Tool::Transform,
         ]
     }
 }
@@ -110,6 +110,34 @@ impl Selection {
         })
     }
 
+    /// Packed R8 mask (0/255) for GPU overlay upload.
+    pub fn mask_r8(&self) -> Vec<u8> {
+        self.mask
+            .iter()
+            .map(|&v| if v != 0 { 255 } else { 0 })
+            .collect()
+    }
+}
+
+/// Axis-aligned bounds that a brush segment may touch.
+pub fn brush_dirty_bounds(
+    from: (f32, f32),
+    to: (f32, f32),
+    size: f32,
+    width: u32,
+    height: u32,
+) -> PixelRect {
+    let radius = (size * 0.5).max(0.5) + 1.0;
+    let min_x = (from.0.min(to.0) - radius).floor().max(0.0) as u32;
+    let min_y = (from.1.min(to.1) - radius).floor().max(0.0) as u32;
+    let max_x = (from.0.max(to.0) + radius).ceil().min(width as f32) as u32;
+    let max_y = (from.1.max(to.1) + radius).ceil().min(height as f32) as u32;
+    PixelRect {
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+    }
 }
 
 pub struct BrushStroke<'a> {
@@ -351,25 +379,29 @@ pub fn fill_bucket(
     threshold: u8,
     color: [f32; 3],
     opacity: f32,
+    erase: bool,
     clip: Option<&Selection>,
-) -> bool {
-    let Some(region) = flood_mask(pixels, width, height, seed, threshold, clip) else {
-        return false;
-    };
+) -> Option<PixelRect> {
+    let region = flood_mask(pixels, width, height, seed, threshold, clip)?;
+    let bounds = region.bounds()?;
     let color = stroke_color(color);
     let opacity = opacity.clamp(0.0, 1.0);
     let mut changed = false;
-    for y in 0..height {
-        for x in 0..width {
+    for y in bounds.min_y..bounds.max_y {
+        for x in bounds.min_x..bounds.max_x {
             if !region.contains(x, y) {
                 continue;
             }
             let offset = ((y * width + x) * 4) as usize;
-            paint_color(&mut pixels[offset..offset + 4], opacity, color);
+            if erase {
+                erase_pixel(&mut pixels[offset..offset + 4], opacity);
+            } else {
+                paint_color(&mut pixels[offset..offset + 4], opacity, color);
+            }
             changed = true;
         }
     }
-    changed
+    changed.then_some(bounds)
 }
 
 pub fn composite_layers(layers: &[crate::project::Layer], width: u32, height: u32) -> Vec<u8> {
@@ -401,20 +433,25 @@ pub fn composite_region(
         if !layer.visible || layer.pixels.len() < width as usize * height as usize * 4 {
             continue;
         }
+        let opacity = layer.opacity.clamp(0.0, 1.0);
+        if opacity <= f32::EPSILON {
+            continue;
+        }
         for py in y..y1 {
             for px in x..x1 {
                 let offset = ((py * width + px) * 4) as usize;
                 over(
                     &mut out[offset..offset + 4],
                     &layer.pixels[offset..offset + 4],
+                    opacity,
                 );
             }
         }
     }
 }
 
-fn over(dst: &mut [u8], src: &[u8]) {
-    let src_a = src[3] as f32 / 255.0;
+fn over(dst: &mut [u8], src: &[u8], opacity: f32) {
+    let src_a = (src[3] as f32 / 255.0) * opacity;
     if src_a <= f32::EPSILON {
         return;
     }
@@ -431,6 +468,234 @@ fn over(dst: &mut [u8], src: &[u8]) {
         dst[c] = (value * 255.0).round().clamp(0.0, 255.0) as u8;
     }
     dst[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+}
+
+/// Floating selection used by the Transform tool.
+#[derive(Clone)]
+pub struct FloatingTransform {
+    pub layer: usize,
+    pub pixels: Vec<u8>,
+    pub mask: Vec<u8>,
+    pub bw: u32,
+    pub bh: u32,
+    pub center: glam::Vec2,
+    pub scale: f32,
+    pub rotation: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformHit {
+    Body,
+    Scale(u8),
+    Rotate,
+}
+
+impl FloatingTransform {
+    pub fn extract(
+        pixels: &mut [u8],
+        width: u32,
+        _height: u32,
+        selection: &Selection,
+        layer: usize,
+    ) -> Option<(Self, PixelRect)> {
+        let bounds = selection.bounds()?;
+        let bw = bounds.max_x - bounds.min_x;
+        let bh = bounds.max_y - bounds.min_y;
+        if bw == 0 || bh == 0 {
+            return None;
+        }
+        let mut fp = vec![0u8; (bw * bh * 4) as usize];
+        let mut mask = vec![0u8; (bw * bh) as usize];
+        for y in bounds.min_y..bounds.max_y {
+            for x in bounds.min_x..bounds.max_x {
+                if !selection.contains(x, y) {
+                    continue;
+                }
+                let li = ((y - bounds.min_y) * bw + (x - bounds.min_x)) as usize;
+                let src = ((y * width + x) * 4) as usize;
+                fp[li * 4..li * 4 + 4].copy_from_slice(&pixels[src..src + 4]);
+                mask[li] = 1;
+                pixels[src..src + 4].fill(0);
+            }
+        }
+        let center = glam::Vec2::new(
+            bounds.min_x as f32 + bw as f32 * 0.5,
+            bounds.min_y as f32 + bh as f32 * 0.5,
+        );
+        Some((
+            Self {
+                layer,
+                pixels: fp,
+                mask,
+                bw,
+                bh,
+                center,
+                scale: 1.0,
+                rotation: 0.0,
+            },
+            bounds,
+        ))
+    }
+
+    pub fn local_size(&self) -> glam::Vec2 {
+        glam::Vec2::new(self.bw as f32, self.bh as f32) * self.scale.max(0.05)
+    }
+
+    pub fn corners(&self) -> [glam::Vec2; 4] {
+        let half = self.local_size() * 0.5;
+        let locals = [
+            glam::Vec2::new(-half.x, -half.y),
+            glam::Vec2::new(half.x, -half.y),
+            glam::Vec2::new(half.x, half.y),
+            glam::Vec2::new(-half.x, half.y),
+        ];
+        let (s, c) = self.rotation.sin_cos();
+        locals.map(|p| {
+            self.center + glam::Vec2::new(p.x * c - p.y * s, p.x * s + p.y * c)
+        })
+    }
+
+    pub fn rotate_handle(&self) -> glam::Vec2 {
+        let half = self.local_size() * 0.5;
+        let local = glam::Vec2::new(0.0, -half.y - 28.0 / 1.0);
+        let (s, c) = self.rotation.sin_cos();
+        self.center + glam::Vec2::new(local.x * c - local.y * s, local.x * s + local.y * c)
+    }
+
+    pub fn hit_test(&self, image_pos: glam::Vec2, handle_r: f32) -> Option<TransformHit> {
+        let corners = self.corners();
+        for (i, c) in corners.iter().enumerate() {
+            if (*c - image_pos).length() <= handle_r {
+                return Some(TransformHit::Scale(i as u8));
+            }
+        }
+        if (self.rotate_handle() - image_pos).length() <= handle_r {
+            return Some(TransformHit::Rotate);
+        }
+        // Inverse transform point into local unscaled bbox.
+        let delta = image_pos - self.center;
+        let (s, c) = (-self.rotation).sin_cos();
+        let local = glam::Vec2::new(delta.x * c - delta.y * s, delta.x * s + delta.y * c)
+            / self.scale.max(0.05);
+        let half = glam::Vec2::new(self.bw as f32, self.bh as f32) * 0.5;
+        if local.x.abs() <= half.x && local.y.abs() <= half.y {
+            let lx = (local.x + half.x).floor() as i32;
+            let ly = (local.y + half.y).floor() as i32;
+            if lx >= 0 && ly >= 0 && (lx as u32) < self.bw && (ly as u32) < self.bh {
+                let idx = (ly as u32 * self.bw + lx as u32) as usize;
+                if self.mask.get(idx).copied().unwrap_or(0) != 0 {
+                    return Some(TransformHit::Body);
+                }
+            }
+            return Some(TransformHit::Body);
+        }
+        None
+    }
+
+    pub fn stamp(
+        &self,
+        pixels: &mut [u8],
+        width: u32,
+        height: u32,
+    ) -> (Option<PixelRect>, Selection) {
+        let mut mask = vec![0u8; width as usize * height as usize];
+        let corners = self.corners();
+        let min_x = corners
+            .iter()
+            .map(|p| p.x)
+            .fold(f32::INFINITY, f32::min)
+            .floor()
+            .max(0.0) as u32;
+        let min_y = corners
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::INFINITY, f32::min)
+            .floor()
+            .max(0.0) as u32;
+        let max_x = corners
+            .iter()
+            .map(|p| p.x)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil()
+            .min(width as f32) as u32;
+        let max_y = corners
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil()
+            .min(height as f32) as u32;
+        let half = glam::Vec2::new(self.bw as f32, self.bh as f32) * 0.5;
+        let inv_scale = 1.0 / self.scale.max(0.05);
+        let (s, c) = (-self.rotation).sin_cos();
+        let mut dirty: Option<PixelRect> = None;
+        for y in min_y..max_y {
+            for x in min_x..max_x {
+                let delta = glam::Vec2::new(x as f32 + 0.5, y as f32 + 0.5) - self.center;
+                let local = glam::Vec2::new(delta.x * c - delta.y * s, delta.x * s + delta.y * c)
+                    * inv_scale;
+                let lx = local.x + half.x;
+                let ly = local.y + half.y;
+                if lx < 0.0 || ly < 0.0 || lx >= self.bw as f32 || ly >= self.bh as f32 {
+                    continue;
+                }
+                let ix = lx.floor() as u32;
+                let iy = ly.floor() as u32;
+                let li = (iy * self.bw + ix) as usize;
+                if self.mask.get(li).copied().unwrap_or(0) == 0 {
+                    continue;
+                }
+                let src = li * 4;
+                let dst = ((y * width + x) * 4) as usize;
+                let src_px = &self.pixels[src..src + 4];
+                if src_px[3] == 0 {
+                    continue;
+                }
+                over(&mut pixels[dst..dst + 4], src_px, 1.0);
+                mask[(y * width + x) as usize] = 1;
+                let rect = PixelRect {
+                    min_x: x,
+                    min_y: y,
+                    max_x: x + 1,
+                    max_y: y + 1,
+                };
+                dirty = Some(match dirty {
+                    Some(prev) => PixelRect {
+                        min_x: prev.min_x.min(rect.min_x),
+                        min_y: prev.min_y.min(rect.min_y),
+                        max_x: prev.max_x.max(rect.max_x),
+                        max_y: prev.max_y.max(rect.max_y),
+                    },
+                    None => rect,
+                });
+            }
+        }
+        (
+            dirty,
+            Selection {
+                width,
+                height,
+                mask,
+            },
+        )
+    }
+
+    /// Stamp into an RGBA buffer the size of the document for preview compositing.
+    pub fn blit_preview(&self, out: &mut [u8], width: u32, _height: u32) -> Option<PixelRect> {
+        let mut tmp = vec![0u8; out.len()];
+        let (dirty, _) = self.stamp(&mut tmp, width, _height);
+        if let Some(rect) = dirty {
+            for y in rect.min_y..rect.max_y {
+                for x in rect.min_x..rect.max_x {
+                    let o = ((y * width + x) * 4) as usize;
+                    if tmp[o + 3] == 0 {
+                        continue;
+                    }
+                    over(&mut out[o..o + 4], &tmp[o..o + 4], 1.0);
+                }
+            }
+        }
+        dirty
+    }
 }
 
 #[cfg(test)]
@@ -558,8 +823,39 @@ mod tests {
     fn fill_paints_connected_region() {
         let mut pixels = vec![255u8; 2 * 1 * 4];
         pixels[4..8].copy_from_slice(&[0, 0, 0, 255]);
-        fill_bucket(&mut pixels, 2, 1, (0, 0), 0, [1.0, 0.0, 0.0], 1.0, None);
+        assert!(
+            fill_bucket(
+                &mut pixels,
+                2,
+                1,
+                (0, 0),
+                0,
+                [1.0, 0.0, 0.0],
+                1.0,
+                false,
+                None,
+            )
+            .is_some()
+        );
         assert_eq!(&pixels[0..4], &[255, 0, 0, 255]);
         assert_eq!(&pixels[4..8], &[0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn fill_erase_reduces_alpha() {
+        let mut pixels = vec![10, 20, 30, 200, 0, 0, 0, 255];
+        fill_bucket(
+            &mut pixels,
+            2,
+            1,
+            (0, 0),
+            0,
+            [0.0, 0.0, 0.0],
+            0.5,
+            true,
+            None,
+        );
+        assert_eq!(pixels[3], 100);
+        assert_eq!(pixels[7], 255);
     }
 }

@@ -4,11 +4,15 @@ struct Uniforms {
     image_size: vec2<f32>,
     zoom: f32,
     rotation: f32,
+    has_selection: f32,
+    time: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var img: texture_2d<f32>;
-@group(0) @binding(2) var samp: sampler;
+@group(0) @binding(2) var samp_near: sampler;
+@group(0) @binding(3) var sel: texture_2d<f32>;
+@group(0) @binding(4) var samp_linear: sampler;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -59,9 +63,23 @@ fn checker(screen: vec2<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let tex = textureSampleLevel(img, samp, in.uv, 0.0);
+    let tex = textureSampleLevel(img, samp_near, in.uv, 0.0);
     let bg = checker(in.screen);
-    let rgb = mix(bg, tex.rgb, tex.a);
+    var rgb = mix(bg, tex.rgb, tex.a);
+
+    // Krita-style marching ants: ~1 screen-pixel contour, zoom-independent via fwidth.
+    if (u.has_selection > 0.5) {
+        let m = textureSampleLevel(sel, samp_linear, in.uv, 0.0).r;
+        let fw = max(fwidth(m), 1e-4);
+        // Thin band around the 0.5 isocontour (screen-space thickness).
+        if (abs(m - 0.5) < fw * 0.7) {
+            let period = 8.0;
+            let phase = in.screen.x + in.screen.y - u.time * 48.0;
+            let on = fract(phase / period) < 0.5;
+            rgb = select(vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0), on);
+        }
+    }
+
     return vec4<f32>(rgb, 1.0);
 }
 

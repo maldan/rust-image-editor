@@ -42,10 +42,16 @@ impl Default for Manifest {
     }
 }
 
+fn default_opacity() -> f32 {
+    1.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LayerMeta {
     pub name: String,
     pub visible: bool,
+    #[serde(default = "default_opacity")]
+    pub opacity: f32,
     pub path: String,
 }
 
@@ -53,6 +59,7 @@ pub struct LayerMeta {
 pub struct Layer {
     pub name: String,
     pub visible: bool,
+    pub opacity: f32,
     pub pixels: Vec<u8>,
 }
 
@@ -88,6 +95,7 @@ impl Project {
         self.layers = vec![Layer {
             name: "Layer 1".into(),
             visible: true,
+            opacity: 1.0,
             pixels: rgba.into_raw(),
         }];
         self.active_layer = 0;
@@ -103,6 +111,7 @@ impl Project {
         self.layers.push(Layer {
             name: format!("Layer {index}"),
             visible: true,
+            opacity: 1.0,
             pixels: vec![0u8; self.width as usize * self.height as usize * 4],
         });
         self.active_layer = self.layers.len() - 1;
@@ -163,6 +172,7 @@ impl Project {
             .map(|(index, layer)| LayerMeta {
                 name: layer.name.clone(),
                 visible: layer.visible,
+                opacity: layer.opacity.clamp(0.0, 1.0),
                 path: format!("/layers/{index}.png"),
             })
             .collect();
@@ -240,6 +250,7 @@ impl Project {
                 layers.push(Layer {
                     name: meta.name.clone(),
                     visible: meta.visible,
+                    opacity: meta.opacity.clamp(0.0, 1.0),
                     pixels: rgba.into_raw(),
                 });
             }

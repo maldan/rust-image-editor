@@ -9,11 +9,14 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     ui.space(8.0);
 
     match app.tool {
-        Tool::Brush | Tool::Eraser => {
-            ui.label("Color");
-            ui.color_edit("brush_color", &mut app.brush_color);
-
-            ui.space(14.0);
+        Tool::Brush => {
+            ui.checkbox("brush_erase", "Erase mode", &mut app.erase_mode);
+            ui.space(10.0);
+            if !app.erase_mode {
+                ui.label("Color");
+                ui.color_edit("brush_color", &mut app.brush_color);
+                ui.space(14.0);
+            }
             ui.label(&format!("Size: {:.0} px", app.brush_size));
             ui.slider_stepped("brush_size", &mut app.brush_size, 1.0..=256.0, 1.0);
 
@@ -31,14 +34,27 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             ui.slider_stepped("wand_threshold", &mut app.wand_threshold, 0.0..=255.0, 1.0);
         }
         Tool::Fill => {
-            ui.label("Color");
-            ui.color_edit("fill_color", &mut app.brush_color);
-            ui.space(12.0);
+            ui.checkbox("fill_erase", "Erase mode", &mut app.erase_mode);
+            ui.space(10.0);
+            if !app.erase_mode {
+                ui.label("Color");
+                ui.color_edit("fill_color", &mut app.brush_color);
+                ui.space(12.0);
+            }
             ui.label(&format!("Opacity: {:.0}%", app.brush_opacity * 100.0));
             ui.slider("fill_opacity", &mut app.brush_opacity, 0.01..=1.0);
             ui.space(12.0);
             ui.label(&format!("Threshold: {:.0}", app.fill_threshold));
             ui.slider_stepped("fill_threshold", &mut app.fill_threshold, 0.0..=255.0, 1.0);
+        }
+        Tool::Transform => {
+            ui.label("Move, scale (corners), rotate (yellow handle).");
+            ui.space(8.0);
+            ui.label("Enter — apply · Esc — cancel");
+            if !app.has_floating_transform() {
+                ui.space(10.0);
+                ui.label("Needs an active selection.");
+            }
         }
     }
 

@@ -63,6 +63,19 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             app.move_layer_to(from, to);
             app.layer_drag = Some(to);
         }
+
+        ui.space(12.0);
+        let active = app.project.active_layer;
+        if let Some(layer) = app.project.layers.get(active) {
+            let mut opacity = layer.opacity;
+            ui.label(&format!("Opacity: {:.0}%", opacity * 100.0));
+            if ui
+                .slider("layer_opacity", &mut opacity, 0.0..=1.0)
+                .changed()
+            {
+                app.set_active_layer_opacity(opacity);
+            }
+        }
     }
 
     ui.space(12.0);
