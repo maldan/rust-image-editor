@@ -6,6 +6,29 @@ use crate::tiles::TILE_SIZE;
 pub const TILE_BYTES: usize = (TILE_SIZE * TILE_SIZE * 4) as usize;
 pub type Tile = Arc<Vec<u8>>;
 
+/// Half-open image bounds in document coordinates, including outside the canvas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RasterRect {
+    pub min_x: i32,
+    pub min_y: i32,
+    pub max_x: i32,
+    pub max_y: i32,
+}
+
+impl RasterRect {
+    pub fn is_empty(self) -> bool { self.max_x <= self.min_x || self.max_y <= self.min_y }
+    pub fn size(self) -> (u32, u32) {
+        (self.max_x.abs_diff(self.min_x), self.max_y.abs_diff(self.min_y))
+    }
+}
+
+impl From<crate::editing::PixelRect> for RasterRect {
+    fn from(rect: crate::editing::PixelRect) -> Self {
+        Self { min_x: rect.min_x as i32, min_y: rect.min_y as i32,
+            max_x: rect.max_x as i32, max_y: rect.max_y as i32 }
+    }
+}
+
 /// Pixel coordinates are signed and independent of the document bounds.
 pub trait Raster {
     fn read(&self, width: u32, x: i32, y: i32) -> [u8; 4];
@@ -132,6 +155,24 @@ impl SparsePixels {
             }
         }
         bounds
+    }
+
+    /// Turn near-transparent pixels into transparent black, including off-canvas pixels.
+    pub fn fix_alpha(&mut self) -> usize {
+        let mut changed = 0;
+        for tile in self.tiles.values_mut() {
+            if !tile.chunks_exact(4).any(|pixel| (1..5).contains(&pixel[3])) {
+                continue;
+            }
+            for pixel in Arc::make_mut(tile).chunks_exact_mut(4) {
+                if (1..5).contains(&pixel[3]) {
+                    pixel.fill(0);
+                    changed += 1;
+                }
+            }
+        }
+        if changed > 0 { self.prune(); }
+        changed
     }
 
     pub fn prune(&mut self) {

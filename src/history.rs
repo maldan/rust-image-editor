@@ -106,6 +106,13 @@ enum HistoryEntry {
         after: SparsePixels,
     },
     Pixels(HistoryEdit),
+    InsertLayer {
+        index: usize,
+        inserted: Option<Layer>,
+        active_before: usize,
+        size_before: (u32, u32),
+        size_after: (u32, u32),
+    },
     DeleteLayer {
         index: usize,
         // Ownership moves between the document and history on Undo / Redo.
@@ -151,6 +158,22 @@ impl History {
         self.redo.clear();
     }
 
+    pub fn insert_layer(&mut self, project: &mut Project, layer: Layer, canvas_size: (u32, u32)) {
+        let index = project.layers.len();
+        let active_before = project.active_layer;
+        let size_before = (project.width, project.height);
+        if project.width == 0 || project.height == 0 {
+            (project.width, project.height) = canvas_size;
+        }
+        project.layers.push(layer);
+        project.active_layer = index;
+        project.sync_manifest_pub();
+        self.push_entry(HistoryEntry::InsertLayer {
+            index, inserted: None, active_before, size_before,
+            size_after: (project.width, project.height),
+        });
+    }
+
     pub fn delete_layer(&mut self, project: &mut Project, index: usize) -> bool {
         let (width, height, active_before) = (project.width, project.height, project.active_layer);
         let Some(layer) = project.delete_layer(index) else {
@@ -169,6 +192,13 @@ impl History {
 
     pub fn undo(&mut self, project: &mut Project) -> Option<HistoryChange> {
         let change = match self.undo.last_mut()? {
+            HistoryEntry::InsertLayer { index, inserted, active_before, size_before, .. } => {
+                *inserted = Some(project.delete_layer(*index)?);
+                (project.width, project.height) = *size_before;
+                project.active_layer = *active_before;
+                project.sync_manifest_pub();
+                HistoryChange::Layers
+            }
             HistoryEntry::Raster { layer, before, .. } => {
                 project.layers.get_mut(*layer)?.pixels = before.clone();
                 HistoryChange::Layers
@@ -212,6 +242,14 @@ impl History {
 
     pub fn redo(&mut self, project: &mut Project) -> Option<HistoryChange> {
         let change = match self.redo.last_mut()? {
+            HistoryEntry::InsertLayer { index, inserted, size_after, .. } => {
+                if *index > project.layers.len() { return None; }
+                project.layers.insert(*index, inserted.take()?);
+                (project.width, project.height) = *size_after;
+                project.active_layer = *index;
+                project.sync_manifest_pub();
+                HistoryChange::Layers
+            }
             HistoryEntry::Raster { layer, after, .. } => {
                 project.layers.get_mut(*layer)?.pixels = after.clone();
                 HistoryChange::Layers

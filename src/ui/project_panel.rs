@@ -15,6 +15,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         let mut reorder: Option<(usize, usize)> = None;
         let mut select: Option<usize> = None;
         let mut delete: Option<usize> = None;
+        let mut copy: Option<usize> = None;
         let mut visibility: Option<(usize, bool)> = None;
 
         for index in (0..count).rev() {
@@ -29,11 +30,14 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                         visible = !visible;
                         visibility = Some((index, visible));
                     }
-                    let name_width = (ui.available_size().x / ui.scale() - 110.0).max(1.0);
+                    let name_width = (ui.available_size().x / ui.scale() - 142.0).max(1.0);
                     ui.label_fixed(name_width, &name);
                     ui.spacer();
                     if ui.icon_button(&format!("layer_delete_{index}"), "delete", false) {
                         delete = Some(index);
+                    }
+                    if ui.icon_button(&format!("layer_copy_{index}"), "copy", false) {
+                        copy = Some(index);
                     }
                 });
             });
@@ -64,7 +68,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         if let Some((index, visible)) = visibility {
             app.set_layer_visible(index, visible);
         }
-        if let Some(index) = delete {
+        if let Some(index) = copy {
+            app.copy_layer_at(index, ui);
+            app.layer_drag = None;
+        } else if let Some(index) = delete {
             app.delete_layer(index);
         } else if let Some((from, to)) = reorder {
             app.move_layer_to(from, to);

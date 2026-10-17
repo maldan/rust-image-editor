@@ -121,14 +121,15 @@ impl Project {
 
     /// Insert into the existing canvas. Fit uses the original input bounds;
     /// native-size insertion preserves the complete image beyond the canvas.
-    pub fn add_raster_layer(&mut self, image: &image::RgbaImage, name: String, region: crate::editing::PixelRect, fit: bool) -> Result<(), String> {
+    pub fn add_raster_layer(&mut self, image: &image::RgbaImage, name: String, region: impl Into<crate::raster::RasterRect>, fit: bool) -> Result<(), String> {
+        let region = region.into();
         if image.width() == 0 || image.height() == 0 { return Err("Result image is empty".into()); }
-        if region.is_empty() || region.max_x > self.width || region.max_y > self.height {
-            return Err("Result destination is outside the canvas".into());
+        if region.is_empty() {
+            return Err("Result destination is empty".into());
         }
         let resized;
         let image = if fit {
-            let size = (region.max_x - region.min_x, region.max_y - region.min_y);
+            let size = region.size();
             if image.dimensions() != size {
                 resized = image::imageops::resize(image, size.0, size.1, image::imageops::FilterType::Lanczos3);
                 &resized
@@ -138,7 +139,7 @@ impl Project {
         self.add_layer();
         let target = &mut self.layers[self.active_layer].pixels;
         *target = SparsePixels::from_rgba(image.as_raw(), w, h);
-        target.offset = (region.min_x as i32, region.min_y as i32);
+        target.offset = (region.min_x, region.min_y);
         self.layers[self.active_layer].name = name;
         self.sync_manifest();
         Ok(())

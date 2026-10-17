@@ -9,6 +9,7 @@ pub use config::HostConfig;
 pub use catalog::{Catalog, CatalogLoad};
 pub use workflow::DrawSettings;
 pub use workflow::ControlNetSettings;
+pub use workflow::UpscaleSettings;
 pub use workflow::validate_lineart_resolution;
 pub use job::{Job, JobResult};
 

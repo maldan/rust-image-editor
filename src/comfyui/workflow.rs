@@ -6,6 +6,47 @@ pub const REDRAW: &str = include_str!("../../comfyui/image.sd_redraw.json");
 pub const DRAW: &str = include_str!("../../comfyui/image.sd_draw.json");
 pub const LINEART: &str = include_str!("../../comfyui/image.to_lineart.json");
 pub const DRAW_CN: &str = include_str!("../../comfyui/image.sd_draw_cn.json");
+pub const UPSCALE: &str = include_str!("../../comfyui/image.sd_upscale.json");
+
+#[derive(Clone, Copy)]
+pub struct UpscaleSettings {
+    pub scale_by: f32,
+    pub denoise: f32,
+    pub control: ControlNetSettings,
+}
+
+impl Default for UpscaleSettings {
+    fn default() -> Self {
+        Self {
+            scale_by: 1.75, denoise: 0.3,
+            control: ControlNetSettings { strength: 0.75, ..Default::default() },
+        }
+    }
+}
+
+impl UpscaleSettings {
+    pub fn validate(&self, settings: &DrawSettings) -> Result<(), String> {
+        settings.validate_redraw(self.denoise)?;
+        self.control.validate(settings)?;
+        if !self.scale_by.is_finite() || self.scale_by < 1.0 {
+            return Err("Upscale factor must be finite and at least 1".into());
+        }
+        Ok(())
+    }
+}
+
+pub fn prepare_upscale(
+    filename: &str, settings: &DrawSettings, upscale: UpscaleSettings, seed: u64,
+) -> Result<(Value, String), String> {
+    upscale.validate(settings)?;
+    let mut graph: Value =
+        serde_json::from_str(UPSCALE).map_err(|e| format!("Invalid upscale workflow: {e}"))?;
+    patch(&mut graph, "ReferenceImage", "image", filename.into())?;
+    patch(&mut graph, "Upscale", "scale_by", upscale.scale_by.into())?;
+    patch(&mut graph, "Sampler", "denoise", upscale.denoise.into())?;
+    patch_control_net(&mut graph, upscale.control)?;
+    prepare_sd(graph, settings, seed)
+}
 
 #[derive(Clone, Copy)]
 pub struct ControlNetSettings {
@@ -46,10 +87,14 @@ pub fn prepare_draw_cn(
     let mut graph: Value =
         serde_json::from_str(DRAW_CN).map_err(|e| format!("Invalid ControlNet workflow: {e}"))?;
     patch(&mut graph, "ReferenceImage", "image", filename.into())?;
-    patch(&mut graph, "ControlNet", "strength", control.strength.into())?;
-    patch(&mut graph, "ControlNet", "start_percent", control.start_percent.into())?;
-    patch(&mut graph, "ControlNet", "end_percent", control.end_percent.into())?;
+    patch_control_net(&mut graph, control)?;
     prepare_sd(graph, settings, seed)
+}
+
+fn patch_control_net(graph: &mut Value, control: ControlNetSettings) -> Result<(), String> {
+    patch(graph, "ControlNet", "strength", control.strength.into())?;
+    patch(graph, "ControlNet", "start_percent", control.start_percent.into())?;
+    patch(graph, "ControlNet", "end_percent", control.end_percent.into())
 }
 
 pub fn validate_lineart_resolution(resolution: i32) -> Result<(), String> {
@@ -261,6 +306,66 @@ fn patch(graph: &mut Value, title: &str, key: &str, value: Value) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn upscale_patches_settings_and_preserves_depth_and_latent_path() {
+        let original: Value = serde_json::from_str(UPSCALE).unwrap();
+        for mask in 0..8 {
+            let mut settings = DrawSettings {
+                model: Some("chosen".into()), positive: "forest".into(), negative: "text".into(),
+                width: -1, height: 0, ..Default::default()
+            };
+            for (i, lora) in settings.loras.iter_mut().enumerate() {
+                if mask & (1 << i) != 0 { lora.name = Some(format!("lora{i}")); }
+            }
+            let upscale = UpscaleSettings {
+                scale_by: 2.5, denoise: 0.5,
+                control: ControlNetSettings { strength: 0.5, start_percent: 0.25, end_percent: 0.75 },
+            };
+            let (graph, save) = prepare_upscale("folder/input.png", &settings, upscale, 42).unwrap();
+            assert_eq!(graph[&save], original[&save]);
+            for title in ["Depth Anything V2 - Relative", "VAE Encode", "Get Image Size", "ResizeAndPadImage", "Load ControlNet Model"] {
+                let id = node_id(&graph, title).unwrap();
+                assert_eq!(graph[&id], original[&id]);
+            }
+            assert_eq!(graph[node_id(&graph, "ReferenceImage").unwrap()]["inputs"]["image"], "folder/input.png");
+            assert_eq!(graph[node_id(&graph, "Upscale").unwrap()]["inputs"]["scale_by"], 2.5);
+            let sampler = node_id(&graph, "Sampler").unwrap();
+            assert_eq!(graph[&sampler]["inputs"]["denoise"], 0.5);
+            assert_eq!(graph[&sampler]["inputs"]["seed"], 42);
+            for key in ["positive", "negative", "latent_image"] {
+                assert_eq!(graph[&sampler]["inputs"][key], original[&sampler]["inputs"][key]);
+            }
+            let control = node_id(&graph, "ControlNet").unwrap();
+            for (key, value) in [("strength", 0.5), ("start_percent", 0.25), ("end_percent", 0.75)] {
+                assert_eq!(graph[&control]["inputs"][key], value);
+            }
+            assert_eq!(graph[node_id(&graph, "Model").unwrap()]["inputs"]["ckpt_name"], "chosen");
+            for (title, text) in [("Positive", "forest"), ("Negative", "text")] {
+                assert_eq!(graph[node_id(&graph, title).unwrap()]["inputs"]["text"], text);
+            }
+            for (i, lora) in settings.loras.iter().enumerate() {
+                let id = node_id(&graph, &format!("Lora{}", i + 1));
+                if let Some(name) = &lora.name {
+                    assert_eq!(graph[id.unwrap()]["inputs"]["lora_name"], *name);
+                } else { assert!(id.is_err()); }
+            }
+            // Every remaining connection must refer to an existing node after LoRA bypass.
+            for node in graph.as_object().unwrap().values() {
+                for value in node["inputs"].as_object().unwrap().values() {
+                    if let Some(connection) = value.as_array() {
+                        assert!(graph.get(connection[0].as_str().unwrap()).is_some());
+                    }
+                }
+            }
+        }
+        for scale_by in [0.0, 0.5, f32::NAN, f32::INFINITY] {
+            assert!(prepare_upscale("i", &DrawSettings::default(), UpscaleSettings { scale_by, ..Default::default() }, 0).is_err());
+        }
+        for denoise in [-0.1, 1.1, f32::NAN] {
+            assert!(prepare_upscale("i", &DrawSettings::default(), UpscaleSettings { denoise, ..Default::default() }, 0).is_err());
+        }
+    }
+
     #[test]
     fn draw_cn_uses_reference_size_control_settings_and_lora_chain() {
         let original: Value = serde_json::from_str(DRAW_CN).unwrap();

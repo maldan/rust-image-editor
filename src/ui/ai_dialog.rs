@@ -12,6 +12,7 @@ pub enum AiMode {
     Edit,
     Draw,
     DrawCn,
+    Upscale,
     Redraw,
     Inpaint,
     Lineart,
@@ -22,13 +23,14 @@ impl AiMode {
         self != Self::Draw
     }
     pub fn uses_sd(self) -> bool {
-        matches!(self, Self::Draw | Self::DrawCn | Self::Redraw | Self::Inpaint)
+        matches!(self, Self::Draw | Self::DrawCn | Self::Upscale | Self::Redraw | Self::Inpaint)
     }
     pub fn title(self) -> &'static str {
         match self {
             Self::Edit => "Edit Image",
             Self::Draw => "Draw Image",
             Self::DrawCn => "Draw with ControlNet",
+            Self::Upscale => "Upscale Image",
             Self::Redraw => "Redraw Image",
             Self::Inpaint => "Inpaint Image",
             Self::Lineart => "To Lineart",
@@ -39,6 +41,7 @@ impl AiMode {
             Self::Edit => "AI Edit",
             Self::Draw => "AI Draw",
             Self::DrawCn => "AI Draw CN",
+            Self::Upscale => "AI Upscale",
             Self::Redraw => "AI Redraw",
             Self::Inpaint => "AI Inpaint",
             Self::Lineart => "AI Lineart",
@@ -105,17 +108,22 @@ pub struct AiDialog {
     pub lineart_resolution: i32,
     pub draw_settings: crate::comfyui::DrawSettings,
     pub control_net: crate::comfyui::ControlNetSettings,
+    pub upscale: crate::comfyui::UpscaleSettings,
     pub catalog: crate::comfyui::Catalog,
     pub catalog_load: Option<crate::comfyui::CatalogLoad>,
     pub catalog_message: String,
 
     pub source: AiSource,
+    pub layer_canvas_size: bool,
+    pub layer_padding: i32,
+    /// Alpha bounds captured with the modal's source layer.
+    pub layer_bounds: Option<(i32, i32, i32, i32)>,
     /// Bounds captured on opening; editor selection cannot change while the modal is open.
     pub selection_bounds: Option<crate::editing::PixelRect>,
     pub scale: f32,
     pub fit_image: bool,
     /// Original input bounds in document coordinates, captured before input scaling.
-    pub input_region: Option<crate::editing::PixelRect>,
+    pub input_region: Option<crate::raster::RasterRect>,
     pub prompt: String,
     pub config: Option<HostConfig>,
     pub job: Option<Job>,
@@ -141,10 +149,14 @@ impl Default for AiDialog {
             lineart_resolution: 512,
             draw_settings: Default::default(),
             control_net: Default::default(),
+            upscale: Default::default(),
             catalog: Default::default(),
             catalog_load: None,
             catalog_message: String::new(),
             source: AiSource::Layer,
+            layer_canvas_size: false,
+            layer_padding: 0,
+            layer_bounds: None,
             selection_bounds: None,
             scale: 1.0,
             fit_image: true,
@@ -162,6 +174,28 @@ impl Default for AiDialog {
             preview_input: Default::default(),
             close_when_stopped: false,
         }
+    }
+}
+
+impl AiDialog {
+    pub fn source_region(&self, width: u32, height: u32, layer_bounds: Option<(i32, i32, i32, i32)>) -> Result<crate::raster::RasterRect, String> {
+        use crate::raster::RasterRect;
+        if self.source == AiSource::Selection {
+            return self.selection_bounds.map(Into::into).ok_or("Select an area on the canvas first".into());
+        }
+        if self.source == AiSource::Layer && !self.layer_canvas_size {
+            if self.layer_padding < 0 { return Err("Padding must be zero or positive".into()); }
+            let (x, y, x1, y1) = layer_bounds.ok_or("Current layer has no nontransparent pixels")?;
+            let padding = self.layer_padding;
+            let error = "Layer bounds with padding exceed supported coordinates";
+            return Ok(RasterRect {
+                min_x: x.checked_sub(padding).ok_or(error)?,
+                min_y: y.checked_sub(padding).ok_or(error)?,
+                max_x: x1.checked_add(padding).ok_or(error)?,
+                max_y: y1.checked_add(padding).ok_or(error)?,
+            });
+        }
+        Ok(RasterRect { min_x: 0, min_y: 0, max_x: width as i32, max_y: height as i32 })
     }
 }
 
@@ -236,6 +270,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                         let valid = app.ai.config.is_some()
                             && match app.ai.mode {
                                 AiMode::Draw => app.ai.draw_settings.validate().is_ok(),
+                                AiMode::Upscale => {
+                                    app.ai.upscale.validate(&app.ai.draw_settings).is_ok()
+                                        && input_valid(app, width, height)
+                                }
                                 AiMode::DrawCn => {
                                     app.ai.control_net.validate(&app.ai.draw_settings).is_ok()
                                         && input_valid(app, width, height)
@@ -343,18 +381,25 @@ fn draw_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
                 ui.label("Denoise");
                 ui.slider("redraw_denoise", &mut ai.denoise, 0.0..=1.0);
             }
-            if ai.mode == AiMode::DrawCn {
+            if ai.mode == AiMode::Upscale {
+                ui.label("Upscale factor");
+                ui.drag_float("upscale_factor", &mut ai.upscale.scale_by, 0.05);
+                ui.label("Denoise");
+                ui.slider("upscale_denoise", &mut ai.upscale.denoise, 0.0..=1.0);
+            }
+            if matches!(ai.mode, AiMode::DrawCn | AiMode::Upscale) {
+                let control = if ai.mode == AiMode::Upscale { &mut ai.upscale.control } else { &mut ai.control_net };
                 ui.label("ControlNet strength");
-                ui.slider("cn_strength", &mut ai.control_net.strength, 0.0..=1.0);
+                ui.slider("cn_strength", &mut control.strength, 0.0..=1.0);
                 ui.label("ControlNet start (%)");
-                let mut start = ai.control_net.start_percent * 100.0;
+                let mut start = control.start_percent * 100.0;
                 if ui.slider("cn_start", &mut start, 0.0..=100.0).changed() {
-                    ai.control_net.start_percent = start / 100.0;
+                    control.start_percent = start / 100.0;
                 }
                 ui.label("ControlNet end (%)");
-                let mut end = ai.control_net.end_percent * 100.0;
+                let mut end = control.end_percent * 100.0;
                 if ui.slider("cn_end", &mut end, 0.0..=100.0).changed() {
-                    ai.control_net.end_percent = end / 100.0;
+                    control.end_percent = end / 100.0;
                 }
             }
             ui.label("Model");
@@ -420,6 +465,10 @@ fn draw_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
                 if let Err(error) = ai.draw_settings.validate() {
                     ui.label(&error);
                 }
+            } else if ai.mode == AiMode::Upscale {
+                if let Err(error) = ai.upscale.validate(&ai.draw_settings) {
+                    ui.label(&error);
+                }
             } else if ai.mode == AiMode::DrawCn {
                 if let Err(error) = ai.control_net.validate(&ai.draw_settings) {
                     ui.label(&error);
@@ -435,15 +484,15 @@ fn input_size(ai: &AiDialog, width: u32, height: u32) -> Result<(u32, u32), Stri
     if ai.mode == AiMode::Inpaint && ai.selection_bounds.is_none() {
         return Err("Select an area to use as the inpaint mask".into());
     }
-    let (width, height) = if ai.source == AiSource::Selection {
-        let bounds = ai
-            .selection_bounds
-            .ok_or("Select an area on the canvas first")?;
-        (bounds.max_x - bounds.min_x, bounds.max_y - bounds.min_y)
-    } else {
-        (width, height)
-    };
-    crate::comfyui::scaled_size(width, height, ai.scale)
+    let region = ai.source_region(width, height, ai.layer_bounds)?;
+    if region.is_empty() { return Err("Input region is empty".into()); }
+    let (width, height) = region.size();
+    crate::comfyui::scaled_size(width, height, 1.0)?;
+    let size = crate::comfyui::scaled_size(width, height, ai.scale)?;
+    if ai.mode == AiMode::Upscale {
+        crate::comfyui::scaled_size(size.0, size.1, ai.upscale.scale_by)?;
+    }
+    Ok(size)
 }
 
 fn input_valid(app: &EditorApp, width: u32, height: u32) -> bool {
@@ -473,6 +522,13 @@ fn source_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
             _ => AiSource::Layer,
         };
     }
+    if ai.source == AiSource::Layer {
+        ui.checkbox("ai_layer_canvas_size", "Use canvas size", &mut ai.layer_canvas_size);
+        if !ai.layer_canvas_size {
+            ui.label("Padding (px per side)");
+            ui.drag_int("ai_layer_padding", &mut ai.layer_padding, 1);
+        }
+    }
     if ai.mode == AiMode::Inpaint {
         ui.label("Mask: selection (white = selected, black = outside)");
         ui.horizontal(|ui| {
@@ -486,7 +542,14 @@ fn source_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
         ui.drag_float("ai_scale", &mut ai.scale, 0.01);
     });
     match input_size(ai, width, height) {
-        Ok((w, h)) => ui.label(&format!("Input: {w} \u{00d7} {h} px")),
+        Ok((w, h)) => {
+            ui.label(&format!("Input: {w} \u{00d7} {h} px"));
+            if ai.mode == AiMode::Upscale {
+                if let Ok((w, h)) = crate::comfyui::scaled_size(w, h, ai.upscale.scale_by) {
+                    ui.label(&format!("Output: ~{w} \u{00d7} {h} px"));
+                }
+            }
+        }
         Err(error) => ui.label(&error),
     };
 }
@@ -494,6 +557,25 @@ fn source_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upscale_defaults_and_sizes_follow_input_scale_and_selection() {
+        let mut ai = AiDialog::default();
+        ai.layer_bounds = Some((0, 0, 128, 128));
+        ai.mode = AiMode::Upscale;
+        assert!(ai.mode.needs_input() && ai.mode.uses_sd());
+        assert_eq!(ai.upscale.scale_by, 1.75);
+        assert_eq!(ai.upscale.denoise, 0.3);
+        assert_eq!(ai.upscale.control.strength, 0.75);
+        ai.scale = 0.5;
+        assert_eq!(input_size(&ai, 128, 128).unwrap(), (64, 64));
+        ai.source = AiSource::Selection;
+        assert!(input_size(&ai, 128, 128).is_err());
+        ai.selection_bounds = Some(crate::editing::PixelRect { min_x: 16, min_y: 24, max_x: 112, max_y: 104 });
+        assert_eq!(input_size(&ai, 128, 128).unwrap(), (48, 40));
+        ai.upscale.scale_by = 1000.0;
+        assert!(input_size(&ai, 128, 128).is_err());
+    }
 
     #[test]
     fn lineart_defaults_to_512_and_uses_image_sources_without_sd() {
@@ -565,7 +647,7 @@ mod tests {
 
     #[test]
     fn lora_rows_appear_in_order_and_hidden_selections_are_cleared() {
-        for mode in [AiMode::Draw, AiMode::DrawCn, AiMode::Redraw, AiMode::Inpaint] {
+        for mode in [AiMode::Draw, AiMode::DrawCn, AiMode::Upscale, AiMode::Redraw, AiMode::Inpaint] {
             let mut ai = AiDialog::default();
             ai.mode = mode;
             let one = render_controls(&mut ai);
@@ -590,6 +672,7 @@ mod tests {
     #[test]
     fn inpaint_source_controls_exclude_selection_and_require_mask() {
         let mut ai = AiDialog::default();
+        ai.layer_bounds = Some((0, 0, 128, 128));
         ai.mode = AiMode::Inpaint;
         ai.source = AiSource::Selection;
         render_controls(&mut ai);

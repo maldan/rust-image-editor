@@ -3,6 +3,7 @@ mod comfyui;
 mod canvas_gpu;
 mod editing;
 mod history;
+mod layer_clipboard;
 mod host;
 mod project;
 mod tiles;

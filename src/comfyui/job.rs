@@ -28,6 +28,7 @@ enum InputWorkflow {
     Edit(String),
     Lineart(i32),
     DrawCn { settings: super::DrawSettings, control: super::ControlNetSettings },
+    Upscale { settings: super::DrawSettings, upscale: super::UpscaleSettings },
     Inpaint {
         settings: super::DrawSettings,
         denoise: f32,
@@ -93,6 +94,15 @@ impl Job {
     ) -> Self {
         Self::start_request(config, Request::Input {
             pixels, scale, workflow: InputWorkflow::DrawCn { settings, control },
+        })
+    }
+
+    pub fn start_upscale(
+        config: HostConfig, pixels: RgbaImage, scale: f32,
+        settings: super::DrawSettings, upscale: super::UpscaleSettings,
+    ) -> Self {
+        Self::start_request(config, Request::Input {
+            pixels, scale, workflow: InputWorkflow::Upscale { settings, upscale },
         })
     }
 
@@ -270,6 +280,10 @@ fn run(
                 }
             }
             let (w, h) = super::scaled_size(pixels.width(), pixels.height(), scale)?;
+            if let InputWorkflow::Upscale { settings, upscale } = &workflow {
+                upscale.validate(settings)?;
+                super::scaled_size(w, h, upscale.scale_by)?;
+            }
             check_cancel(cancel)?;
             let pixels = if pixels.dimensions() == (w, h) {
                 pixels
@@ -308,6 +322,9 @@ fn run(
                 InputWorkflow::Edit(prompt) => super::workflow::prepare(&filename, &prompt, seed)?,
                 InputWorkflow::DrawCn { settings, control } => {
                     super::workflow::prepare_draw_cn(&filename, &settings, control, seed)?
+                }
+                InputWorkflow::Upscale { settings, upscale } => {
+                    super::workflow::prepare_upscale(&filename, &settings, upscale, seed)?
                 }
                 InputWorkflow::Lineart(resolution) => {
                     super::workflow::prepare_lineart(&filename, resolution)?

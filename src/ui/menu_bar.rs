@@ -33,6 +33,14 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             app.redo();
         }
         ui.separator();
+        ui.add_enabled(!app.project().layers.is_empty(), |ui| {
+            if ui.menu_item("copy_layer", "Copy Layer (Ctrl+C)").clicked() {
+                app.copy_layer(ui);
+            }
+        });
+        if ui.menu_item("paste_layer", "Paste Layer (Ctrl+V)").clicked() {
+            app.paste_layer(ui);
+        }
         if ui.menu_item("paste_image", "Paste Image").clicked() {
             app.paste_image(ui);
         }
@@ -54,6 +62,13 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             }
             if ui.menu_item("draw_cn", "Draw with ControlNet...").clicked() {
                 app.open_ai_draw_cn();
+            }
+            if ui.menu_item("upscale_image", "Upscale Image...").clicked() {
+                app.open_ai_upscale();
+            }
+            ui.separator();
+            if ui.menu_item("fix_alpha", "Fix Alpha").clicked() {
+                app.fix_alpha();
             }
         });
         if ui.menu_item("draw_image", "Draw Image...").clicked() {

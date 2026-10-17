@@ -1,0 +1,256 @@
+{
+  "4": {
+    "inputs": {
+      "ckpt_name": "blendermixIllustrious_v01.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Model"
+    }
+  },
+  "6": {
+    "inputs": {
+      "text": "nude girl, nami, one piece",
+      "clip": [
+        "20",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Positive"
+    }
+  },
+  "7": {
+    "inputs": {
+      "text": "text, watermark",
+      "clip": [
+        "20",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Negative"
+    }
+  },
+  "10": {
+    "inputs": {
+      "lora_name": "2B_clean.safetensors",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": [
+        "4",
+        0
+      ],
+      "clip": [
+        "4",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "Lora1"
+    }
+  },
+  "11": {
+    "inputs": {
+      "seed": 125,
+      "steps": 20,
+      "cfg": 7,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 0.3,
+      "preview_method": "auto",
+      "vae_decode": "true",
+      "model": [
+        "20",
+        0
+      ],
+      "positive": [
+        "14",
+        0
+      ],
+      "negative": [
+        "14",
+        1
+      ],
+      "latent_image": [
+        "21",
+        0
+      ],
+      "optional_vae": [
+        "4",
+        2
+      ]
+    },
+    "class_type": "KSampler (Efficient)",
+    "_meta": {
+      "title": "Sampler"
+    }
+  },
+  "12": {
+    "inputs": {
+      "name": "img",
+      "image_format": "webp",
+      "quality": 0.95,
+      "images": [
+        "11",
+        5
+      ]
+    },
+    "class_type": "ImageSaveWithFormat (maga)",
+    "_meta": {
+      "title": "ImageSaveWithFormat (maga)"
+    }
+  },
+  "13": {
+    "inputs": {
+      "control_net_name": "controlnet-union-sdxl-1.0.safetensors"
+    },
+    "class_type": "ControlNetLoader",
+    "_meta": {
+      "title": "Load ControlNet Model"
+    }
+  },
+  "14": {
+    "inputs": {
+      "strength": 0.75,
+      "start_percent": 0,
+      "end_percent": 1,
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "control_net": [
+        "13",
+        0
+      ],
+      "image": [
+        "26",
+        0
+      ],
+      "vae": [
+        "4",
+        2
+      ]
+    },
+    "class_type": "ControlNetApplyAdvanced",
+    "_meta": {
+      "title": "ControlNet"
+    }
+  },
+  "15": {
+    "inputs": {
+      "image": "Screenshot 2026-01-06 010415.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "ReferenceImage"
+    }
+  },
+  "19": {
+    "inputs": {
+      "lora_name": "2B_clean.safetensors",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": ["10", 0],
+      "clip": ["10", 1]
+    },
+    "class_type": "LoraLoader",
+    "_meta": { "title": "Lora2" }
+  },
+  "20": {
+    "inputs": {
+      "lora_name": "2B_clean.safetensors",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": ["19", 0],
+      "clip": ["19", 1]
+    },
+    "class_type": "LoraLoader",
+    "_meta": { "title": "Lora3" }
+  },
+  "18": {
+    "inputs": {
+      "ckpt_name": "depth_anything_v2_vitl.pth",
+      "resolution": 512,
+      "image": [
+        "23",
+        0
+      ]
+    },
+    "class_type": "DepthAnythingV2Preprocessor",
+    "_meta": {
+      "title": "Depth Anything V2 - Relative"
+    }
+  },
+  "21": {
+    "inputs": {
+      "pixels": [
+        "23",
+        0
+      ],
+      "vae": [
+        "4",
+        2
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE Encode"
+    }
+  },
+  "23": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "scale_by": 1.75,
+      "image": [
+        "15",
+        0
+      ]
+    },
+    "class_type": "ImageScaleBy",
+    "_meta": {
+      "title": "Upscale"
+    }
+  },
+  "25": {
+    "inputs": {
+      "image": [
+        "23",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Get Image Size"
+    }
+  },
+  "26": {
+    "inputs": {
+      "target_width": [
+        "25",
+        0
+      ],
+      "target_height": [
+        "25",
+        1
+      ],
+      "padding_color": "white",
+      "interpolation": "area",
+      "image": [
+        "18",
+        0
+      ]
+    },
+    "class_type": "ResizeAndPadImage",
+    "_meta": {
+      "title": "ResizeAndPadImage"
+    }
+  }
+}
