@@ -168,6 +168,24 @@ impl Project {
         Ok(())
     }
 
+    /// Bounds of visible content inside the current canvas, independent of zoom
+    /// and selection. Normal alpha-over compositing cannot cancel source alpha.
+    pub fn visible_content_bounds(&self) -> Option<crate::raster::RasterRect> {
+        use crate::raster::RasterRect;
+        let frame = RasterRect {min_x:0,min_y:0,max_x:self.width as i32,max_y:self.height as i32};
+        let mut bounds: Option<RasterRect> = None;
+        for layer in &self.layers {
+            if !layer.visible || layer.opacity <= 0.0 { continue; }
+            let Some(b) = layer.pixels.bounds_in(frame) else { continue; };
+            bounds = Some(match bounds {
+                Some(a) => RasterRect {min_x:a.min_x.min(b.min_x),min_y:a.min_y.min(b.min_y),
+                    max_x:a.max_x.max(b.max_x),max_y:a.max_y.max(b.max_y)},
+                None => b,
+            });
+        }
+        bounds
+    }
+
     pub fn delete_layer(&mut self, index: usize) -> Option<Layer> {
         if index >= self.layers.len() { return None; }
         let layer = self.layers.remove(index);
@@ -251,7 +269,6 @@ impl Project {
 
     pub fn save(&mut self, path: &Path) -> Result<(), String> {
         self.sync_manifest();
-        let archive = MegaFile::create(path).map_err(|e| format!("Cannot create project: {e}"))?;
         let manifest = serde_json::to_vec_pretty(&self.manifest)
             .map_err(|e| format!("Cannot encode manifest: {e}"))?;
         let mut files = vec![WriteFile::new(MANIFEST_PATH, MANIFEST_KIND, manifest)];
@@ -269,9 +286,11 @@ impl Project {
                 layer.pixels.encode(),
             ));
         }
-        archive
-            .write_files(files)
-            .map_err(|e| format!("Cannot write project: {e}"))?;
+        if self.path.as_deref() == Some(path) && path.is_file() {
+            crate::safe_save::append_archive(path, files, None)?;
+        } else {
+            crate::safe_save::save_archive(path, files)?;
+        }
         self.path = Some(path.to_path_buf());
         Ok(())
     }
@@ -335,6 +354,26 @@ fn encode_png(image: &DynamicImage) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn trim_canvas_bounds_combine_visible_layers_and_clip_partial_off_canvas_content() {
+        use crate::raster::{Raster,RasterRect};
+        let mut project = Project::default();
+        project.resize_canvas(20,15).unwrap();
+        project.layers[0].pixels = SparsePixels::from_rgba(&[100,120,140,255].repeat(8*8),8,8);
+        project.layers[0].pixels.offset = (-6,5);
+        project.add_layer();
+        project.layers[1].opacity = 0.5;
+        project.layers[1].pixels.write(0,19,14,[255,0,0,1]);
+        project.add_layer();
+        project.layers[2].visible = false;
+        project.layers[2].pixels.write(0,0,0,[255,0,0,255]);
+        assert_eq!(project.visible_content_bounds(),Some(RasterRect {min_x:0,min_y:5,max_x:20,max_y:15}));
+        project.layers[1].pixels.offset = (1,0);
+        assert_eq!(project.visible_content_bounds(),Some(RasterRect {min_x:0,min_y:5,max_x:2,max_y:13}));
+        project.layers[0].visible = false;
+        assert!(project.visible_content_bounds().is_none());
+    }
 
     #[test]
     fn webp_export_and_import_preserve_rgba() {

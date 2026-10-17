@@ -1,6 +1,7 @@
 //! Editor chrome: menus, dock tabs, status bar.
 
 pub mod ai_dialog;
+pub mod hsv_dialog;
 mod assets_panel;
 mod canvas;
 mod menu_bar;
@@ -38,7 +39,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     let menu_h = 28.0 * scale;
     let status_h = 24.0 * scale;
 
-    let modal_open = app.ai.open;
+    let modal_open = app.ai.open || app.hsv.open;
     ui.add_enabled(!modal_open, |ui| {
         ui.menu_bar(|ui| {
             menu_bar::draw(ui, app);
@@ -70,4 +71,5 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
         });
     });
     ai_dialog::draw(ui, app);
+    hsv_dialog::draw(ui, app);
 }

@@ -7,6 +7,11 @@ use wgpu::util::DeviceExt;
 use crate::tiles::DirtyTiles;
 use crate::view::CanvasView;
 
+// Larger preview cores keep texture/pass counts low; the fixed halo covers
+// trilinear filtering down to Transform's minimum scale (1/20).
+const TRANSFORM_PREVIEW_SIDE: u32 = 256;
+const TRANSFORM_PREVIEW_PAD: u32 = 32;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ViewUniforms {
@@ -17,6 +22,10 @@ struct ViewUniforms {
     rotation: f32,
     opacity: f32,
     _pad: f32,
+    hue: f32,
+    saturation: f32,
+    value: f32,
+    _hsv_pad: f32,
 }
 
 #[repr(C)]
@@ -24,7 +33,7 @@ struct ViewUniforms {
 struct FloatUniforms {
     viewport: [f32; 2],
     opacity: f32,
-    _pad: f32,
+    filter_scale: f32,
     origin: [f32; 2],
     size: [f32; 2],
     image_size: [f32; 2],
@@ -84,11 +93,12 @@ pub struct LayerDraw {
 
 #[derive(Clone, Default)]
 pub struct CanvasOverlay {
+    pub hsv: Option<(usize,crate::hsv::HsvAdjustment)>,
     pub brush_center: Option<Vec2>,
     pub brush_radius: f32,
     pub selection_rect: Option<[Vec2; 4]>,
     pub transform_corners: Option<[Vec2; 4]>,
-    pub transform_rotate: Option<Vec2>,
+    pub transform_pivot: Option<Vec2>,
     pub dim_outside: bool,
     pub floating: Option<FloatingDraw>,
     pub layers: Vec<LayerDraw>,
@@ -122,6 +132,9 @@ pub struct CanvasRenderer {
     checker_pipeline: wgpu::RenderPipeline,
     layer_pipeline: wgpu::RenderPipeline,
     float_pipeline: wgpu::RenderPipeline,
+    mip_init_pipeline: wgpu::RenderPipeline,
+    mip_down_pipeline: wgpu::RenderPipeline,
+    mip_bind_layout: wgpu::BindGroupLayout,
     punch_pipeline: wgpu::RenderPipeline,
     sel_pipeline: wgpu::RenderPipeline,
     solid_pipeline: wgpu::RenderPipeline,
@@ -187,7 +200,7 @@ impl CanvasRenderer {
             entries: &[
                 buffer_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
                 texture_entry(1, true),
-                sampler_entry(2, false),
+                sampler_entry(2, true),
                 texture_entry(3, true),
             ],
         });
@@ -255,6 +268,17 @@ impl CanvasRenderer {
             wgpu::BlendState::ALPHA_BLENDING,
             &[],
         );
+        let mip_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("transform mip bind"),
+            entries: &[texture_entry(0,true),texture_entry(1,true),sampler_entry(2,true)],
+        });
+        let mip_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("transform mip layout"),bind_group_layouts:&[Some(&mip_bind_layout)],immediate_size:0,
+        });
+        let mip_init_pipeline = make_pipeline(device,&mip_layout,&shader,"vs_mip","fs_mip_init",
+            wgpu::TextureFormat::Rgba8UnormSrgb,wgpu::BlendState::REPLACE,&[]);
+        let mip_down_pipeline = make_pipeline(device,&mip_layout,&shader,"vs_mip","fs_mip_down",
+            wgpu::TextureFormat::Rgba8UnormSrgb,wgpu::BlendState::REPLACE,&[]);
         let punch_pipeline = make_pipeline(
             device,
             &float_layout,
@@ -342,6 +366,7 @@ impl CanvasRenderer {
             label: Some("canvas sel linear"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -429,6 +454,9 @@ impl CanvasRenderer {
             checker_pipeline,
             layer_pipeline,
             float_pipeline,
+            mip_init_pipeline,
+            mip_down_pipeline,
+            mip_bind_layout,
             punch_pipeline,
             sel_pipeline,
             solid_pipeline,
@@ -651,32 +679,50 @@ impl CanvasRenderer {
 
     pub fn sync_sparse_transform(&mut self, device: &wgpu::Device, queue: &wgpu::Queue,
         source: &SparsePixels, reload: bool) -> bool {
+        // Scale changes only select a mip level; they never rebuild textures.
         if !reload && !self.floating_tiles.is_empty() { return true; }
         self.floating_tiles.clear();
-        let side = crate::tiles::TILE_SIZE;
+        let side = TRANSFORM_PREVIEW_SIDE;
+        let padding = TRANSFORM_PREVIEW_PAD;
+        let texture_side = side + padding * 2;
         let make_texture = |label, format| device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(label), size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+            label: Some(label), size: wgpu::Extent3d { width: texture_side, height: texture_side, depth_or_array_layers: 1 },
             mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
         });
         let upload = |texture: &wgpu::Texture, bytes: &[u8], stride| queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All }, bytes,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(stride), rows_per_image: Some(side) },
-            wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 });
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(stride), rows_per_image: Some(texture_side) },
+            wgpu::Extent3d { width: texture_side, height: texture_side, depth_or_array_layers: 1 });
         let mask = make_texture("tile mask", wgpu::TextureFormat::R8Unorm);
-        upload(&mask, &vec![255; (side*side) as usize], side);
+        upload(&mask, &vec![255; (texture_side*texture_side) as usize], texture_side);
         let mask_view = mask.create_view(&Default::default());
-        for (&(tx,ty), pixels) in &source.tiles {
-            let texture = make_texture("floating tile", wgpu::TextureFormat::Rgba8UnormSrgb);
-            upload(&texture, pixels, side*4);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {label:Some("transform mip upload")});
+        // Disjoint core quads, with neighbouring texels in each texture's halo.
+        // Empty neighbouring cores carry filter tails across occupied tile edges.
+        let mut cores = std::collections::HashSet::new();
+        let tiles_per_core = (side / crate::tiles::TILE_SIZE) as i32;
+        for &(tx,ty) in source.tiles.keys() {
+            let (tx,ty) = (tx.div_euclid(tiles_per_core),ty.div_euclid(tiles_per_core));
+            for dy in -1..=1 { for dx in -1..=1 { cores.insert((tx+dx,ty+dy)); } }
+        }
+        for (tx,ty) in cores {
+            let x = tx*side as i32+source.offset.0;
+            let y = ty*side as i32+source.offset.1;
+            let pixels = source.region(x-padding as i32,y-padding as i32,texture_side,texture_side);
+            if !pixels.chunks_exact(4).any(|p| p[3] != 0) { continue; }
+            let input = make_texture("floating source", wgpu::TextureFormat::Rgba8UnormSrgb);
+            upload(&input, &pixels, texture_side*4);
+            let texture = self.make_transform_mips(device,&mut encoder,&input.create_view(&Default::default()),&mask_view,texture_side,texture_side);
             let uniform = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("floating tile uniforms"), size: std::mem::size_of::<FloatUniforms>() as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
             });
-            let bind_group = self.transform_bind_group(device, &uniform, &texture.create_view(&Default::default()), &mask_view, "floating tile");
+            let bind_group = self.transform_bind_group(device, &uniform, &texture.create_view(&Default::default()), &mask_view, "floating tile",true);
             self.floating_tiles.push(FloatingTileGpu { _texture: texture, uniform, bind_group,
-                origin: Vec2::new((tx*side as i32+source.offset.0) as f32,(ty*side as i32+source.offset.1) as f32) });
+                origin: Vec2::new(x as f32,y as f32) });
         }
+        queue.submit([encoder.finish()]);
         self.tile_mask = Some(mask);
         true
     }
@@ -755,7 +801,10 @@ impl CanvasRenderer {
                 wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(height) },
                 wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             );
-            self.floating_texture = Some(floating_texture);
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {label:Some("selection mip upload")});
+            self.floating_texture = Some(self.make_transform_mips(device,&mut encoder,
+                &floating_texture.create_view(&Default::default()),&view,width,height));
+            queue.submit([encoder.finish()]);
             self.mask_texture = Some(texture);
             self.mask_view = Some(view);
             self.mask_size = (width, height);
@@ -776,6 +825,7 @@ impl CanvasRenderer {
                 &layer_view,
                 mask_view,
                 "canvas punch bg",
+                false,
             ));
             self.floating_bind_group = Some(self.transform_bind_group(
                 device,
@@ -783,11 +833,58 @@ impl CanvasRenderer {
                 &self.floating_texture.as_ref().unwrap().create_view(&Default::default()),
                 mask_view,
                 "canvas float bg",
+                true,
             ));
             self.transform_layer = Some(layer_index);
             self.transform_epoch = self.layer_epoch;
         }
         true
+    }
+
+    /// Build a premultiplied, linear-light mip pyramid once on the GPU. Both
+    /// selections and sparse cores use the same constant-cost preview shader.
+    fn make_transform_mips(&self,device:&wgpu::Device,encoder:&mut wgpu::CommandEncoder,
+        input:&wgpu::TextureView,mask:&wgpu::TextureView,width:u32,height:u32) -> wgpu::Texture {
+        let levels = width.max(height).ilog2()+1;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label:Some("transform mip pyramid"),
+            size:wgpu::Extent3d {width,height,depth_or_array_layers:1},
+            mip_level_count:levels,sample_count:1,dimension:wgpu::TextureDimension::D2,
+            format:wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage:wgpu::TextureUsages::TEXTURE_BINDING|wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats:&[],
+        });
+        for level in 0..levels {
+            let destination = texture.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level:level,mip_level_count:Some(1),..Default::default()
+            });
+            let previous;
+            let source = if level==0 {input} else {
+                previous = texture.create_view(&wgpu::TextureViewDescriptor {
+                    base_mip_level:level-1,mip_level_count:Some(1),..Default::default()
+                });
+                &previous
+            };
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label:Some("transform mip source"),layout:&self.mip_bind_layout,
+                entries:&[
+                    wgpu::BindGroupEntry {binding:0,resource:wgpu::BindingResource::TextureView(source)},
+                    wgpu::BindGroupEntry {binding:1,resource:wgpu::BindingResource::TextureView(mask)},
+                    wgpu::BindGroupEntry {binding:2,resource:wgpu::BindingResource::Sampler(&self.sampler_linear)},
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label:Some("transform mip level"),
+                color_attachments:&[Some(wgpu::RenderPassColorAttachment {
+                    view:&destination,resolve_target:None,depth_slice:None,
+                    ops:wgpu::Operations {load:wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),store:wgpu::StoreOp::Store},
+                })],depth_stencil_attachment:None,timestamp_writes:None,occlusion_query_set:None,multiview_mask:None,
+            });
+            pass.set_pipeline(if level==0 {&self.mip_init_pipeline} else {&self.mip_down_pipeline});
+            pass.set_bind_group(0,&bind,&[]);
+            pass.draw(0..3,0..1);
+        }
+        texture
     }
 
     fn transform_bind_group(
@@ -797,6 +894,7 @@ impl CanvasRenderer {
         layer_view: &wgpu::TextureView,
         mask_view: &wgpu::TextureView,
         label: &str,
+        filtered: bool,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(label),
@@ -812,7 +910,7 @@ impl CanvasRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler_near),
+                    resource: wgpu::BindingResource::Sampler(if filtered {&self.sampler_linear} else {&self.sampler_near}),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -934,6 +1032,7 @@ impl CanvasRenderer {
             rotation: view.rotation,
             opacity: 1.0,
             _pad: 0.0,
+            hue:0.0,saturation:0.0,value:0.0,_hsv_pad:0.0,
         };
         queue.write_buffer(&self.view_uniform_buf, 0, bytemuck::bytes_of(&view_u));
 
@@ -951,7 +1050,7 @@ impl CanvasRenderer {
             };
             if let (Some(draw), Some(corners)) = (overlay.floating, overlay.transform_corners)
                 && draw.layer == i && draw.whole_layer {
-                let side = crate::tiles::TILE_SIZE as f32;
+                let side = TRANSFORM_PREVIEW_SIDE as f32;
                 for tile in &self.floating_tiles {
                     let local = (tile.origin - draw.origin) / draw.size;
                     let size = Vec2::splat(side) / draw.size;
@@ -961,8 +1060,10 @@ impl CanvasRenderer {
                     if points.iter().all(|p|p.x<canvas_rect.min.x) || points.iter().all(|p|p.x>canvas_rect.max.x)
                         || points.iter().all(|p|p.y<canvas_rect.min.y) || points.iter().all(|p|p.y>canvas_rect.max.y) { continue; }
                     let fu = FloatUniforms {
-                        viewport: viewport.into(), opacity: draw.opacity, _pad: 0.0,
-                        origin: [0.0;2], size: [side;2], image_size: [side;2],
+                        viewport: viewport.into(), opacity: draw.opacity,
+                        filter_scale: ((corners[1]-corners[0]).length()/draw.size.x/view.zoom).clamp(0.05,1.0),
+                        origin: [TRANSFORM_PREVIEW_PAD as f32;2], size: [side;2],
+                        image_size: [side + TRANSFORM_PREVIEW_PAD as f32*2.0;2],
                         c0: points[0].into(), c1: points[1].into(), c2: points[2].into(), c3: points[3].into(),
                     };
                     queue.write_buffer(&tile.uniform,0,bytemuck::bytes_of(&fu));
@@ -1004,10 +1105,10 @@ impl CanvasRenderer {
                     let fu = FloatUniforms {
                         viewport: [viewport.x, viewport.y],
                         opacity: draw.opacity.clamp(0.0, 1.0),
-                        _pad: 0.0,
-                        origin: [draw.origin.x, draw.origin.y],
+                        filter_scale: ((corners[1]-corners[0]).length()/draw.size.x/view.zoom).clamp(0.05,1.0),
+                        origin: [0.0;2],
                         size: [draw.size.x, draw.size.y],
-                        image_size: [view.width as f32, view.height as f32],
+                        image_size: [draw.size.x, draw.size.y],
                         c0: [corners[0].x, corners[0].y],
                         c1: [corners[1].x, corners[1].y],
                         c2: [corners[2].x, corners[2].y],
@@ -1024,6 +1125,13 @@ impl CanvasRenderer {
             }
             let mut u = view_u;
             u.opacity = layer.opacity.clamp(0.0, 1.0);
+            if let Some((index,adjustment)) = overlay.hsv {
+                if index == i {
+                    u.hue = adjustment.hue;
+                    u.saturation = adjustment.saturation;
+                    u.value = adjustment.value;
+                }
+            }
             queue.write_buffer(&gpu.uniform, 0, bytemuck::bytes_of(&u));
             pass.set_bind_group(0, &gpu.bind_group, &[]);
             pass.draw(0..6, 0..1);
@@ -1065,10 +1173,12 @@ impl CanvasRenderer {
                 push_line(&mut verts, corners[i], corners[(i + 1) % 4], 1.0, cyan);
                 push_handle(&mut verts, corners[i], 5.0, cyan);
             }
-            if let Some(rot) = overlay.transform_rotate {
-                let top = (corners[0] + corners[1]) * 0.5;
-                push_line(&mut verts, top, rot, 1.5, cyan);
-                push_handle(&mut verts, rot, 5.0, [1.0, 0.85, 0.2, 1.0]);
+            if let Some(pivot) = overlay.transform_pivot {
+                for (width,color) in [(3.0,black),(1.0,cyan)] {
+                    push_circle(&mut verts,pivot,5.0,width,color);
+                    push_line(&mut verts,pivot-Vec2::new(9.0,0.0),pivot+Vec2::new(9.0,0.0),width,color);
+                    push_line(&mut verts,pivot-Vec2::new(0.0,9.0),pivot+Vec2::new(0.0,9.0),width,color);
+                }
             }
         }
         if let Some(center) = overlay.brush_center {
@@ -1259,6 +1369,304 @@ mod gpu_tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires a GPU adapter; verifies live HSV preview against committed pixels"]
+    fn hsv_preview_matches_cpu_filter_and_only_targets_the_requested_layer() {
+        use crate::hsv::HsvAdjustment;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface:None,force_fallback_adapter:false,
+            power_preference:wgpu::PowerPreference::HighPerformance,apply_limit_buckets:false,
+        })).unwrap();
+        let (device,queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut renderer = CanvasRenderer::new(&device,format);
+        let mut pixels = Vec::new();
+        for y in 0..64 { for x in 0..64 {
+            pixels.extend_from_slice(&[(x*4) as u8,(y*4) as u8,((x+y)*2) as u8,255]);
+        } }
+        let source = SparsePixels::from_rgba(&pixels,64,64);
+        renderer.upload_sparse_layers(&device,&queue,&[&source],64,64);
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label:Some("HSV proof"),size:wgpu::Extent3d {width:64,height:64,depth_or_array_layers:1},
+            mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format,
+            usage:wgpu::TextureUsages::RENDER_ATTACHMENT|wgpu::TextureUsages::COPY_SRC,view_formats:&[],
+        });
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label:None,size:64*64*4,usage:wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::MAP_READ,mapped_at_creation:false,
+        });
+        for (index,adjustment) in [(0,HsvAdjustment::default()),
+            (0,HsvAdjustment {hue:15.0,saturation:-10.0,value:3.0}),
+            (0,HsvAdjustment {hue:-180.0,saturation:100.0,value:-40.0}),
+            (0,HsvAdjustment {hue:90.0,saturation:50.0,value:100.0}),
+            (1,HsvAdjustment {hue:120.0,saturation:100.0,value:50.0})] {
+            let view = target.create_view(&Default::default());
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label:None,color_attachments:&[Some(wgpu::RenderPassColorAttachment {
+                        view:&view,resolve_target:None,depth_slice:None,
+                        ops:wgpu::Operations {load:wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),store:wgpu::StoreOp::Store},
+                    })],depth_stencil_attachment:None,timestamp_writes:None,occlusion_query_set:None,multiview_mask:None,
+                });
+                renderer.render(&queue,&mut pass,Vec2::splat(64.0),Rect::from_min_size(Vec2::ZERO,Vec2::splat(64.0)),
+                    CanvasView {center:Vec2::splat(32.0),zoom:1.0,rotation:0.0,width:64,height:64},
+                    CanvasOverlay {hsv:Some((index,adjustment)),layers:vec![LayerDraw {visible:true,opacity:1.0}],
+                        ..Default::default()},0.0);
+            }
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {texture:&target,mip_level:0,origin:wgpu::Origin3d::ZERO,aspect:wgpu::TextureAspect::All},
+                wgpu::TexelCopyBufferInfo {buffer:&buffer,layout:wgpu::TexelCopyBufferLayout {
+                    offset:0,bytes_per_row:Some(256),rows_per_image:Some(64)}},
+                wgpu::Extent3d {width:64,height:64,depth_or_array_layers:1});
+            queue.submit([encoder.finish()]);
+            let (tx,rx) = std::sync::mpsc::channel();
+            buffer.slice(..).map_async(wgpu::MapMode::Read,move |r| {tx.send(r).unwrap();});
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            rx.recv().unwrap().unwrap();
+            let data = buffer.slice(..).get_mapped_range().unwrap();
+            for (pixel,got) in pixels.chunks_exact(4).zip(data.chunks_exact(4)) {
+                let original = pixel.try_into().unwrap();
+                let expected = if index==0 {adjustment.pixel(original)} else {original};
+                for c in 0..4 {
+                    assert!((expected[c] as i32-got[c] as i32).abs()<=1,
+                        "{adjustment:?} layer={index}, original={pixel:?}, expected={expected:?}, got={got:?}");
+                }
+            }
+            drop(data); buffer.unmap();
+        }
+    }
+
+    #[test]
+    #[ignore = "manual color diagnostic: compare CPU export, GPU canvas and final UI pass"]
+    fn color_pipeline_probe() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface:None,force_fallback_adapter:false,
+            power_preference:wgpu::PowerPreference::HighPerformance,apply_limit_buckets:false,
+        })).unwrap();
+        let (device,queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut canvas = CanvasRenderer::new(&device,format);
+        let make_target = || device.create_texture(&wgpu::TextureDescriptor {
+            label:Some("color probe"),size:wgpu::Extent3d {width:64,height:64,depth_or_array_layers:1},
+            mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format,
+            usage:wgpu::TextureUsages::RENDER_ATTACHMENT|wgpu::TextureUsages::COPY_SRC|wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats:&[],
+        });
+        let scene = make_target();
+        let screen = make_target();
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label:None,size:2*64*64*4,usage:wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::MAP_READ,mapped_at_creation:false,
+        });
+        let area = Rect::from_min_size(Vec2::ZERO,Vec2::splat(64.0));
+        let mut ui = mega_ui::Ui::new();
+        ui.begin_frame(mega_ui::UiInput {viewport:Vec2::splat(64.0),..Default::default()});
+        ui.texture_rect(crate::host::CANVAS_TEXTURE,area,[0.0,0.0],[1.0,1.0]);
+        let output = ui.end_frame();
+        let mut renderer = mega_ui::wgpu::UiRenderer::new(&device,&queue,format,&ui);
+        renderer.set_viewport(&queue,64.0,64.0);
+        renderer.bind_texture_view(&device,crate::host::CANVAS_TEXTURE,scene.create_view(&Default::default()));
+        for (name,upper) in [("opaque",None),("layer opacity 50%",Some(([210,60,20,255],0.5))),
+            ("pixel alpha 128",Some(([210,60,20,128],1.0)))] {
+            let mut project = crate::project::Project::default();
+            project.import_rgba(&[30,100,200,255].repeat(64*64),64,64).unwrap();
+            if let Some((pixel,opacity)) = upper {
+                project.add_layer();
+                project.layers[1].pixels = SparsePixels::from_rgba(&pixel.repeat(64*64),64,64);
+                project.layers[1].opacity = opacity;
+            }
+            let expected = project.decoded_rgba().unwrap().unwrap().0;
+            let probe = (32*64+32)*4;
+            let temp = tempfile::tempdir().unwrap();
+            for (extension,format) in [("png",image::ImageFormat::Png),("webp",image::ImageFormat::WebP)] {
+                let path = temp.path().join(format!("probe.{extension}"));
+                project.export_image(&path,format).unwrap();
+                let decoded = image::open(path).unwrap().into_rgba8().into_raw();
+                assert_eq!(decoded,expected,"{extension} must preserve exported RGB");
+            }
+            let sources:Vec<_> = project.layers.iter().map(|l|&l.pixels).collect();
+            canvas.upload_sparse_layers(&device,&queue,&sources,64,64);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            for (is_scene,texture) in [(true,&scene),(false,&screen)] {
+                let view = texture.create_view(&Default::default());
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label:None,color_attachments:&[Some(wgpu::RenderPassColorAttachment {
+                        view:&view,resolve_target:None,depth_slice:None,
+                        ops:wgpu::Operations {load:wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),store:wgpu::StoreOp::Store},
+                    })],depth_stencil_attachment:None,timestamp_writes:None,occlusion_query_set:None,multiview_mask:None,
+                });
+                if is_scene {
+                    canvas.render(&queue,&mut pass,Vec2::splat(64.0),area,
+                        CanvasView {center:Vec2::splat(32.0),zoom:1.0,rotation:0.0,width:64,height:64},
+                        CanvasOverlay {layers:project.layers.iter().map(|l|LayerDraw {visible:l.visible,opacity:l.opacity}).collect(),
+                            ..Default::default()},0.0);
+                } else {
+                    renderer.draw(&queue,&mut pass,&output.draw_list);
+                }
+            }
+            for (index,texture) in [&scene,&screen].into_iter().enumerate() {
+                encoder.copy_texture_to_buffer(
+                    wgpu::TexelCopyTextureInfo {texture,mip_level:0,origin:wgpu::Origin3d::ZERO,aspect:wgpu::TextureAspect::All},
+                    wgpu::TexelCopyBufferInfo {buffer:&buffer,layout:wgpu::TexelCopyBufferLayout {
+                        offset:(index*64*64*4) as u64,bytes_per_row:Some(256),rows_per_image:Some(64)}},
+                    wgpu::Extent3d {width:64,height:64,depth_or_array_layers:1});
+            }
+            queue.submit([encoder.finish()]);
+            let (tx,rx) = std::sync::mpsc::channel();
+            buffer.slice(..).map_async(wgpu::MapMode::Read,move |r| {tx.send(r).unwrap();});
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            rx.recv().unwrap().unwrap();
+            let data = buffer.slice(..).get_mapped_range().unwrap();
+            let cpu = &expected[probe..probe+4];
+            let gpu = &data[probe..probe+4];
+            let displayed = &data[64*64*4+probe..64*64*4+probe+4];
+            eprintln!("{name}: CPU / PNG / WebP = {cpu:?}, GPU canvas = {gpu:?}, final UI = {displayed:?}");
+            assert_eq!(gpu,displayed,"UI composition must not alter canvas colors");
+            if upper.is_none() { assert_eq!(cpu,gpu,"opaque source must survive the complete display pipeline"); }
+            drop(data); buffer.unmap();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter; run explicitly for renderer changes"]
+    fn transform_preview_downscale_filters_stripes_across_tile_boundaries() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: None, force_fallback_adapter: false,
+            power_preference: wgpu::PowerPreference::HighPerformance, apply_limit_buckets: false,
+        })).unwrap();
+        let (device,queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let mut renderer = CanvasRenderer::new(&device,wgpu::TextureFormat::Rgba8Unorm);
+        let mut pixels = vec![0;512*512*4];
+        for y in 0..512 { for x in 0..512 {
+            let v = if x%4==0 {255} else {0};
+            pixels[(y*512+x)*4..(y*512+x)*4+4].copy_from_slice(&[v,v,v,255]);
+        } }
+        let source = SparsePixels::from_rgba(&pixels,512,512);
+        renderer.upload_sparse_layers(&device,&queue,&[&source],512,512);
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label:None,size:wgpu::Extent3d {width:64,height:64,depth_or_array_layers:1},
+            mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,
+            format:wgpu::TextureFormat::Rgba8Unorm,
+            usage:wgpu::TextureUsages::RENDER_ATTACHMENT|wgpu::TextureUsages::COPY_SRC,view_formats:&[],
+        });
+        let output = device.create_buffer(&wgpu::BufferDescriptor {
+            label:None,size:64*64*4,usage:wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::MAP_READ,mapped_at_creation:false,
+        });
+        for whole_layer in [true,false] {
+            if whole_layer {
+                renderer.sync_sparse_transform(&device,&queue,&source,true);
+            } else {
+                renderer.clear_transform();
+                assert!(renderer.sync_transform(&device,&queue,0,&vec![1;512*512],&pixels,512,512,true));
+            }
+            let mut encoder = device.create_command_encoder(&Default::default());
+            let view = target.create_view(&Default::default());
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label:None,color_attachments:&[Some(wgpu::RenderPassColorAttachment {
+                        view:&view,resolve_target:None,depth_slice:None,
+                        ops:wgpu::Operations {load:wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),store:wgpu::StoreOp::Store},
+                    })],depth_stencil_attachment:None,timestamp_writes:None,occlusion_query_set:None,multiview_mask:None,
+                });
+                renderer.render(&queue,&mut pass,Vec2::splat(64.0),Rect {min:Vec2::ZERO,max:Vec2::splat(64.0)},
+                    CanvasView {center:Vec2::splat(256.0),zoom:1.0,rotation:0.0,width:512,height:512},
+                    CanvasOverlay {
+                        layers:vec![LayerDraw {visible:true,opacity:1.0}],
+                        floating:Some(FloatingDraw {opacity:1.0,whole_layer,layer:0,origin:Vec2::ZERO,size:Vec2::splat(512.0)}),
+                        transform_corners:Some([Vec2::ZERO,Vec2::new(64.0,0.0),Vec2::splat(64.0),Vec2::new(0.0,64.0)]),
+                        ..Default::default()
+                    },0.0);
+            }
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {texture:&target,mip_level:0,origin:wgpu::Origin3d::ZERO,aspect:wgpu::TextureAspect::All},
+                wgpu::TexelCopyBufferInfo {buffer:&output,layout:wgpu::TexelCopyBufferLayout {offset:0,bytes_per_row:Some(256),rows_per_image:Some(64)}},
+                wgpu::Extent3d {width:64,height:64,depth_or_array_layers:1});
+            queue.submit([encoder.finish()]);
+            let (tx,rx) = std::sync::mpsc::channel();
+            output.slice(..).map_async(wgpu::MapMode::Read,move |r| {tx.send(r).unwrap();});
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            rx.recv().unwrap().unwrap();
+            let data = output.slice(..).get_mapped_range().unwrap();
+            for x in 24..40 {
+                let p = &data[(32*64+x)*4..(32*64+x)*4+4];
+                // Target is linear UNORM: quarter white is 64 (sRGB would be 137).
+                assert!((p[0] as i32-64).abs() <= 1,"whole_layer={whole_layer}, x={x}: {p:?}");
+                assert_eq!(p[3],255);
+            }
+            drop(data); output.unmap();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter; measures realistic interactive Transform frames"]
+    fn transform_preview_large_image_reuses_mips_while_scaling() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface:None,force_fallback_adapter:false,
+            power_preference:wgpu::PowerPreference::HighPerformance,apply_limit_buckets:false,
+        })).unwrap();
+        let (device,queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let mut renderer = CanvasRenderer::new(&device,wgpu::TextureFormat::Rgba8Unorm);
+        let pixels = [190,130,70,255].repeat(2048*2048);
+        let mask = vec![1;2048*2048];
+        let source = SparsePixels::from_rgba(&pixels,2048,2048);
+        renderer.upload_sparse_layers(&device,&queue,&[&source],2048,2048);
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label:None,size:wgpu::Extent3d {width:512,height:512,depth_or_array_layers:1},
+            mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,
+            format:wgpu::TextureFormat::Rgba8Unorm,usage:wgpu::TextureUsages::RENDER_ATTACHMENT,view_formats:&[],
+        });
+        let view = target.create_view(&Default::default());
+        for whole_layer in [true,false] {
+        renderer.clear_transform();
+        let prepared = std::time::Instant::now();
+        if whole_layer {
+            renderer.sync_sparse_transform(&device,&queue,&source,true);
+            assert!(renderer.floating_tiles.len() <= 100,"preview must group physical source tiles into larger cores");
+        } else {
+            assert!(renderer.sync_transform(&device,&queue,0,&mask,&pixels,2048,2048,true));
+        }
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        eprintln!("2048x2048 preview preparation, whole_layer={whole_layer}: {:?}",prepared.elapsed());
+        let cached:Vec<_> = renderer.floating_tiles.iter().map(|t|t._texture.clone()).collect();
+        let dense_cached = renderer.floating_texture.clone();
+        for scale in [1.0,0.5,0.25,0.1,0.05,0.2,0.6] {
+            let started = std::time::Instant::now();
+            if whole_layer {
+                renderer.sync_sparse_transform(&device,&queue,&source,false);
+            } else {
+                renderer.sync_transform(&device,&queue,0,&mask,&pixels,2048,2048,false);
+            }
+            assert!(cached.iter().zip(&renderer.floating_tiles).all(|(before,after)|*before==after._texture));
+            assert_eq!(cached.len(),renderer.floating_tiles.len());
+            assert_eq!(dense_cached,renderer.floating_texture);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label:None,color_attachments:&[Some(wgpu::RenderPassColorAttachment {
+                        view:&view,resolve_target:None,depth_slice:None,
+                        ops:wgpu::Operations {load:wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),store:wgpu::StoreOp::Store},
+                    })],depth_stencil_attachment:None,timestamp_writes:None,occlusion_query_set:None,multiview_mask:None,
+                });
+                let size = 2048.0*scale;
+                renderer.render(&queue,&mut pass,Vec2::splat(512.0),Rect {min:Vec2::ZERO,max:Vec2::splat(512.0)},
+                    CanvasView {center:Vec2::splat(1024.0),zoom:1.0,rotation:0.0,width:2048,height:2048},
+                    CanvasOverlay {
+                        layers:vec![LayerDraw {visible:true,opacity:1.0}],
+                        floating:Some(FloatingDraw {opacity:1.0,whole_layer,layer:0,origin:Vec2::ZERO,size:Vec2::splat(2048.0)}),
+                        transform_corners:Some([Vec2::ZERO,Vec2::new(size,0.0),Vec2::splat(size),Vec2::new(0.0,size)]),
+                        ..Default::default()
+                    },0.0);
+            }
+            queue.submit([encoder.finish()]);
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            eprintln!("2048x2048 preview at {scale}, whole_layer={whole_layer}: {:?}",started.elapsed());
+        }
+        }
+    }
+
+    #[test]
     #[ignore = "requires a GPU adapter; run explicitly for renderer changes"]
     fn tiled_preview_uploads_and_composes_in_layer_order() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
@@ -1275,7 +1683,7 @@ mod gpu_tests {
         renderer.upload_layer_dirty(&device,&queue,0,&red,64,64,&mut dirty);
         assert_eq!(renderer.layers.len(),2,"dirty upload must retain higher layers");
         renderer.sync_sparse_transform(&device,&queue,&red,true);
-        assert_eq!(renderer.floating_tiles.len(),1);
+        assert_eq!(renderer.floating_tiles.len(),4);
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: None, size: wgpu::Extent3d {width:64,height:64,depth_or_array_layers:1},
             mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,
@@ -1302,6 +1710,7 @@ mod gpu_tests {
                         layers:vec![LayerDraw {visible:true,opacity:1.0},LayerDraw {visible:true,opacity:upper_opacity}],
                         floating:Some(FloatingDraw {opacity:1.0,whole_layer:true,layer:0,origin:Vec2::ZERO,size:Vec2::splat(64.0)}),
                         transform_corners:Some([Vec2::ZERO,Vec2::new(64.0,0.0),Vec2::splat(64.0),Vec2::new(0.0,64.0)]),
+                        transform_pivot:Some(Vec2::splat(8.0)),
                         ..Default::default()
                     },0.0);
             }

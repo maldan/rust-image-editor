@@ -1,4 +1,5 @@
 use std::fs;
+use std::collections::{HashMap, HashSet};
 use crate::raster::SparsePixels;
 use std::path::{Path, PathBuf};
 
@@ -116,6 +117,15 @@ pub struct Workspace {
     /// Rebuild active document thumb after this instant (1s debounce).
     pub thumb_rebuild_at: Option<std::time::Instant>,
     next_id: u64,
+    saved: Option<SavedResources>,
+}
+
+/// Last successful disk state. Sparse snapshots share tiles until an edit changes them.
+#[derive(Debug, Clone, Default)]
+struct SavedResources {
+    assets: HashMap<String, (u32, u32, u64)>,
+    layers: HashMap<String, SparsePixels>,
+    manifest: Vec<u8>,
 }
 
 impl Default for Workspace {
@@ -131,6 +141,7 @@ impl Default for Workspace {
             asset_dragging: false,
             thumb_rebuild_at: None,
             next_id: 1,
+            saved: None,
         };
         ws.create_document("Document 1");
         ws
@@ -301,16 +312,21 @@ impl Workspace {
     }
 
     pub fn save(&mut self, path: &Path) -> Result<(), String> {
-        let archive = MegaFile::create(path).map_err(|e| format!("Cannot create project: {e}"))?;
+        let incremental = self.path.as_deref() == Some(path) && path.is_file();
+        let previous = if incremental { self.saved.as_ref() } else { None };
+        let mut next = SavedResources::default();
         let mut files = Vec::new();
         let mut asset_metas = Vec::new();
         for asset in &self.assets {
             let asset_path = format!("/assets/{}.png", asset.id);
-            files.push(WriteFile::new(
-                asset_path.clone(),
-                IMAGE_KIND,
-                encode_png_rgba(&asset.pixels, asset.width, asset.height)?,
-            ));
+            let signature = (asset.width, asset.height, crate::safe_save::fingerprint(&asset.pixels));
+            if previous.and_then(|saved| saved.assets.get(&asset_path)) != Some(&signature) {
+                files.push(WriteFile::new(
+                    asset_path.clone(), IMAGE_KIND,
+                    encode_png_rgba(&asset.pixels, asset.width, asset.height)?,
+                ));
+            }
+            next.assets.insert(asset_path.clone(), signature);
             asset_metas.push(AssetMeta {
                 id: asset.id.clone(),
                 name: asset.name.clone(),
@@ -324,13 +340,14 @@ impl Workspace {
             let mut layers = Vec::new();
             for (i, layer) in doc.project.layers.iter().enumerate() {
                 let layer_path = format!("/documents/{}/layers/{i}.tiles", doc.id);
-                if doc.project.width > 0 && doc.project.height > 0 {
+                if previous.and_then(|saved| saved.layers.get(&layer_path)) != Some(&layer.pixels) {
                     files.push(WriteFile::new(
                         layer_path.clone(),
                         "application/x-rgba-tiles-64",
                         layer.pixels.encode(),
                     ));
                 }
+                next.layers.insert(layer_path.clone(), layer.pixels.clone());
                 layers.push(LayerMeta {
                     name: layer.name.clone(),
                     visible: layer.visible,
@@ -356,12 +373,53 @@ impl Workspace {
         };
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)
             .map_err(|e| format!("Cannot encode manifest: {e}"))?;
-        files.insert(0, WriteFile::new(MANIFEST_PATH, MANIFEST_KIND, manifest_bytes));
-        archive
-            .write_files(files)
-            .map_err(|e| format!("Cannot write project: {e}"))?;
+        if previous.map(|saved| saved.manifest.as_slice()) != Some(manifest_bytes.as_slice()) {
+            files.push(WriteFile::new(MANIFEST_PATH, MANIFEST_KIND, manifest_bytes.clone()));
+        }
+        if incremental {
+            crate::safe_save::append_archive(path, files, previous.map(|saved| saved.manifest.as_slice()))?;
+        } else {
+            crate::safe_save::save_archive(path, files)?;
+        }
+        next.manifest = manifest_bytes;
+        self.saved = Some(next);
         self.path = Some(path.to_path_buf());
         Ok(())
+    }
+
+    /// Compact only the saved revision. Unsaved in-memory edits are not committed.
+    pub fn optimize(&self) -> Result<(u64, u64), String> {
+        let path = self.path.as_deref().ok_or("Save or open a project before optimizing")?;
+        let before = fs::metadata(path).map_err(|e| format!("Cannot inspect project: {e}"))?.len();
+        let files = {
+            let archive = MegaFile::open(path).map_err(|e| format!("Cannot open project: {e}"))?;
+            let manifest_bytes = archive.read_all(MANIFEST_PATH).map_err(|e| format!("Cannot read saved manifest: {e}"))?;
+            let manifest: WorkspaceManifest = serde_json::from_slice(&manifest_bytes).map_err(|e| format!("Invalid saved manifest: {e}"))?;
+            if manifest.format != "mega-image-editor" || manifest.version != 5 {
+                return Err("Unsupported project format or version".into());
+            }
+            let mut paths = HashSet::from([MANIFEST_PATH.to_string()]);
+            for asset in manifest.assets { paths.insert(asset.path); }
+            for document in manifest.documents {
+                for layer in document.layers { paths.insert(layer.path); }
+            }
+            let mut paths: Vec<_> = paths.into_iter().collect();
+            paths.sort();
+            let mut files = Vec::new();
+            for path in paths {
+                let metadata = archive.meta(&path).map_err(|e| format!("Missing saved resource {path}: {e}"))?;
+                let bytes = archive.read_all(&path).map_err(|e| format!("Cannot read saved resource {path}: {e}"))?;
+                let mut file = WriteFile::new(path, metadata.kind, bytes);
+                file.created_at = Some(metadata.created_at);
+                file.updated_at = Some(metadata.updated_at);
+                file.flags = metadata.flags;
+                files.push(file);
+            }
+            files
+        };
+        crate::safe_save::save_archive(path, files)?;
+        let after = fs::metadata(path).map_err(|e| format!("Cannot inspect optimized project: {e}"))?.len();
+        Ok((before, after))
     }
 
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -436,7 +494,7 @@ impl Workspace {
                 Project::default(),
             ));
         }
-        Ok(Self {
+        let mut workspace = Self {
             assets,
             active_document: manifest.active_document.min(documents.len() - 1),
             documents,
@@ -447,7 +505,20 @@ impl Workspace {
             asset_dragging: false,
             thumb_rebuild_at: None,
             next_id: next_id.max(1),
-        })
+            saved: None,
+        };
+        let mut saved = SavedResources { manifest: manifest_bytes, ..Default::default() };
+        for asset in &workspace.assets {
+            saved.assets.insert(format!("/assets/{}.png", asset.id),
+                (asset.width, asset.height, crate::safe_save::fingerprint(&asset.pixels)));
+        }
+        for document in &workspace.documents {
+            for (index, layer) in document.project.layers.iter().enumerate() {
+                saved.layers.insert(format!("/documents/{}/layers/{index}.tiles", document.id), layer.pixels.clone());
+            }
+        }
+        workspace.saved = Some(saved);
+        Ok(workspace)
     }
 }
 
@@ -484,6 +555,132 @@ pub fn make_thumb(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raster::Raster;
+
+    fn saved_workspace(path: &Path) -> Workspace {
+        let mut workspace = Workspace::default();
+        workspace.import_asset_rgba("reference".into(), &[10, 20, 30, 255].repeat(16), 4, 4).unwrap();
+        workspace.place_asset_on_active(0).unwrap();
+        workspace.save(path).unwrap();
+        workspace
+    }
+
+    #[test]
+    fn incremental_save_skips_unchanged_resources_including_after_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("incremental.mgimg");
+        let mut workspace = saved_workspace(&path);
+        let original = fs::read(&path).unwrap();
+        workspace.save(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let mut reopened = Workspace::open(&path).unwrap();
+        reopened.save(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        reopened.active_mut().layers[0].name = "renamed".into();
+        reopened.save(&path).unwrap();
+        let renamed = fs::read(&path).unwrap();
+        assert!(renamed.starts_with(&original));
+        assert!(renamed.len() - original.len() < crate::raster::TILE_BYTES);
+        assert_eq!(Workspace::open(&path).unwrap().active().layers[0].name, "renamed");
+
+        reopened.active_mut().layers[0].pixels.write(0, 2, 1, [100, 120, 140, 128]);
+        reopened.save(&path).unwrap();
+        let edited = fs::read(&path).unwrap();
+        assert!(edited.starts_with(&renamed));
+        assert_eq!(Workspace::open(&path).unwrap().active().layers[0].pixels.read(0, 2, 1), [100, 120, 140, 128]);
+    }
+
+    #[test]
+    fn incremental_save_keeps_resource_paths_correct_after_reorder_and_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layers.mgimg");
+        let mut workspace = saved_workspace(&path);
+        workspace.active_mut().add_layer();
+        workspace.active_mut().layers[1].pixels.write(0, -20, 30, [80, 90, 100, 255]);
+        workspace.save(&path).unwrap();
+        workspace.active_mut().move_layer_to(1, 0);
+        workspace.save(&path).unwrap();
+        let loaded = Workspace::open(&path).unwrap();
+        assert_eq!(loaded.active().layers[0].pixels.read(0, -20, 30), [80, 90, 100, 255]);
+        assert_eq!(loaded.active().layers[1].pixels.read(0, 0, 0), [10, 20, 30, 255]);
+        workspace.active_mut().delete_layer(0);
+        workspace.delete_asset(0);
+        workspace.save(&path).unwrap();
+        let loaded = Workspace::open(&path).unwrap();
+        assert_eq!(loaded.assets.len(), 0);
+        assert_eq!(loaded.active().layers.len(), 1);
+        assert_eq!(loaded.active().layers[0].pixels.read(0, 0, 0), [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn interrupted_incremental_commit_reopens_previous_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("project.mgimg");
+        let mut workspace = saved_workspace(&path);
+        let original = fs::read(&path).unwrap();
+        workspace.active_mut().layers[0].pixels.write(0, 0, 0, [200, 201, 202, 255]);
+        workspace.active_mut().layers[0].name = "changed".into();
+        workspace.save(&path).unwrap();
+        let committed = fs::read(&path).unwrap();
+        assert!(committed.starts_with(&original));
+        for cut in [original.len(), original.len() + 1, committed.len() - 1] {
+            let interrupted = dir.path().join(format!("interrupted-{cut}.mgimg"));
+            fs::write(&interrupted, &committed[..cut]).unwrap();
+            let loaded = Workspace::open(&interrupted).unwrap();
+            assert_eq!(loaded.active().layers[0].pixels.read(0, 0, 0), [10, 20, 30, 255]);
+            assert_ne!(loaded.active().layers[0].name, "changed");
+        }
+    }
+
+    #[test]
+    fn optimize_reclaims_removed_resources_and_does_not_save_memory_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("optimize.mgimg");
+        let mut workspace = saved_workspace(&path);
+        workspace.active_mut().add_layer();
+        workspace.active_mut().layers[1].pixels.write(0, 500, -500, [50, 60, 70, 255]);
+        workspace.save(&path).unwrap();
+        workspace.active_mut().delete_layer(1);
+        workspace.delete_asset(0);
+        workspace.save(&path).unwrap();
+        let saved_manifest = workspace.saved.as_ref().unwrap().manifest.clone();
+        workspace.active_mut().layers[0].pixels.write(0, 0, 0, [200, 201, 202, 255]);
+        let (before, after) = workspace.optimize().unwrap();
+        assert!(after < before);
+        assert_eq!(workspace.active().layers[0].pixels.read(0, 0, 0), [200, 201, 202, 255]);
+        assert_eq!(workspace.saved.as_ref().unwrap().manifest, saved_manifest);
+        let loaded = Workspace::open(&path).unwrap();
+        assert_eq!(loaded.active().layers[0].pixels.read(0, 0, 0), [10, 20, 30, 255]);
+        let archive = MegaFile::open(&path).unwrap();
+        assert_eq!(archive.list_all().unwrap().len(), 2); // Manifest + one live layer.
+        drop(archive);
+        workspace.save(&path).unwrap();
+        assert_eq!(Workspace::open(&path).unwrap().active().layers[0].pixels.read(0, 0, 0), [200, 201, 202, 255]);
+        let optimized = fs::read(&path).unwrap();
+        workspace.save(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), optimized);
+        assert!(Workspace::default().optimize().is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn incremental_save_failure_keeps_snapshot_dirty_for_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("locked.mgimg");
+        let mut workspace = saved_workspace(&path);
+        let original = fs::read(&path).unwrap();
+        workspace.active_mut().layers[0].pixels.write(0, 0, 0, [200, 201, 202, 255]);
+        let lock = fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        assert!(workspace.save(&path).is_err());
+        assert!(workspace.optimize().is_err());
+        drop(lock);
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_ne!(workspace.saved.as_ref().unwrap().layers.values().next().unwrap(), &workspace.active().layers[0].pixels);
+        workspace.save(&path).unwrap();
+        assert_eq!(Workspace::open(&path).unwrap().active().layers[0].pixels.read(0, 0, 0), [200, 201, 202, 255]);
+    }
 
     #[test]
     fn import_asset_does_not_touch_document() {

@@ -21,7 +21,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         }
     }
 
-    if app.ai.open { return; }
+    if app.ai.open || app.hsv.open { return; }
 
     if app.fit_image {
         app.fit_to_canvas();
@@ -31,6 +31,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     if let Some(view) = app.canvas_view() {
         if area.hovered || area.active || app.brush_last_active() {
             app.handle_canvas_edit(view);
+            app.canvas_cursor = app.transform_cursor(view);
         }
         if app.preview_asset.is_none() {
             app.draw_lasso_path(ui, view);

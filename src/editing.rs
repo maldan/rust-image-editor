@@ -180,6 +180,12 @@ impl Selection {
         self.mask.iter().all(|&v| v == 0)
     }
 
+    pub fn invert(&mut self) {
+        for value in &mut self.mask {
+            *value = u8::from(*value == 0);
+        }
+    }
+
     pub fn union(&mut self, other: &Selection) {
         if self.width != other.width || self.height != other.height {
             return;
@@ -232,16 +238,35 @@ pub fn brush_dirty_bounds(
     }
 }
 
+#[derive(Default)]
+pub struct SoftBrushCoverage {
+    stroke_id: u32,
+    pixels: std::collections::HashMap<usize, (f32, [u8; 4])>,
+}
+
+impl SoftBrushCoverage {
+    pub fn clear(&mut self) { self.pixels.clear(); }
+
+    fn begin(&mut self, stroke_id: u32) {
+        if self.stroke_id != stroke_id {
+            self.clear();
+            self.stroke_id = stroke_id;
+        }
+    }
+}
+
 pub struct BrushStroke<'a> {
     pub from: (f32, f32),
     pub to: (f32, f32),
     pub size: f32,
     pub opacity: f32,
+    pub hardness: f32,
     pub erase: bool,
     pub color: [f32; 3],
     pub selection: Option<&'a Selection>,
     /// Generation marks: pixel is touched this stroke when `marks[i] == stroke_id`.
     pub coverage_marks: Option<&'a mut [u32]>,
+    pub soft_coverage: Option<&'a mut SoftBrushCoverage>,
     pub stroke_id: u32,
 }
 
@@ -256,6 +281,10 @@ pub fn apply_brush(
         return None;
     }
     let radius = (stroke.size * 0.5).max(0.5);
+    let hardness = stroke.hardness.clamp(0.0, 1.0);
+    let mut local_coverage = SoftBrushCoverage::default();
+    let soft_coverage = stroke.soft_coverage.as_deref_mut().unwrap_or(&mut local_coverage);
+    soft_coverage.begin(stroke.stroke_id);
     let dx = stroke.to.0 - stroke.from.0;
     let dy = stroke.to.1 - stroke.from.1;
     let distance = dx.hypot(dy);
@@ -275,12 +304,14 @@ pub fn apply_brush(
             stroke.from.0 + dx * t,
             stroke.from.1 + dy * t,
             radius,
+            hardness,
             stroke.opacity.clamp(0.0, 1.0),
             stroke.erase,
             stroke.color,
             stroke.selection,
             stroke.coverage_marks.as_deref_mut(),
             stroke.stroke_id,
+            soft_coverage,
         ) {
             dirty = Some(match dirty {
                 Some(prev) => PixelRect {
@@ -304,12 +335,14 @@ fn stamp(
     center_x: f32,
     center_y: f32,
     radius: f32,
+    hardness: f32,
     opacity: f32,
     erase: bool,
     color: [f32; 3],
     selection: Option<&Selection>,
     mut coverage: Option<&mut [u32]>,
     stroke_id: u32,
+    soft_coverage: &mut SoftBrushCoverage,
 ) -> Option<PixelRect> {
     let min_x = (center_x - radius).floor().max(0.0) as u32;
     let min_y = (center_y - radius).floor().max(0.0) as u32;
@@ -330,22 +363,38 @@ fn stamp(
             }
             let px = x as f32 + 0.5;
             let py = y as f32 + 0.5;
-            if (px - center_x).powi(2) + (py - center_y).powi(2) > radius_sq {
+            let distance_sq = (px - center_x).powi(2) + (py - center_y).powi(2);
+            if distance_sq > radius_sq {
                 continue;
             }
             let index = (y * width + x) as usize;
-            if let Some(cov) = coverage.as_mut() {
-                if index >= cov.len() {
-                    continue;
-                }
-                if cov[index] == stroke_id {
-                    continue;
-                }
-                cov[index] = stroke_id;
-            }
             let mut pixel = pixels.read(width, x as i32, y as i32);
+            let before = pixel;
+            let opacity = if hardness < 1.0 {
+                let inner = radius * hardness;
+                let t = ((distance_sq.sqrt() - inner) / (radius - inner)).clamp(0.0, 1.0);
+                let amount = opacity * (1.0 - t * t * (3.0 - 2.0 * t));
+                if amount <= 0.0 { continue; }
+                let (maximum, original) = soft_coverage.pixels.entry(index).or_insert((0.0, pixel));
+                if amount <= *maximum { continue; }
+                *maximum = amount;
+                pixel = *original;
+                amount
+            } else {
+                if let Some(cov) = coverage.as_mut() {
+                    if index >= cov.len() {
+                        continue;
+                    }
+                    if cov[index] == stroke_id {
+                        continue;
+                    }
+                    cov[index] = stroke_id;
+                }
+                opacity
+            };
             if erase { erase_pixel(&mut pixel, opacity); }
             else { paint_color(&mut pixel, opacity, color); }
+            if pixel == before { continue; }
             pixels.write(width, x as i32, y as i32, pixel);
             changed = true;
             dirty_min_x = dirty_min_x.min(x);
@@ -360,6 +409,68 @@ fn stamp(
         max_x: dirty_max_x,
         max_y: dirty_max_y,
     })
+}
+
+#[cfg(test)]
+mod soft_brush_tests {
+    use super::*;
+
+    fn stroke<'a>(hardness: f32, coverage: Option<&'a mut SoftBrushCoverage>) -> BrushStroke<'a> {
+        BrushStroke {
+            from: (4.5, 4.5), to: (4.5, 4.5), size: 8.0,
+            opacity: 1.0, hardness, erase: false, color: [1.0, 0.0, 0.0],
+            selection: None, coverage_marks: None, soft_coverage: coverage, stroke_id: 1,
+        }
+    }
+
+    #[test]
+    fn hardness_controls_smooth_falloff_and_keeps_hard_edge_at_100_percent() {
+        for (hardness, expected) in [(0.0, [255, 215, 128, 40, 0]), (0.5, [255, 255, 255, 128, 0]), (1.0, [255; 5])] {
+            let mut pixels = vec![0; 9 * 9 * 4];
+            apply_brush(&mut pixels, 9, 9, &mut stroke(hardness, None));
+            for (distance, alpha) in expected.into_iter().enumerate() {
+                assert_eq!(pixels.read(9, 4 + distance as i32, 4)[3], alpha);
+            }
+        }
+    }
+
+    #[test]
+    fn soft_brush_strengthens_fringe_from_original_pixel_without_compounding() {
+        for erase in [false, true] {
+            let mut pixels = if erase { [10, 20, 30, 200].repeat(81) } else { vec![0; 81 * 4] };
+            let mut coverage = SoftBrushCoverage::default();
+            let mut brush = stroke(0.0, Some(&mut coverage));
+            brush.opacity = 0.5;
+            brush.erase = erase;
+            brush.from = (2.5, 4.5);
+            brush.to = brush.from;
+            apply_brush(&mut pixels, 9, 9, &mut brush);
+            assert_eq!(pixels.read(9, 4, 4)[3], if erase { 150 } else { 64 });
+            brush.from = (4.5, 4.5);
+            brush.to = brush.from;
+            apply_brush(&mut pixels, 9, 9, &mut brush);
+            assert_eq!(pixels.read(9, 4, 4)[3], if erase { 100 } else { 128 });
+            let once = pixels.clone();
+            apply_brush(&mut pixels, 9, 9, &mut brush);
+            assert_eq!(pixels, once);
+            brush.stroke_id = 2;
+            apply_brush(&mut pixels, 9, 9, &mut brush);
+            assert_eq!(pixels.read(9, 4, 4)[3], if erase { 50 } else { 192 });
+            if erase { assert_eq!(&pixels.read(9, 4, 4)[..3], &[10, 20, 30]); }
+        }
+    }
+
+    #[test]
+    fn soft_brush_respects_selection_and_opacity() {
+        let selection = Selection::from_rect(PixelRect { min_x: 4, min_y: 4, max_x: 5, max_y: 5 }, 9, 9);
+        let mut pixels = vec![0; 9 * 9 * 4];
+        let mut brush = stroke(0.0, None);
+        brush.selection = Some(&selection);
+        brush.opacity = 0.5;
+        apply_brush(&mut pixels, 9, 9, &mut brush);
+        assert_eq!(pixels.read(9, 4, 4), [255, 0, 0, 128]);
+        assert_eq!(pixels.chunks_exact(4).filter(|pixel| pixel[3] != 0).count(), 1);
+    }
 }
 
 fn stroke_color(color: [f32; 3]) -> [f32; 3] {
@@ -706,6 +817,71 @@ pub fn composite_region(
     }
 }
 
+/// Merge physical tiles without clipping to the document or allocating the gap between them.
+pub fn merge_layers(lower: &crate::project::Layer, upper: &crate::project::Layer) -> crate::project::Layer {
+    let mut pixels = crate::raster::SparsePixels { offset: lower.pixels.offset, ..Default::default() };
+    let side = crate::tiles::TILE_SIZE as i32;
+    for layer in [lower, upper] {
+        let opacity = layer.opacity.clamp(0.0, 1.0);
+        if !layer.visible || opacity <= f32::EPSILON { continue; }
+        for (&(tx, ty), tile) in &layer.pixels.tiles {
+            for (i, source) in tile.chunks_exact(4).enumerate() {
+                if source[3] == 0 { continue; }
+                let x = tx * side + (i % side as usize) as i32 + layer.pixels.offset.0;
+                let y = ty * side + (i / side as usize) as i32 + layer.pixels.offset.1;
+                let mut destination = pixels.read(0, x, y);
+                over(&mut destination, source, opacity);
+                pixels.write(0, x, y, destination);
+            }
+        }
+    }
+    pixels.prune();
+    crate::project::Layer {
+        name: lower.name.clone(), visible: lower.visible || upper.visible, opacity: 1.0, pixels,
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+    use crate::{project::Layer, raster::SparsePixels};
+
+    #[test]
+    fn merge_down_matches_composite_with_alpha_opacity_offsets_and_visibility() {
+        for lower_visible in [false, true] {
+            for upper_visible in [false, true] {
+                let mut lower = Layer { name: "Lower".into(), visible: lower_visible, opacity: 0.6,
+                    pixels: SparsePixels::from_rgba(&[200, 40, 80, 128].repeat(6), 3, 2) };
+                lower.pixels.offset = (1, 1);
+                let mut upper = Layer { name: "Upper".into(), visible: upper_visible, opacity: 0.4,
+                    pixels: SparsePixels::from_rgba(&[20, 80, 240, 192].repeat(6), 2, 3) };
+                upper.pixels.offset = (2, 0);
+                let original = composite_layers(&[lower.clone(), upper.clone()], 5, 4);
+                let merged = merge_layers(&lower, &upper);
+                assert_eq!(merged.name, "Lower");
+                assert_eq!(merged.opacity, 1.0);
+                assert_eq!(composite_layers(&[merged], 5, 4), original);
+            }
+        }
+    }
+
+    #[test]
+    fn merge_down_preserves_distant_offcanvas_pixels_without_filling_the_gap() {
+        let mut lower = Layer { name: "Lower".into(), visible: true, opacity: 1.0, pixels: SparsePixels::default() };
+        lower.pixels.offset = (-7, 9);
+        lower.pixels.write(0, -100, -200, [1, 2, 3, 255]);
+        let mut upper = lower.clone();
+        upper.pixels = SparsePixels::default();
+        upper.pixels.offset = (15, -17);
+        upper.pixels.write(0, 1_000_000, 2_000_000, [4, 5, 6, 255]);
+        let merged = merge_layers(&lower, &upper);
+        assert_eq!(merged.pixels.read(0, -100, -200), [1, 2, 3, 255]);
+        assert_eq!(merged.pixels.read(0, 1_000_000, 2_000_000), [4, 5, 6, 255]);
+        assert_eq!(merged.pixels.tiles.len(), 2);
+        assert_eq!(merged.pixels.read(0, 0, 0), [0; 4]);
+    }
+}
+
 fn over(dst: &mut [u8], src: &[u8], opacity: f32) {
     let src_a = (src[3] as f32 / 255.0) * opacity;
     if src_a <= f32::EPSILON {
@@ -726,19 +902,61 @@ fn over(dst: &mut [u8], src: &[u8], opacity: f32) {
     dst[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
 }
 
-fn sample_sparse_bilinear(source: &crate::raster::SparsePixels, x: f32, y: f32) -> [u8;4] {
-    let x = x - 0.5; let y = y - 0.5;
-    let ix = x.floor() as i32; let iy = y.floor() as i32;
-    let fx = x - x.floor(); let fy = y - y.floor();
-    let samples = [(ix,iy,(1.0-fx)*(1.0-fy)),(ix+1,iy,fx*(1.0-fy)),(ix,iy+1,(1.0-fx)*fy),(ix+1,iy+1,fx*fy)];
-    let mut sum = [0.0;4];
-    for (x,y,w) in samples {
-        let p = source.read(0,x,y); let a = p[3] as f32/255.0*w;
-        for c in 0..3 { sum[c] += p[c] as f32*a; }
-        sum[3] += a;
+fn lanczos3(x: f32) -> f32 {
+    let x = x.abs();
+    if x < 1.0e-5 { return 1.0; }
+    if x >= 3.0 { return 0.0; }
+    let p = std::f32::consts::PI * x;
+    p.sin() * (p / 3.0).sin() / (p * p / 3.0)
+}
+
+fn linear_to_srgb(value: f32) -> u8 {
+    let value = value.clamp(0.0, 1.0);
+    let value = if value <= 0.0031308 { value * 12.92 }
+        else { 1.055 * value.powf(1.0 / 2.4) - 0.055 };
+    (value * 255.0).round() as u8
+}
+
+/// Scale-aware Lanczos3 in linear light and premultiplied alpha. Missing source
+/// pixels are transparent; the selection is filtered together with the image.
+/// Widening the kernel when shrinking is essential to suppress aliasing.
+fn sample_transform(x: f32, y: f32, scale: f32,
+    read: impl Fn(i32, i32) -> ([u8; 4], f32)) -> ([u8; 4], f32) {
+    static LINEAR: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    let linear = LINEAR.get_or_init(|| std::array::from_fn(|i| {
+        let s = i as f32 / 255.0;
+        if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+    }));
+    let scale = scale.clamp(0.05, 1.0);
+    let radius = 3.0 / scale;
+    let (x, y) = (x - 0.5, y - 0.5);
+    // At the minimum Transform scale there are at most 120 taps per axis.
+    let x0 = (x - radius).ceil() as i32;
+    let x1 = (x + radius).floor() as i32;
+    let mut wx = [0.0; 121];
+    for sx in x0..=x1 { wx[(sx - x0) as usize] = lanczos3((sx as f32 - x) * scale); }
+    let mut sum = [0.0; 4];
+    let mut weight = 0.0;
+    let mut coverage = 0.0;
+    for sy in (y - radius).ceil() as i32..=(y + radius).floor() as i32 {
+        let wy = lanczos3((sy as f32 - y) * scale);
+        for sx in x0..=x1 {
+            let w = wx[(sx - x0) as usize] * wy;
+            weight += w;
+            if w.abs() < 1.0e-10 { continue; }
+            let (p, mask) = read(sx, sy);
+            coverage += w * mask;
+            let a = p[3] as f32 / 255.0 * mask * w;
+            for c in 0..3 { sum[c] += linear[p[c] as usize] * a; }
+            sum[3] += a;
+        }
     }
-    if sum[3] <= f32::EPSILON { return [0;4]; }
-    [(sum[0]/sum[3]).round() as u8,(sum[1]/sum[3]).round() as u8,(sum[2]/sum[3]).round() as u8,(sum[3]*255.0).round() as u8]
+    if weight <= f32::EPSILON { return ([0; 4], 0.0); }
+    let coverage = (coverage / weight).clamp(0.0, 1.0);
+    let alpha = (sum[3] / weight).clamp(0.0, 1.0);
+    if alpha < 0.5 / 255.0 { return ([0; 4], coverage); }
+    ([linear_to_srgb(sum[0] / sum[3]), linear_to_srgb(sum[1] / sum[3]),
+        linear_to_srgb(sum[2] / sum[3]), (alpha * 255.0).round() as u8], coverage)
 }
 
 /// Floating selection used by the Transform tool.
@@ -752,6 +970,8 @@ pub struct FloatingTransform {
     pub origin_x: i32,
     pub origin_y: i32,
     pub center: glam::Vec2,
+    /// Rotation/scale origin in document coordinates; moving it does not move pixels.
+    pub pivot: glam::Vec2,
     pub scale: f32,
     pub rotation: f32,
     /// Layer opacity baked into GPU preview; stamp writes raw pixels.
@@ -763,8 +983,32 @@ pub struct FloatingTransform {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransformHit {
     Body,
+    Pivot,
     Scale(u8),
     Rotate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformCursor {
+    Move,
+    Pivot,
+    Rotate,
+    ResizeEw,
+    ResizeNs,
+    ResizeNwse,
+    ResizeNesw,
+}
+
+impl TransformCursor {
+    pub fn resize(direction: glam::Vec2) -> Self {
+        let angle = direction.y.atan2(direction.x);
+        match (angle / std::f32::consts::FRAC_PI_4).round() as i32 % 4 {
+            0 => Self::ResizeEw,
+            1 | -3 => Self::ResizeNwse,
+            2 | -2 => Self::ResizeNs,
+            _ => Self::ResizeNesw,
+        }
+    }
 }
 
 impl FloatingTransform {
@@ -810,6 +1054,7 @@ impl FloatingTransform {
             origin_x: bounds.min_x as i32,
             origin_y: bounds.min_y as i32,
             center,
+            pivot: center,
             scale: 1.0,
             rotation: 0.0,
             opacity: opacity.clamp(0.0, 1.0),
@@ -826,6 +1071,7 @@ impl FloatingTransform {
             layer, pixels: Vec::new(), mask: Vec::new(),
             bw, bh, origin_x: x, origin_y: y,
             center: glam::Vec2::new(x as f32 + bw as f32 * 0.5, y as f32 + bh as f32 * 0.5),
+            pivot: glam::Vec2::new(x as f32 + bw as f32 * 0.5, y as f32 + bh as f32 * 0.5),
             scale: 1.0, rotation: 0.0, opacity, whole_layer: true, source: Some(pixels.clone()),
         })
     }
@@ -858,23 +1104,46 @@ impl FloatingTransform {
         })
     }
 
-    pub fn rotate_handle(&self) -> glam::Vec2 {
-        let half = self.local_size() * 0.5;
-        let local = glam::Vec2::new(0.0, -half.y - 28.0 / 1.0);
-        let (s, c) = self.rotation.sin_cos();
-        self.center + glam::Vec2::new(local.x * c - local.y * s, local.x * s + local.y * c)
+    pub fn drag(&mut self, hit: TransformHit, from: glam::Vec2, to: glam::Vec2) {
+        match hit {
+            TransformHit::Body => {
+                let delta = to-from;
+                self.center += delta;
+                self.pivot += delta;
+            }
+            TransformHit::Pivot => self.pivot += to-from,
+            TransformHit::Rotate => {
+                let a = from-self.pivot;
+                let b = to-self.pivot;
+                if a.length_squared() < 1.0e-8 || b.length_squared() < 1.0e-8 { return; }
+                let angle = a.perp_dot(b).atan2(a.dot(b));
+                let (s,c) = angle.sin_cos();
+                let delta = self.center-self.pivot;
+                self.center = self.pivot+glam::Vec2::new(delta.x*c-delta.y*s,delta.x*s+delta.y*c);
+                self.rotation += angle;
+            }
+            TransformHit::Scale(_) => {
+                let distance = (from-self.pivot).length();
+                if distance < 1.0e-4 { return; }
+                let scale = (self.scale*(to-self.pivot).length()/distance).clamp(0.05,32.0);
+                self.center = self.pivot+(self.center-self.pivot)*(scale/self.scale);
+                self.scale = scale;
+            }
+        }
     }
 
     pub fn hit_test(&self, image_pos: glam::Vec2, handle_r: f32) -> Option<TransformHit> {
         let corners = self.corners();
+        let mut nearest = (self.pivot-image_pos).length();
+        let mut handle = TransformHit::Pivot;
         for (i, c) in corners.iter().enumerate() {
-            if (*c - image_pos).length() <= handle_r {
-                return Some(TransformHit::Scale(i as u8));
+            let distance = (*c-image_pos).length();
+            if distance < nearest {
+                nearest = distance;
+                handle = TransformHit::Scale(i as u8);
             }
         }
-        if (self.rotate_handle() - image_pos).length() <= handle_r {
-            return Some(TransformHit::Rotate);
-        }
+        if nearest <= handle_r { return Some(handle); }
         // Inverse transform point into local unscaled bbox.
         let delta = image_pos - self.center;
         let (s, c) = (-self.rotation).sin_cos();
@@ -882,17 +1151,9 @@ impl FloatingTransform {
             / self.scale.max(0.05);
         let half = glam::Vec2::new(self.bw as f32, self.bh as f32) * 0.5;
         if local.x.abs() <= half.x && local.y.abs() <= half.y {
-            let lx = (local.x + half.x).floor() as i32;
-            let ly = (local.y + half.y).floor() as i32;
-            if lx >= 0 && ly >= 0 && (lx as u32) < self.bw && (ly as u32) < self.bh {
-                let idx = (ly as u32 * self.bw + lx as u32) as usize;
-                if self.whole_layer || self.mask.get(idx).copied().unwrap_or(0) != 0 {
-                    return Some(TransformHit::Body);
-                }
-            }
             return Some(TransformHit::Body);
         }
-        None
+        Some(TransformHit::Rotate)
     }
 
     /// Resample occupied source tiles only, even when the layer spans a huge empty area.
@@ -902,16 +1163,25 @@ impl FloatingTransform {
         let half = glam::Vec2::new(self.bw as f32, self.bh as f32) * 0.5;
         let origin = glam::Vec2::new(self.origin_x as f32, self.origin_y as f32) + half;
         let (s,c) = self.rotation.sin_cos();
+        let radius = 3.0 / self.scale.clamp(0.05, 1.0);
         let transform = |p: glam::Vec2| {
             let p = (p - origin) * self.scale;
             self.center + glam::Vec2::new(p.x*c-p.y*s, p.x*s+p.y*c)
+        };
+        let inverse = |p: glam::Vec2| {
+            let p = p - self.center;
+            glam::Vec2::new(p.x*c+p.y*s,-p.x*s+p.y*c)/self.scale.max(0.05)+origin
         };
         let mut destinations = std::collections::HashSet::new();
         for &(tx,ty) in source.tiles.keys() {
             let x = tx * side + source.offset.0;
             let y = ty * side + source.offset.1;
-            let corners = [(x-1,y-1),(x+side+1,y-1),(x+side+1,y+side+1),(x-1,y+side+1)]
-                .map(|(x,y)| transform(glam::Vec2::new(x as f32,y as f32)));
+            let corners = [(x,y),(x+side,y),(x+side,y+side),(x,y+side)]
+                .map(|(x,y)| glam::Vec2::new(x as f32,y as f32));
+            let corners = [corners[0] - glam::Vec2::splat(radius),
+                corners[1] + glam::Vec2::new(radius,-radius),
+                corners[2] + glam::Vec2::splat(radius),
+                corners[3] + glam::Vec2::new(-radius,radius)].map(transform);
             let x0 = corners.iter().map(|p|p.x).fold(f32::INFINITY,f32::min).floor() as i32;
             let y0 = corners.iter().map(|p|p.y).fold(f32::INFINITY,f32::min).floor() as i32;
             let x1 = corners.iter().map(|p|p.x).fold(f32::NEG_INFINITY,f32::max).ceil() as i32;
@@ -921,11 +1191,24 @@ impl FloatingTransform {
             }
         }
         for (tx,ty) in destinations {
+            // Pack this tile's source footprint once, avoiding a sparse-map lookup
+            // for every Lanczos tap (especially costly during strong reductions).
+            let corners = [(tx*side,ty*side),((tx+1)*side,ty*side),
+                ((tx+1)*side,(ty+1)*side),(tx*side,(ty+1)*side)]
+                .map(|(x,y)| inverse(glam::Vec2::new(x as f32,y as f32)));
+            let sx = (corners.iter().map(|p|p.x).fold(f32::INFINITY,f32::min)-radius).floor() as i32;
+            let sy = (corners.iter().map(|p|p.y).fold(f32::INFINITY,f32::min)-radius).floor() as i32;
+            let ex = (corners.iter().map(|p|p.x).fold(f32::NEG_INFINITY,f32::max)+radius).ceil() as i32;
+            let ey = (corners.iter().map(|p|p.y).fold(f32::NEG_INFINITY,f32::max)+radius).ceil() as i32;
+            let stride = (ex-sx+1) as u32;
+            let packed = source.region(sx,sy,stride,(ey-sy+1) as u32);
             for y in ty*side..(ty+1)*side {
                 for x in tx*side..(tx+1)*side {
-                    let p = glam::Vec2::new(x as f32+0.5,y as f32+0.5)-self.center;
-                    let p = glam::Vec2::new(p.x*c+p.y*s,-p.x*s+p.y*c)/self.scale.max(0.05)+origin;
-                    let pixel = sample_sparse_bilinear(source,p.x,p.y);
+                    let p = inverse(glam::Vec2::new(x as f32+0.5,y as f32+0.5));
+                    if p.x < self.origin_x as f32 - radius || p.y < self.origin_y as f32 - radius
+                        || p.x > (self.origin_x as f32 + self.bw as f32) + radius
+                        || p.y > (self.origin_y as f32 + self.bh as f32) + radius { continue; }
+                    let pixel = sample_transform(p.x,p.y,self.scale,|x,y| (packed.read(stride,x-sx,y-sy),1.0)).0;
                     if pixel[3] != 0 { target.write(0,x,y,pixel); }
                 }
             }
@@ -967,11 +1250,13 @@ impl FloatingTransform {
         let half = glam::Vec2::new(self.bw as f32, self.bh as f32) * 0.5;
         let inv_scale = 1.0 / self.scale.max(0.05);
         let (s, c) = (-self.rotation).sin_cos();
-        // Expand bounds by 1px so bilinear soft edges are not clipped.
-        let min_x = min_x - 1;
-        let min_y = min_y - 1;
-        let max_x = max_x + 1;
-        let max_y = max_y + 1;
+        // Include the complete rotated filter footprint, including ringing lobes.
+        let radius = 3.0 / self.scale.clamp(0.05, 1.0);
+        let pad = (radius * self.scale.max(0.05) * (s.abs() + c.abs())).ceil() as i32;
+        let min_x = min_x - pad;
+        let min_y = min_y - pad;
+        let max_x = max_x + pad;
+        let max_y = max_y + pad;
         let mut dirty: Option<PixelRect> = None;
         for y in min_y..max_y {
             for x in min_x..max_x {
@@ -980,22 +1265,18 @@ impl FloatingTransform {
                     * inv_scale;
                 let lx = local.x + half.x;
                 let ly = local.y + half.y;
-                // Slight pad so bilinear can pull edge texels.
-                if lx < -0.5 || ly < -0.5 || lx >= self.bw as f32 + 0.5 || ly >= self.bh as f32 + 0.5
+                if lx < -radius || ly < -radius || lx >= self.bw as f32 + radius || ly >= self.bh as f32 + radius
                 {
                     continue;
                 }
-                let coverage = sample_mask_bilinear(&self.mask, self.bw, self.bh, lx, ly);
-                if coverage <= 1.0 / 255.0 {
-                    continue;
-                }
-                let mut src_px = sample_bilinear(&self.pixels, self.bw, self.bh, lx, ly);
-                if src_px[3] == 0 {
-                    continue;
-                }
-                src_px[3] = ((src_px[3] as f32) * coverage)
-                    .round()
-                    .clamp(0.0, 255.0) as u8;
+                let (src_px, coverage) = sample_transform(lx,ly,self.scale,|x,y| {
+                    if x < 0 || y < 0 || x >= self.bw as i32 || y >= self.bh as i32 {
+                        return ([0;4],0.0);
+                    }
+                    let i = (y as u32 * self.bw + x as u32) as usize;
+                    (self.pixels[i*4..i*4+4].try_into().unwrap(),
+                        if self.mask[i] != 0 { 1.0 } else { 0.0 })
+                });
                 if src_px[3] == 0 {
                     continue;
                 }
@@ -1102,11 +1383,13 @@ mod tests {
             from: (1.5, 1.5),
             to: (1.5, 1.5),
             size: 4.0,
+            hardness: 1.0,
             opacity: 1.0,
             erase: false,
             color: [0.0, 0.0, 0.0],
             selection: Some(&selection),
             coverage_marks: None,
+            soft_coverage: None,
             stroke_id: 1,
         };
         assert!(apply_brush(&mut pixels, 4, 4, &mut stroke).is_some());
@@ -1129,11 +1412,13 @@ mod tests {
             from: (0.5, 0.5),
             to: (0.5, 0.5),
             size: 1.0,
+            hardness: 1.0,
             opacity: 0.5,
             erase: true,
             color: [0.0, 0.0, 0.0],
             selection: None,
             coverage_marks: None,
+            soft_coverage: None,
             stroke_id: 1,
         };
         apply_brush(&mut pixels, 1, 1, &mut stroke);
@@ -1149,11 +1434,13 @@ mod tests {
             from: (0.5, 0.5),
             to: (0.5, 0.5),
             size: 1.0,
+            hardness: 1.0,
             opacity: 0.5,
             erase: true,
             color: [0.0, 0.0, 0.0],
             selection: None,
             coverage_marks: Some(&mut marks),
+            soft_coverage: None,
             stroke_id: 7,
         };
         apply_brush(&mut pixels, 1, 1, &mut stroke);
@@ -1161,11 +1448,13 @@ mod tests {
             from: (0.5, 0.5),
             to: (0.5, 0.5),
             size: 1.0,
+            hardness: 1.0,
             opacity: 0.5,
             erase: true,
             color: [0.0, 0.0, 0.0],
             selection: None,
             coverage_marks: Some(&mut marks),
+            soft_coverage: None,
             stroke_id: 7,
         };
         apply_brush(&mut pixels, 1, 1, &mut stroke);
@@ -1179,11 +1468,13 @@ mod tests {
             from: (0.5, 0.5),
             to: (0.5, 0.5),
             size: 1.0,
+            hardness: 1.0,
             opacity: 1.0,
             erase: false,
             color: [1.0, 0.0, 0.5],
             selection: None,
             coverage_marks: None,
+            soft_coverage: None,
             stroke_id: 1,
         };
         apply_brush(&mut pixels, 1, 1, &mut stroke);
@@ -1291,5 +1582,141 @@ mod tests {
         let mid = sample_bilinear(&src, 2, 1, 1.0, 0.5);
         assert!(mid[0] > 64 && mid[0] < 192);
         assert!(mid[2] > 64 && mid[2] < 192);
+    }
+
+    #[test]
+    fn transform_downscale_filters_stripes_for_layers_and_selections() {
+        let mut pixels = vec![0; 96*96*4];
+        for y in 0..96 { for x in 0..96 {
+            let v = if x % 3 == 0 { 255 } else { 0 };
+            pixels[(y*96+x)*4..(y*96+x)*4+4].copy_from_slice(&[v,v,v,255]);
+        } }
+        // Bilinear alone aliases this reduction to black instead of averaging.
+        assert_eq!(sample_bilinear(&pixels,96,96,49.5,49.5),[0,0,0,255]);
+        let source = crate::raster::SparsePixels::from_rgba(&pixels,96,96);
+        let mut layer = FloatingTransform::extract_layer(&source,0,1.0).unwrap();
+        layer.scale = 1.0/3.0;
+        layer.center = glam::Vec2::splat(16.0);
+        let mut output = crate::raster::SparsePixels::default();
+        layer.stamp_layer(&mut output);
+        let selection = Selection::from_rect(PixelRect { min_x:0,min_y:0,max_x:96,max_y:96 },96,96);
+        let mut fragment = FloatingTransform::extract(&source,96,96,&selection,0,1.0).unwrap();
+        fragment.scale = layer.scale;
+        fragment.center = layer.center;
+        let mut selected = crate::raster::SparsePixels::default();
+        fragment.stamp(&mut selected,96,96);
+        // One third white in linear light is about sRGB 156. The probes also
+        // straddle a source tile boundary (64), which must not introduce seams.
+        for x in 10..25 {
+            let p = output.read(96,x,16);
+            assert!((p[0] as i32-156).abs() <= 2,"x={x}: {p:?}");
+            assert_eq!(p[3],255);
+            assert_eq!(selected.read(96,x,16),p);
+        }
+    }
+
+    #[test]
+    fn transform_pivot_moves_independently_and_anchors_rotation_and_scale() {
+        let source = crate::raster::SparsePixels::from_rgba(&[10,20,30,255].repeat(100*80),100,80);
+        let mut transform = FloatingTransform::extract_layer(&source,0,1.0).unwrap();
+        let corners = transform.corners();
+        assert_eq!(transform.pivot,transform.center);
+        transform.drag(TransformHit::Pivot,transform.pivot,glam::Vec2::new(30.0,50.0));
+        assert_eq!(transform.corners(),corners,"moving pivot must not move the image");
+        let pivot = transform.pivot;
+        transform.drag(TransformHit::Rotate,pivot+glam::Vec2::X*20.0,pivot+glam::Vec2::Y*20.0);
+        assert_eq!(transform.pivot,pivot);
+        assert!((transform.rotation-std::f32::consts::FRAC_PI_2).abs()<1.0e-5);
+        for (before,after) in corners.into_iter().zip(transform.corners()) {
+            let delta = before-pivot;
+            let expected = pivot+glam::Vec2::new(-delta.y,delta.x);
+            assert!((after-expected).length()<1.0e-4);
+        }
+        let corners = transform.corners();
+        transform.drag(TransformHit::Scale(0),pivot+glam::Vec2::X*10.0,pivot+glam::Vec2::X*20.0);
+        assert_eq!(transform.scale,2.0);
+        assert_eq!(transform.pivot,pivot);
+        for (before,after) in corners.into_iter().zip(transform.corners()) {
+            assert!((after-(pivot+(before-pivot)*2.0)).length()<1.0e-4);
+        }
+        let center = transform.center;
+        let delta = glam::Vec2::new(-15.0,7.0);
+        transform.drag(TransformHit::Body,glam::Vec2::ZERO,delta);
+        assert_eq!(transform.pivot,pivot+delta);
+        assert_eq!(transform.center,center+delta);
+    }
+
+    #[test]
+    fn transform_outside_rotates_and_handles_follow_rotated_bounds() {
+        let source = crate::raster::SparsePixels::from_rgba(&[10,20,30,255].repeat(100*80),100,80);
+        let mut transform = FloatingTransform::extract_layer(&source,0,1.0).unwrap();
+        for rotation in [0.0,0.7,std::f32::consts::FRAC_PI_2] {
+            transform.rotation = rotation;
+            assert_eq!(transform.hit_test(transform.pivot,8.0),Some(TransformHit::Pivot));
+            let corners = transform.corners();
+            for (i,corner) in corners.into_iter().enumerate() {
+                assert_eq!(transform.hit_test(corner,8.0),Some(TransformHit::Scale(i as u8)));
+            }
+            assert_eq!(transform.hit_test(corners[0]*0.75+corners[2]*0.25,8.0),Some(TransformHit::Body));
+            assert_eq!(transform.hit_test(corners[0]+(corners[0]-transform.center),8.0),Some(TransformHit::Rotate));
+        }
+        // Crossing +/-180 degrees must produce a small step, not a full turn.
+        let direction = |degrees:f32| glam::Vec2::new(degrees.to_radians().cos(),degrees.to_radians().sin())*100.0;
+        let before = transform.rotation;
+        transform.drag(TransformHit::Rotate,transform.pivot+direction(179.0),transform.pivot+direction(-179.0));
+        assert!((transform.rotation-before-2.0f32.to_radians()).abs()<1.0e-5);
+    }
+
+    #[test]
+    #[ignore = "manual Transform commit performance measurement"]
+    fn transform_commit_performance() {
+        let source = crate::raster::SparsePixels::from_rgba(&[120,180,240,255].repeat(1024*1024),1024,1024);
+        for scale in [0.5,0.05] {
+            let mut transform = FloatingTransform::extract_layer(&source,0,1.0).unwrap();
+            transform.scale = scale;
+            let mut output = crate::raster::SparsePixels::default();
+            let started = std::time::Instant::now();
+            transform.stamp_layer(&mut output);
+            eprintln!("1024x1024 commit at {scale}: {:?}",started.elapsed());
+            assert!(!output.tiles.is_empty());
+        }
+    }
+
+    #[test]
+    fn transform_filter_preserves_identity_alpha_and_mask() {
+        let pixel = [17,128,240,93];
+        assert_eq!(sample_transform(0.5,0.5,1.0,|x,y| {
+            if x==0 && y==0 { (pixel,1.0) } else { ([0;4],0.0) }
+        }).0,pixel);
+        let (p,coverage) = sample_transform(0.5,0.5,0.25,|x,_| {
+            // Unselected opaque blue and transparent green must not bleed into red.
+            if x < 0 { ([0,0,255,255],0.0) }
+            else if x % 2 == 0 { ([255,0,0,255],1.0) }
+            else { ([0,255,0,0],1.0) }
+        });
+        assert_eq!(&p[..3],&[255,0,0]);
+        assert!(p[3] > 0 && p[3] < 255);
+        assert!(coverage > 0.0 && coverage < 1.0);
+    }
+
+    #[test]
+    fn rotated_transform_downscale_averages_checker_and_retains_off_canvas_pixels() {
+        let mut pixels = vec![0; 64*64*4];
+        for y in 0..64 { for x in 0..64 {
+            let v = if (x+y)%2==0 {255} else {0};
+            pixels[(y*64+x)*4..(y*64+x)*4+4].copy_from_slice(&[v,v,v,255]);
+        } }
+        let source = crate::raster::SparsePixels::from_rgba(&pixels,64,64);
+        let mut transform = FloatingTransform::extract_layer(&source,0,1.0).unwrap();
+        transform.scale = 0.2;
+        transform.rotation = 0.6;
+        transform.center = glam::Vec2::splat(-10.0);
+        let mut output = crate::raster::SparsePixels::default();
+        transform.stamp_layer(&mut output);
+        for y in -12..-8 { for x in -12..-8 {
+            let p = output.read(0,x,y);
+            assert!((p[0] as i32-188).abs() <= 2,"({x},{y}): {p:?}");
+            assert_eq!(p[3],255);
+        } }
     }
 }

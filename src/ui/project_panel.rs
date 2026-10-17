@@ -119,13 +119,20 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     ui.label("Resize canvas");
     let mut w = app.resize_w as f32;
     let mut h = app.resize_h as f32;
-    ui.drag_float("canvas_w", &mut w, 1.0);
-    ui.drag_float("canvas_h", &mut h, 1.0);
+    ui.grid(2, |ui| {
+        ui.grid_cell(|ui| ui.property("W", 0.18, |ui| { ui.drag_float("canvas_w", &mut w, 1.0); }));
+        ui.grid_cell(|ui| ui.property("H", 0.18, |ui| { ui.drag_float("canvas_h", &mut h, 1.0); }));
+    });
     app.resize_w = w.round().clamp(1.0, 16384.0) as u32;
     app.resize_h = h.round().clamp(1.0, 16384.0) as u32;
-    if ui.button("canvas_resize", "Apply size").clicked() {
-        app.resize_canvas(ui);
-    }
+    ui.horizontal(|ui| {
+        if ui.button("canvas_resize", "Apply size").clicked() {
+            app.resize_canvas(ui);
+        }
+        if ui.button("canvas_trim", "Trim").clicked() {
+            app.trim_canvas(ui);
+        }
+    });
 
     ui.space(14.0);
     ui.label(&app.workspace.active_doc().name);

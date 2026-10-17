@@ -6,7 +6,7 @@ use mega_ui::{DockState, Rect, Theme, Ui};
 
 use crate::canvas_gpu::{CanvasOverlay, CanvasRenderer, FloatingDraw, LayerDraw};
 use crate::editing::{
-    BrushStroke, FloatingTransform, PixelRect, SelectMode, Selection, Tool, TransformHit,
+    BrushStroke, FloatingTransform, PixelRect, SelectMode, Selection, SoftBrushCoverage, Tool, TransformHit, TransformCursor,
     apply_brush, brush_dirty_bounds, fill_bucket, flood_mask,
 };
 use crate::history::{EditCapture, History, HistoryChange};
@@ -41,6 +41,7 @@ pub struct EditorApp {
     pub erase_mode: bool,
     pub brush_size: f32,
     pub brush_opacity: f32,
+    pub brush_hardness: f32,
     pub brush_color: [f32; 4],
     pub wand_threshold: f32,
     pub fill_threshold: f32,
@@ -60,17 +61,20 @@ pub struct EditorApp {
     brush_last: Option<(f32, f32)>,
     brush_dirty: bool,
     stroke_marks: Vec<u32>,
+    soft_brush_coverage: SoftBrushCoverage,
     stroke_id: u32,
     stroke_capture: Option<EditCapture>,
     history: History,
     floating: Option<FloatingTransform>,
     transform_drag: Option<TransformHit>,
     transform_last: Option<Vec2>,
+    pub canvas_cursor: Option<TransformCursor>,
     pub layer_drag: Option<usize>,
     canvas_cleared: bool,
     pub resize_w: u32,
     pub resize_h: u32,
     pub ai: ui::ai_dialog::AiDialog,
+    pub hsv: ui::hsv_dialog::HsvDialog,
 }
 
 impl Default for EditorApp {
@@ -96,6 +100,7 @@ impl Default for EditorApp {
             erase_mode: false,
             brush_size: 24.0,
             brush_opacity: 1.0,
+            brush_hardness: 1.0,
             brush_color: [0.0, 0.0, 0.0, 1.0],
             wand_threshold: 32.0,
             fill_threshold: 32.0,
@@ -115,22 +120,51 @@ impl Default for EditorApp {
             brush_last: None,
             brush_dirty: false,
             stroke_marks: Vec::new(),
+            soft_brush_coverage: SoftBrushCoverage::default(),
             stroke_id: 1,
             stroke_capture: None,
             history: History::default(),
             floating: None,
             transform_drag: None,
             transform_last: None,
+            canvas_cursor: None,
             layer_drag: None,
             canvas_cleared: true,
             resize_w: 512,
             resize_h: 512,
             ai: ui::ai_dialog::AiDialog::default(),
+            hsv: Default::default(),
         }
     }
 }
 
 impl EditorApp {
+    pub fn open_hsv(&mut self) {
+        if self.ai.open || self.hsv.open || self.project().layers.is_empty() { return; }
+        self.close_asset_preview();
+        self.commit_transform();
+        self.hsv = ui::hsv_dialog::HsvDialog {
+            open:true,layer:self.project().active_layer,document_id:self.workspace.active_doc().id.clone(),
+            ..Default::default()
+        };
+    }
+
+    pub fn apply_hsv(&mut self) {
+        if !self.hsv.open { return; }
+        self.hsv.open = false;
+        if self.hsv.document_id != self.workspace.active_doc().id { return; }
+        let index = self.hsv.layer;
+        let adjustment = self.hsv.adjustment;
+        let Some(layer) = self.workspace.active_mut().layers.get_mut(index) else { return; };
+        let before = layer.pixels.clone();
+        if !adjustment.apply(&mut layer.pixels) { return; }
+        self.history.push_raster(index,before,layer.pixels.clone());
+        self.layers_reload = true;
+        self.dirty = true;
+        self.workspace.mark_active_thumb_dirty();
+        self.status = "HSV adjustment applied".into();
+    }
+
     pub fn open_ai(&mut self) {
         self.open_ai_mode(AiMode::Edit);
     }
@@ -648,11 +682,22 @@ impl EditorApp {
                 .map(ensure_project_extension)
         });
         let Some(path) = path else { return };
+        self.commit_transform();
         match self.workspace.save(&path) {
             Ok(()) => {
                 self.dirty = false;
                 self.status = format!("Saved {}", file_name(&path));
                 ui.notify_success("Project saved");
+            }
+            Err(error) => self.show_error(ui, error),
+        }
+    }
+
+    pub fn optimize_project(&mut self, ui: &mut Ui) {
+        match self.workspace.optimize() {
+            Ok((before, after)) => {
+                self.status = format!("Project optimized: {} → {} KiB", before / 1024, after / 1024);
+                ui.notify_success("Saved project optimized");
             }
             Err(error) => self.show_error(ui, error),
         }
@@ -758,6 +803,16 @@ impl EditorApp {
         self.workspace.mark_active_thumb_dirty();
     }
 
+    pub fn merge_layer_down(&mut self) {
+        let index = self.project().active_layer;
+        if index == 0 || index >= self.project().layers.len() { return; }
+        self.commit_transform();
+        if !self.history.merge_down(self.workspace.active_mut()) { return; }
+        self.layer_drag = None;
+        self.sync_layer_structure();
+        self.status = "Layer merged down".into();
+    }
+
     pub fn delete_layer(&mut self, index: usize) {
         if index >= self.project().layers.len() { return; }
         self.cancel_transform();
@@ -833,6 +888,20 @@ impl EditorApp {
             }
             Err(error) => self.show_error(ui, error),
         }
+    }
+
+    pub fn trim_canvas(&mut self, ui: &mut Ui) {
+        self.close_asset_preview();
+        self.commit_transform();
+        if !self.history.trim_canvas(self.workspace.active_mut()) {
+            self.status = "Trim: no transparent border to remove".into();
+            return;
+        }
+        self.sync_layer_structure();
+        self.fit_image = true;
+        let (width,height) = self.image_size.unwrap();
+        self.status = format!("Canvas trimmed to {width} × {height}");
+        ui.notify_success("Canvas trimmed");
     }
 
     pub fn clear_history(&mut self) {
@@ -968,6 +1037,13 @@ impl EditorApp {
         if tool == Tool::Transform && self.preview_asset.is_none() {
             self.begin_transform();
         }
+    }
+
+    pub fn invert_selection(&mut self) {
+        let Some(selection) = self.selection.as_mut() else { return; };
+        selection.invert();
+        self.selection_mask_dirty = true;
+        self.status = "Selection inverted".into();
     }
 
     pub fn clear_selection(&mut self) {
@@ -1238,6 +1314,7 @@ impl EditorApp {
                 return;
             }
             self.stroke_id = self.stroke_id.wrapping_add(1).max(1);
+            self.soft_brush_coverage.clear();
             let need = view.width as usize * view.height as usize;
             if self.stroke_marks.len() != need {
                 self.stroke_marks.resize(need, 0);
@@ -1259,6 +1336,7 @@ impl EditorApp {
         }
         if self.input.mouse_released {
             self.brush_last = None;
+            self.soft_brush_coverage.clear();
             if let Some(capture) = self.stroke_capture.take() {
                 let layer = capture.layer();
                 if let Some(pixels) = self.workspace.active_mut().layers.get_mut(layer).map(|l| &mut l.pixels)
@@ -1298,6 +1376,7 @@ impl EditorApp {
         let stroke_id = self.stroke_id;
         let selection = self.selection.take();
         let mut marks = std::mem::take(&mut self.stroke_marks);
+        let mut soft_coverage = std::mem::take(&mut self.soft_brush_coverage);
         let predicted = brush_dirty_bounds(from, to, size, width, height);
         if let Some(capture) = self.stroke_capture.as_mut()
             && let Some(pixels) = self.workspace.active_mut().layers.get(active).map(|l| &l.pixels)
@@ -1307,6 +1386,7 @@ impl EditorApp {
         let Some(pixels) = self.workspace.active_mut().layers.get_mut(active).map(|l| &mut l.pixels) else {
             self.selection = selection;
             self.stroke_marks = marks;
+            self.soft_brush_coverage = soft_coverage;
             return;
         };
         let mut stroke = BrushStroke {
@@ -1314,15 +1394,18 @@ impl EditorApp {
             to,
             size,
             opacity,
+            hardness: self.brush_hardness,
             erase,
             color,
             selection: selection.as_ref(),
             coverage_marks: Some(marks.as_mut_slice()),
+            soft_coverage: Some(&mut soft_coverage),
             stroke_id,
         };
         let dirty = apply_brush(pixels, width, height, &mut stroke);
         self.selection = selection;
         self.stroke_marks = marks;
+        self.soft_brush_coverage = soft_coverage;
         if let Some(rect) = dirty {
             self.dirty = true;
             self.brush_dirty = true;
@@ -1352,7 +1435,7 @@ impl EditorApp {
         self.floating_reload = true;
         self.clear_selection();
         self.dirty = true;
-        self.status = "Transform — drag / handles · Enter commit · Esc cancel".into();
+        self.status = "Transform — inside move · outside rotate · corners scale · Enter apply · Esc cancel".into();
     }
 
     pub fn cancel_transform(&mut self) {
@@ -1407,6 +1490,20 @@ impl EditorApp {
 
     }
 
+    pub fn transform_cursor(&self, view: CanvasView) -> Option<TransformCursor> {
+        if self.tool != Tool::Transform || self.preview_asset.is_some() || self.ai.open || self.hsv.open { return None; }
+        let floating = self.floating.as_ref()?;
+        let hit = self.transform_drag.or_else(|| floating.hit_test(
+            view.screen_to_image(self.input.mouse_pos),8.0/view.zoom.max(1.0e-6)))?;
+        Some(match hit {
+            TransformHit::Body => TransformCursor::Move,
+            TransformHit::Pivot => TransformCursor::Pivot,
+            TransformHit::Rotate => TransformCursor::Rotate,
+            TransformHit::Scale(i) => TransformCursor::resize(
+                view.image_to_screen(floating.corners()[i as usize])-view.image_to_screen(floating.center)),
+        })
+    }
+
     fn handle_transform(&mut self, view: CanvasView) {
         if self.floating.is_none() {
             if self.input.mouse_pressed {
@@ -1423,7 +1520,7 @@ impl EditorApp {
             return;
         }
         let image_pos = view.screen_to_image(self.input.mouse_pos);
-        let handle_r = (8.0 / view.zoom.max(1e-6)).max(4.0);
+        let handle_r = 8.0 / view.zoom.max(1e-6);
 
         if self.input.mouse_pressed {
             let hit = self
@@ -1433,8 +1530,6 @@ impl EditorApp {
             if let Some(hit) = hit {
                 self.transform_drag = Some(hit);
                 self.transform_last = Some(image_pos);
-            } else if self.canvas_rect.contains(self.input.mouse_pos) {
-                self.commit_transform();
             }
         }
         if self.input.mouse_down
@@ -1443,23 +1538,7 @@ impl EditorApp {
             let mut scale = 1.0f32;
             let mut rotation = 0.0f32;
             if let Some(floating) = self.floating.as_mut() {
-                match hit {
-                    TransformHit::Body => {
-                        floating.center += image_pos - prev;
-                    }
-                    TransformHit::Rotate => {
-                        let a0 = (prev - floating.center).y.atan2((prev - floating.center).x);
-                        let a1 = (image_pos - floating.center)
-                            .y
-                            .atan2((image_pos - floating.center).x);
-                        floating.rotation += a1 - a0;
-                    }
-                    TransformHit::Scale(_) => {
-                        let d0 = (prev - floating.center).length().max(1.0);
-                        let d1 = (image_pos - floating.center).length().max(1.0);
-                        floating.scale = (floating.scale * (d1 / d0)).clamp(0.05, 32.0);
-                    }
-                }
+                floating.drag(hit,prev,image_pos);
                 scale = floating.scale;
                 rotation = floating.rotation;
             }
@@ -1492,10 +1571,12 @@ impl Scene for EditorApp {
     }
 
     fn begin_frame(&mut self, input: &FrameInput) {
+        self.canvas_cursor = None;
         self.ai.preview_input = input.clone();
-        self.input = if self.ai.open {
+        self.input = if self.ai.open || self.hsv.open {
             let mut blocked = FrameInput::default();
             blocked.key_escape = input.key_escape;
+            if self.hsv.open { blocked.key_enter = input.key_enter; }
             blocked
         } else { input.clone() };
     }
@@ -1523,7 +1604,7 @@ impl Scene for EditorApp {
         if paste {
             self.paste_clipboard(ui);
         }
-        self.ai.open
+        self.ai.open || self.hsv.open
             || self.selection.is_some()
             || self.selection_anchor.is_some()
             || self.floating.is_some()
@@ -1651,6 +1732,9 @@ impl Scene for EditorApp {
                 .collect(),
             ..Default::default()
         };
+        if self.hsv.open && self.hsv.preview && self.hsv.document_id == self.workspace.active_doc().id {
+            overlay.hsv = Some((self.hsv.layer,self.hsv.adjustment));
+        }
         if matches!(self.tool, Tool::Brush | Tool::SelectionBrush) {
             let radius = (self.brush_size * self.zoom * 0.5).max(2.5);
             let expanded = Rect {
@@ -1678,10 +1762,12 @@ impl Scene for EditorApp {
             });
             let corners = floating.corners().map(|p| view.image_to_screen(p));
             overlay.transform_corners = Some(corners);
-            overlay.transform_rotate = Some(view.image_to_screen(floating.rotate_handle()));
+            overlay.transform_pivot = Some(view.image_to_screen(floating.pivot));
         }
         Some((self.canvas_rect, view, overlay))
     }
+
+    fn canvas_cursor(&self) -> Option<TransformCursor> { self.canvas_cursor }
 }
 
 fn paste_image_from_clipboard() -> Result<(Vec<u8>, u32, u32), String> {
@@ -1708,10 +1794,210 @@ fn paste_image_from_clipboard() -> Result<(Vec<u8>, u32, u32), String> {
 }
 
 #[cfg(test)]
+mod hsv_tests {
+    use super::*;
+    use crate::hsv::HsvAdjustment;
+    use crate::raster::Raster;
+
+    fn document() -> EditorApp {
+        let mut app = EditorApp::default();
+        app.project_mut().import_rgba(&[0,0,255,255].repeat(4),2,2).unwrap();
+        app.project_mut().add_layer();
+        app.project_mut().layers[1].pixels.write(0,-20,30,[255,0,0,128]);
+        app.project_mut().layers[1].opacity = 0.7;
+        app.sync_layer_structure();
+        app.dirty = false;
+        app.canvas_rect = Rect::from_min_size(Vec2::ZERO,Vec2::splat(400.0));
+        app
+    }
+
+    #[test]
+    fn hsv_preview_does_not_edit_pixels_and_apply_is_one_undoable_active_layer_edit() {
+        let mut app = document();
+        let before:Vec<_> = app.project().layers.iter().map(|l|l.pixels.clone()).collect();
+        app.open_hsv();
+        app.hsv.adjustment = HsvAdjustment {hue:120.0,..Default::default()};
+        assert!(app.canvas_present().unwrap().2.hsv.is_some());
+        assert_eq!(app.project().layers[1].pixels,before[1]);
+        assert!(!app.dirty);
+        app.hsv.preview = false;
+        assert!(app.canvas_present().unwrap().2.hsv.is_none());
+        app.apply_hsv();
+        assert!(!app.hsv.open);
+        assert_eq!(app.project().layers[0].pixels,before[0]);
+        assert_eq!(app.project().layers[1].pixels.read(0,-20,30),[0,255,0,128]);
+        assert_eq!(app.project().layers[1].opacity,0.7);
+        assert!(app.dirty);
+        app.undo();
+        assert_eq!(app.project().layers[1].pixels,before[1]);
+        app.redo();
+        assert_eq!(app.project().layers[1].pixels.read(0,-20,30),[0,255,0,128]);
+        app.open_hsv();
+        assert!(app.hsv.adjustment.is_identity());
+        app.apply_hsv();
+        app.undo();
+        assert_eq!(app.project().layers[1].pixels,before[1],"neutral Apply must not add a history entry");
+    }
+
+    #[test]
+    fn hsv_cancel_blocks_editor_input_and_keeps_pixels_history_and_dirty_state() {
+        let mut app = document();
+        let original = app.project().layers[1].pixels.clone();
+        app.open_hsv();
+        app.hsv.adjustment.value = -75.0;
+        let mut input = FrameInput::default();
+        input.mouse_pressed = true;
+        input.key_undo = true;
+        input.key_paste = true;
+        input.key_escape = true;
+        app.begin_frame(&input);
+        assert!(!app.input.mouse_pressed && !app.input.key_undo && !app.input.key_paste);
+        let mut ui = Ui::new();
+        ui.begin_frame(mega_ui::UiInput {viewport:Vec2::new(900.0,700.0),..Default::default()});
+        ui::hsv_dialog::draw(&mut ui,&mut app);
+        ui.end_frame();
+        assert!(!app.hsv.open);
+        assert_eq!(app.project().layers[1].pixels,original);
+        assert!(!app.dirty);
+        assert!(app.history.undo(app.workspace.active_mut()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod transform_interaction_tests {
+    use super::*;
+
+    fn document() -> EditorApp {
+        let mut app = EditorApp::default();
+        app.project_mut().import_rgba(&[100,150,200,255].repeat(100*80),100,80).unwrap();
+        app.sync_layer_structure();
+        app.canvas_rect = Rect::from_min_size(Vec2::ZERO,Vec2::splat(500.0));
+        app.set_tool(Tool::Transform);
+        app
+    }
+
+    fn pointer(app: &mut EditorApp, point: Vec2, pressed: bool, down: bool) {
+        let view = app.canvas_view().unwrap();
+        app.input = FrameInput::default();
+        app.input.mouse_pos = view.image_to_screen(point);
+        app.input.mouse_pressed = pressed;
+        app.input.mouse_down = down;
+        app.input.mouse_released = !down;
+        app.handle_canvas_edit(view);
+    }
+
+    #[test]
+    fn outside_drag_rotates_without_committing_and_escape_restores_pixels() {
+        let mut app = document();
+        let original = app.project().layers[0].pixels.clone();
+        pointer(&mut app,Vec2::new(-20.0,40.0),true,true);
+        assert_eq!(app.transform_drag,Some(TransformHit::Rotate));
+        pointer(&mut app,Vec2::new(50.0,-30.0),false,true);
+        assert!((app.floating.as_ref().unwrap().rotation-std::f32::consts::FRAC_PI_2).abs()<1.0e-5);
+        let view = app.canvas_view().unwrap();
+        assert_eq!(app.transform_cursor(view),Some(TransformCursor::Rotate));
+        pointer(&mut app,Vec2::new(50.0,-30.0),false,false);
+        assert!(app.transform_drag.is_none() && app.floating.is_some());
+        app.input.key_escape = true;
+        app.handle_canvas_edit(view);
+        assert!(app.floating.is_none());
+        assert_eq!(app.project().layers[0].pixels,original);
+    }
+
+    #[test]
+    fn pivot_drag_keeps_image_stationary_and_body_drag_carries_pivot() {
+        let mut app = document();
+        let before = app.floating.as_ref().unwrap().corners();
+        pointer(&mut app,Vec2::new(50.0,40.0),true,true);
+        assert_eq!(app.transform_drag,Some(TransformHit::Pivot));
+        pointer(&mut app,Vec2::new(35.0,55.0),false,true);
+        assert_eq!(app.floating.as_ref().unwrap().corners(),before);
+        pointer(&mut app,Vec2::new(35.0,55.0),false,false);
+        pointer(&mut app,Vec2::new(75.0,20.0),true,true);
+        assert_eq!(app.transform_drag,Some(TransformHit::Body));
+        pointer(&mut app,Vec2::new(85.0,25.0),false,true);
+        assert_eq!(app.floating.as_ref().unwrap().pivot,Vec2::new(45.0,60.0));
+        assert_eq!(app.floating.as_ref().unwrap().center,Vec2::new(60.0,45.0));
+        assert_eq!(app.transform_cursor(app.canvas_view().unwrap()),Some(TransformCursor::Move));
+    }
+
+    #[test]
+    fn resize_cursors_follow_canvas_rotation_with_a_constant_screen_hit_radius() {
+        let mut app = document();
+        let corner = app.floating.as_ref().unwrap().corners()[0];
+        for zoom in [0.25,1.0,32.0] {
+            app.zoom = zoom;
+            let view = app.canvas_view().unwrap();
+            app.input.mouse_pos = view.image_to_screen(corner)+Vec2::X*7.0;
+            assert_eq!(app.transform_cursor(view),Some(TransformCursor::ResizeNwse));
+            app.input.mouse_pos = view.image_to_screen(corner)+Vec2::X*12.0;
+            assert_eq!(app.transform_cursor(view),Some(TransformCursor::Move));
+        }
+        app.rotation = 90.0;
+        let view = app.canvas_view().unwrap();
+        app.input.mouse_pos = view.image_to_screen(corner);
+        assert_eq!(app.transform_cursor(view),Some(TransformCursor::ResizeNesw));
+        app.transform_drag = Some(TransformHit::Scale(0));
+        app.input.mouse_pos = view.image_to_screen(Vec2::splat(-100.0));
+        assert_eq!(app.transform_cursor(view),Some(TransformCursor::ResizeNesw));
+    }
+}
+
+#[cfg(test)]
 mod sparse_layer_tests {
     use super::*;
     use crate::raster::Raster;
     use std::sync::Arc;
+
+    #[test]
+    fn trim_canvas_commits_pending_transform_updates_fields_and_preserves_undo() {
+        let mut app = EditorApp::default();
+        app.project_mut().resize_canvas(100,80).unwrap();
+        app.project_mut().layers[0].pixels.write(0,20,30,[100,150,200,255]);
+        app.project_mut().layers[0].pixels.write(0,24,32,[200,150,100,255]);
+        app.sync_layer_structure();
+        app.begin_transform();
+        app.floating.as_mut().unwrap().center += glam::Vec2::new(10.0,5.0);
+        app.trim_canvas(&mut Ui::new());
+        assert!(app.floating.is_none());
+        assert_eq!(app.image_size,Some((5,3)));
+        assert_eq!((app.resize_w,app.resize_h),(5,3));
+        assert_eq!(app.project().layers[0].pixels.read(0,0,0),[100,150,200,255]);
+        assert_eq!(app.project().layers[0].pixels.read(0,4,2),[200,150,100,255]);
+        assert!(app.dirty && app.fit_image);
+        app.undo();
+        assert_eq!(app.image_size,Some((100,80)));
+        assert_eq!((app.resize_w,app.resize_h),(100,80));
+        assert_eq!(app.project().layers[0].pixels.read(0,30,35),[100,150,200,255]);
+        app.undo();
+        assert_eq!(app.project().layers[0].pixels.read(0,20,30),[100,150,200,255]);
+        app.redo();
+        app.redo();
+        assert_eq!(app.image_size,Some((5,3)));
+    }
+
+    #[test]
+    fn soft_brush_setting_reaches_raster_and_undo_restores_original_tiles() {
+        let mut app = document();
+        let original = app.project().layers[0].pixels.clone();
+        app.brush_hardness = 0.0;
+        app.brush_size = 8.0;
+        app.brush_opacity = 0.5;
+        app.brush_color = [1.0, 0.0, 0.0, 1.0];
+        app.stroke_capture = Some(EditCapture::new(0, 10, 10));
+        app.apply_brush_segment((4.5, 4.5), (4.5, 4.5), 10, 10, false);
+        assert_eq!(app.project().layers[0].pixels.read(0, 4, 4), [255, 0, 0, 128]);
+        assert_eq!(app.project().layers[0].pixels.read(0, 6, 4), [255, 0, 0, 64]);
+        let painted = app.project().layers[0].pixels.clone();
+        app.apply_brush_segment((4.5, 4.5), (4.5, 4.5), 10, 10, false);
+        assert_eq!(app.project().layers[0].pixels, painted);
+        let edit = app.stroke_capture.take().unwrap().finish(&mut app.project_mut().layers[0].pixels).unwrap();
+        app.history.push(edit);
+        app.undo();
+        assert_eq!(app.project().layers[0].pixels, original);
+        app.redo();
+        assert_eq!(app.project().layers[0].pixels, painted);
+    }
 
     fn document() -> EditorApp {
         let mut app = EditorApp::default();
@@ -1864,6 +2150,31 @@ fn brush_overlaps_image(point: Vec2, radius_screen: f32, view: CanvasView) -> bo
 mod ai_tests {
     use super::*;
     use crate::raster::SparsePixels;
+
+    #[test]
+    fn invert_selection_complements_mask_and_does_nothing_without_selection() {
+        let mut app = EditorApp::default();
+        app.selection_mask_dirty = false;
+        let status = app.status.clone();
+        app.invert_selection();
+        assert!(app.selection.is_none());
+        assert!(!app.selection_mask_dirty);
+        assert_eq!(app.status, status);
+        app.project_mut().import_rgba(&[1, 2, 3, 255].repeat(6), 3, 2).unwrap();
+        let pixels = app.project().layers[0].pixels.clone();
+        app.selection = Some(Selection { width: 3, height: 2, mask: vec![1, 0, 1, 0, 0, 1] });
+        app.invert_selection();
+        assert_eq!(app.selection.as_ref().unwrap().mask, [0, 1, 0, 1, 1, 0]);
+        assert!(app.selection_mask_dirty);
+        app.invert_selection();
+        assert_eq!(app.selection.as_ref().unwrap().mask, [1, 0, 1, 0, 0, 1]);
+        app.selection = Some(Selection::all(3, 2));
+        app.invert_selection();
+        assert!(app.selection.as_ref().unwrap().is_empty());
+        app.invert_selection();
+        assert_eq!(app.selection.as_ref().unwrap().mask, [1; 6]);
+        assert_eq!(app.project().layers[0].pixels, pixels);
+    }
 
     #[test]
     fn layer_clipboard_moves_between_documents_without_clipping_and_undoes() {
@@ -2505,6 +2816,52 @@ mod ai_tests {
 #[cfg(test)]
 mod layer_history_tests {
     use super::*;
+
+    #[test]
+    fn merge_down_restores_both_layers_and_prior_edits_through_undo_redo() {
+        let mut app = app_with_layers(3);
+        paint_pixel(&mut app, 2, 80);
+        let before = app.project().layers.clone();
+        app.project_mut().active_layer = 2;
+        app.merge_layer_down();
+        assert_eq!(app.project().layers.len(), 2);
+        assert_eq!(app.project().active_layer, 1);
+        assert_eq!(app.project().manifest.layers.len(), 2);
+        assert_eq!(app.project().layers[0].pixels, before[0].pixels);
+        assert!(app.layers_reload && app.dirty);
+        let merged = app.project().layers[1].pixels.clone();
+        app.undo();
+        assert_eq!(app.project().layers.len(), 3);
+        assert_eq!(app.project().active_layer, 2);
+        for (restored, original) in app.project().layers.iter().zip(&before) {
+            assert_eq!(restored.name, original.name);
+            assert_eq!(restored.opacity, original.opacity);
+            assert_eq!(restored.visible, original.visible);
+            assert_eq!(restored.pixels, original.pixels);
+        }
+        app.undo();
+        app.redo();
+        app.redo();
+        assert_eq!(app.project().layers.len(), 2);
+        assert_eq!(app.project().layers[1].pixels, merged);
+        app.undo();
+        paint_pixel(&mut app, 2, 90);
+        app.redo();
+        assert_eq!(app.project().layers.len(), 3);
+    }
+
+    #[test]
+    fn merge_down_does_nothing_for_empty_document_or_bottom_layer() {
+        let mut app = EditorApp::default();
+        app.merge_layer_down();
+        assert!(app.project().layers.is_empty());
+        let mut app = app_with_layers(2);
+        app.project_mut().active_layer = 0;
+        let before = app.project().layers[0].pixels.clone();
+        app.merge_layer_down();
+        assert_eq!(app.project().layers.len(), 2);
+        assert_eq!(app.project().layers[0].pixels, before);
+    }
     use crate::raster::{Raster, SparsePixels};
 
     fn app_with_layers(count: usize) -> EditorApp {

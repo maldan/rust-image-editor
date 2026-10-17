@@ -55,6 +55,10 @@ struct ViewUniforms {
     rotation: f32,
     opacity: f32,
     _pad: f32,
+    hue: f32,
+    saturation: f32,
+    value: f32,
+    _hsv_pad: f32,
 }
 
 @group(0) @binding(0) var<uniform> vu: ViewUniforms;
@@ -95,7 +99,51 @@ fn fs_checker(in: VsOut) -> @location(0) vec4<f32> {
 fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
     let tex = textureSampleLevel(img, samp_near, in.uv, 0.0);
     let a = tex.a * vu.opacity;
-    return vec4<f32>(tex.rgb, a);
+    if (vu.hue == 0.0 && vu.saturation == 0.0 && vu.value == 0.0) { return vec4<f32>(tex.rgb,a); }
+    return vec4<f32>(adjust_hsv(tex.rgb),a);
+}
+
+fn hsv_srgb(linear:vec3<f32>) -> vec3<f32> {
+    return select(1.055*pow(linear,vec3<f32>(1.0/2.4))-vec3<f32>(0.055),
+        linear*12.92,linear<=vec3<f32>(0.0031308));
+}
+
+fn hsv_linear(srgb:vec3<f32>) -> vec3<f32> {
+    return select(pow((srgb+vec3<f32>(0.055))/1.055,vec3<f32>(2.4)),
+        srgb/12.92,srgb<=vec3<f32>(0.04045));
+}
+
+fn adjust_hsv(linear:vec3<f32>) -> vec3<f32> {
+    // Recover the exact 8-bit input before chroma amplification; tiny hardware
+    // sRGB decode errors otherwise become visible on almost-neutral colors.
+    let rgb = round(clamp(hsv_srgb(linear),vec3<f32>(0.0),vec3<f32>(1.0))*255.0)/255.0;
+    let high = max(rgb.r,max(rgb.g,rgb.b));
+    var chroma = high-min(rgb.r,min(rgb.g,rgb.b));
+    var hue = 0.0;
+    if (chroma>1.0e-6) {
+        if (rgb.r==high) { hue=(rgb.g-rgb.b)/chroma; }
+        else if (rgb.g==high) { hue=2.0+(rgb.b-rgb.r)/chroma; }
+        else { hue=4.0+(rgb.r-rgb.g)/chroma; }
+        hue=fract((hue+clamp(vu.hue,-180.0,180.0)/60.0)/6.0)*6.0;
+    }
+    let saturation=clamp(vu.saturation,-100.0,100.0)/100.0;
+    let gain=select(1.0+saturation,1.0+saturation+2.0*saturation*saturation,saturation>0.0);
+    chroma=min(chroma*gain,1.0);
+    let value=clamp(vu.value,-100.0,100.0)/100.0;
+    let v=high*(1.0-abs(value))+max(value,0.0);
+    chroma=min(chroma*(1.0-abs(value)),v);
+    let x=chroma*(1.0-abs((hue%2.0)-1.0));
+    var out=vec3<f32>(chroma,0.0,x);
+    switch u32(hue) {
+        case 0u: {out=vec3<f32>(chroma,x,0.0);}
+        case 1u: {out=vec3<f32>(x,chroma,0.0);}
+        case 2u: {out=vec3<f32>(0.0,chroma,x);}
+        case 3u: {out=vec3<f32>(0.0,x,chroma);}
+        case 4u: {out=vec3<f32>(x,0.0,chroma);}
+        default: {}
+    }
+    // Match the committed 8-bit result, including quantization, during preview.
+    return hsv_linear(round(clamp(out+vec3<f32>(v-chroma),vec3<f32>(0.0),vec3<f32>(1.0))*255.0)/255.0);
 }
 
 // Active layer during transform: same pixels, but the grabbed mask is hidden
@@ -156,7 +204,7 @@ fn fs_punch(in: VsOut) -> @location(0) vec4<f32> {
 struct FloatUniforms {
     viewport: vec2<f32>,
     opacity: f32,
-    _pad: f32,
+    filter_scale: f32,
     origin: vec2<f32>,
     size: vec2<f32>,
     image_size: vec2<f32>,
@@ -181,10 +229,14 @@ fn vs_float(@builtin(vertex_index) idx: u32) -> VsOut {
         vec2<f32>(1.0, 1.0),
         vec2<f32>(0.0, 1.0),
     );
-    var corner_i = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
     var corners = array<vec2<f32>, 4>(fu.c0, fu.c1, fu.c2, fu.c3);
-    let uv = corner_uv[idx];
-    let screen = corners[corner_i[idx]];
+    var uv = corner_uv[idx];
+    // Dense selections need room for the bilinear edge; tiled quads stay disjoint.
+    if (fu.origin.x == 0.0) {
+        let pad = vec2<f32>(1.0 / fu.filter_scale) / fu.size;
+        uv = uv * (vec2<f32>(1.0) + 2.0 * pad) - pad;
+    }
+    let screen = corners[0] + (corners[1]-corners[0])*uv.x + (corners[3]-corners[0])*uv.y;
     var out: VsOut;
     out.pos = to_ndc(screen, fu.viewport);
     out.uv = uv;
@@ -194,14 +246,51 @@ fn vs_float(@builtin(vertex_index) idx: u32) -> VsOut {
 
 @fragment
 fn fs_float(in: VsOut) -> @location(0) vec4<f32> {
-    let texel = clamp(floor(in.uv * fu.size), vec2<f32>(0.0), fu.size - vec2<f32>(1.0));
-    let m = textureLoad(fmask, vec2<i32>(texel), 0).r;
-    if (m < 0.5) {
-        return vec4<f32>(0.0);
+    let source = in.uv * fu.size + fu.origin;
+    let footprint = max(length(dpdx(source)),length(dpdy(source)));
+    // Fixed halo supports up to level 5, including the minimum 5% Transform scale.
+    let lod = min(5.0,log2(max(1.0/fu.filter_scale,max(footprint,1.0))));
+    let tex = textureSampleLevel(fimg,fsamp,source/fu.image_size,lod);
+    if (tex.a < 0.5/255.0) { return vec4<f32>(0.0); }
+    // Dense selections have a transparent border outside their source rectangle.
+    // Sparse tiles already contain neighbouring pixels and transparent halos.
+    var edge = 1.0;
+    if (fu.origin.x == 0.0) {
+        let half_width = exp2(lod)*0.5;
+        let low = clamp(source/(2.0*half_width)+vec2<f32>(0.5),vec2<f32>(0.0),vec2<f32>(1.0));
+        let high = clamp((fu.size-source)/(2.0*half_width)+vec2<f32>(0.5),vec2<f32>(0.0),vec2<f32>(1.0));
+        edge = low.x*low.y*high.x*high.y;
     }
-    let src_uv = (texel + vec2<f32>(0.5)) / fu.size;
-    let tex = textureSampleLevel(fimg, fsamp, src_uv, 0.0);
-    return vec4<f32>(tex.rgb, tex.a * fu.opacity);
+    return vec4<f32>(clamp(tex.rgb/tex.a,vec3<f32>(0.0),vec3<f32>(1.0)),tex.a*fu.opacity*edge);
+}
+
+// --- Transform preview mip generation (runs only when the source changes) ---
+@group(0) @binding(0) var mip_img: texture_2d<f32>;
+@group(0) @binding(1) var mip_mask: texture_2d<f32>;
+@group(0) @binding(2) var mip_sampler: sampler;
+
+@vertex
+fn vs_mip(@builtin(vertex_index) idx: u32) -> VsOut {
+    var uv = array<vec2<f32>,3>(vec2<f32>(0.0,0.0),vec2<f32>(2.0,0.0),vec2<f32>(0.0,2.0));
+    var out: VsOut;
+    out.uv = uv[idx];
+    out.pos = vec4<f32>(out.uv.x*2.0-1.0,1.0-out.uv.y*2.0,0.0,1.0);
+    out.screen = vec2<f32>(0.0);
+    return out;
+}
+
+@fragment
+fn fs_mip_init(in: VsOut) -> @location(0) vec4<f32> {
+    let coord = vec2<i32>(in.uv*vec2<f32>(textureDimensions(mip_img)));
+    let tex = textureLoad(mip_img,coord,0);
+    let alpha = tex.a*textureLoad(mip_mask,coord,0).r;
+    return vec4<f32>(tex.rgb*alpha,alpha);
+}
+
+@fragment
+fn fs_mip_down(in: VsOut) -> @location(0) vec4<f32> {
+    // Hardware bilinear averages each 2x2 group in premultiplied linear light.
+    return textureSampleLevel(mip_img,mip_sampler,in.uv,0.0);
 }
 
 // --- selection overlay (dim + marching ants) ---

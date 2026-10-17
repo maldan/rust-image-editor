@@ -157,6 +157,34 @@ impl SparsePixels {
         bounds
     }
 
+    /// Nontransparent bounds clipped to a document frame. Visit allocated tiles
+    /// only, so a large transparent canvas never needs a full composite buffer.
+    pub fn bounds_in(&self, frame: RasterRect) -> Option<RasterRect> {
+        let mut bounds: Option<RasterRect> = None;
+        let side = TILE_SIZE as i32;
+        for (&(tx,ty), tile) in &self.tiles {
+            let ox = tx*side + self.offset.0;
+            let oy = ty*side + self.offset.1;
+            let x0 = frame.min_x.max(ox);
+            let y0 = frame.min_y.max(oy);
+            let x1 = frame.max_x.min(ox+side);
+            let y1 = frame.max_y.min(oy+side);
+            if x0 >= x1 || y0 >= y1 { continue; }
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = ((y-oy)*side+x-ox) as usize*4;
+                    if tile[i+3] == 0 { continue; }
+                    bounds = Some(match bounds {
+                        Some(b) => RasterRect {min_x:b.min_x.min(x),min_y:b.min_y.min(y),
+                            max_x:b.max_x.max(x+1),max_y:b.max_y.max(y+1)},
+                        None => RasterRect {min_x:x,min_y:y,max_x:x+1,max_y:y+1},
+                    });
+                }
+            }
+        }
+        bounds
+    }
+
     /// Turn near-transparent pixels into transparent black, including off-canvas pixels.
     pub fn fix_alpha(&mut self) -> usize {
         let mut changed = 0;

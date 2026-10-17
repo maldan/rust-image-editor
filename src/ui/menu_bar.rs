@@ -13,6 +13,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         if ui.menu_item("save", "Save Project").clicked() {
             app.save_project(ui);
         }
+        if ui.menu_item_enabled("optimize", "Optimize", app.workspace.path.is_some()).clicked() {
+            app.optimize_project(ui);
+        }
         ui.separator();
         if ui.menu_item("import", "Import Asset…").clicked() {
             app.import_image(ui);
@@ -33,6 +36,18 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             app.redo();
         }
         ui.separator();
+        ui.menu("layer", "Layer", |ui| {
+            let index = app.project().active_layer;
+            let can_merge = index > 0 && index < app.project().layers.len();
+            if ui.menu_item_enabled("merge_down", "Merge Down", can_merge).clicked() {
+                app.merge_layer_down();
+            }
+        });
+        ui.menu("mask", "Mask", |ui| {
+            if ui.menu_item_enabled("invert", "Invert", app.selection.is_some()).clicked() {
+                app.invert_selection();
+            }
+        });
         ui.add_enabled(!app.project().layers.is_empty(), |ui| {
             if ui.menu_item("copy_layer", "Copy Layer (Ctrl+C)").clicked() {
                 app.copy_layer(ui);
@@ -43,6 +58,12 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         }
         if ui.menu_item("paste_image", "Paste Image").clicked() {
             app.paste_image(ui);
+        }
+    });
+
+    ui.menu("filter", "Filter", |ui| {
+        if ui.menu_item_enabled("hsv_adjustment","HSV Adjustment…",!app.project().layers.is_empty()).clicked() {
+            app.open_hsv();
         }
     });
 

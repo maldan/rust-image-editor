@@ -21,6 +21,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             ui.slider_stepped("brush_size", &mut app.brush_size, 1.0..=256.0, 1.0);
 
             ui.space(12.0);
+            ui.label(&format!("Hardness: {:.0}%", app.brush_hardness * 100.0));
+            ui.slider("brush_hardness", &mut app.brush_hardness, 0.0..=1.0);
+
+            ui.space(12.0);
             ui.label(&format!("Opacity: {:.0}%", app.brush_opacity * 100.0));
             ui.slider("brush_opacity", &mut app.brush_opacity, 0.01..=1.0);
         }
@@ -58,7 +62,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             ui.slider_stepped("fill_threshold", &mut app.fill_threshold, 0.0..=255.0, 1.0);
         }
         Tool::Transform => {
-            ui.label("Move, scale (corners), rotate (yellow handle).");
+            ui.label("Inside — move · corners — scale");
+            ui.label("Outside — rotate");
+            ui.label("Center cross — move pivot");
             ui.space(8.0);
             ui.label("Enter — apply · Esc — cancel");
             ui.space(8.0);

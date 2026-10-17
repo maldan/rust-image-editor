@@ -13,9 +13,41 @@ use winit::window::{Window, WindowId};
 
 use crate::canvas_gpu::{CanvasOverlay, CanvasRenderer};
 use crate::view::CanvasView;
+use crate::editing::TransformCursor;
 
 pub const CANVAS_TEXTURE: u32 = 1;
 pub const AI_PREVIEW_TEXTURE: u32 = 2;
+
+/// Small outlined circular arrow for rotation (there is no native Rotate cursor).
+/// Generate once at startup; the native cursor follows the mouse without redraws.
+fn rotation_cursor_image() -> (Vec<u8>,u16) {
+    let size = 32u16;
+    let center = Vec2::splat(15.5);
+    let start = 0.2*std::f32::consts::PI;
+    let end = 1.85*std::f32::consts::PI;
+    let point = |angle:f32| center+Vec2::new(angle.cos(),angle.sin())*9.0;
+    let mut lines = Vec::new();
+    for i in 0..40 {
+        lines.push((point(start+(end-start)*i as f32/40.0),point(start+(end-start)*(i+1) as f32/40.0)));
+    }
+    let tip = point(end);
+    let tangent = Vec2::new(-end.sin(),end.cos());
+    let normal = Vec2::new(end.cos(),end.sin());
+    lines.push((tip,tip-tangent*5.0+normal*4.0));
+    lines.push((tip,tip-tangent*5.0-normal*4.0));
+    let mut pixels = Vec::with_capacity(size as usize*size as usize*4);
+    for y in 0..size { for x in 0..size {
+        let p = Vec2::new(x as f32+0.5,y as f32+0.5);
+        let distance = lines.iter().map(|&(a,b)| {
+            let t = ((p-a).dot(b-a)/(b-a).length_squared()).clamp(0.0,1.0);
+            (p-a-(b-a)*t).length()
+        }).fold(f32::INFINITY,f32::min);
+        let alpha = (3.0-distance).clamp(0.0,1.0);
+        let color = ((1.5-distance).clamp(0.0,1.0)*255.0).round() as u8;
+        pixels.extend_from_slice(&[color,color,color,(alpha*255.0).round() as u8]);
+    } }
+    (pixels,size)
+}
 
 struct Gpu {
     device: wgpu::Device,
@@ -194,6 +226,7 @@ pub trait Scene {
         canvas: &mut CanvasRenderer,
     );
     fn canvas_present(&self) -> Option<(Rect, CanvasView, CanvasOverlay)>;
+    fn canvas_cursor(&self) -> Option<TransformCursor> { None }
     fn sync_ui_textures(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut UiRenderer);
     /// Return false while outstanding work is being cancelled before exit.
     fn request_close(&mut self) -> bool;
@@ -218,7 +251,8 @@ pub struct Host<S: Scene> {
     last_mouse: Option<Vec2>,
     last_frame: Instant,
     elapsed: f32,
-    cursor: CursorIcon,
+    cursor: winit::window::Cursor,
+    rotate_cursor: Option<winit::window::CustomCursor>,
     draw_stats: DrawStats,
     closing: bool,
     keyboard_captured: bool,
@@ -240,7 +274,8 @@ impl<S: Scene> Host<S> {
             last_mouse: None,
             last_frame: Instant::now(),
             elapsed: 0.0,
-            cursor: CursorIcon::Default,
+            cursor: winit::window::CursorIcon::Default.into(),
+            rotate_cursor: None,
             draw_stats: DrawStats::default(),
             closing: false,
             keyboard_captured: false,
@@ -424,9 +459,20 @@ impl<S: Scene> Host<S> {
         gpu.queue.present(frame);
         self.input.clear_edges();
 
-        if output.cursor != self.cursor {
-            self.cursor = output.cursor;
-            window.set_cursor(match output.cursor {
+        let transform_cursor = if output.cursor == CursorIcon::Default { self.scene.canvas_cursor() } else { None };
+        let cursor = if let Some(cursor) = transform_cursor {
+            match cursor {
+                TransformCursor::Rotate => self.rotate_cursor.clone().map(winit::window::Cursor::Custom)
+                    .unwrap_or(winit::window::CursorIcon::Crosshair.into()),
+                TransformCursor::Move => winit::window::CursorIcon::Move.into(),
+                TransformCursor::Pivot => winit::window::CursorIcon::Crosshair.into(),
+                TransformCursor::ResizeEw => winit::window::CursorIcon::EwResize.into(),
+                TransformCursor::ResizeNs => winit::window::CursorIcon::NsResize.into(),
+                TransformCursor::ResizeNwse => winit::window::CursorIcon::NwseResize.into(),
+                TransformCursor::ResizeNesw => winit::window::CursorIcon::NeswResize.into(),
+            }
+        } else {
+            let cursor = match output.cursor {
                 CursorIcon::Default => winit::window::CursorIcon::Default,
                 CursorIcon::Pointer => winit::window::CursorIcon::Pointer,
                 CursorIcon::Move => winit::window::CursorIcon::Move,
@@ -434,7 +480,12 @@ impl<S: Scene> Host<S> {
                 CursorIcon::ResizeEw => winit::window::CursorIcon::EwResize,
                 CursorIcon::ResizeNs => winit::window::CursorIcon::NsResize,
                 CursorIcon::Text => winit::window::CursorIcon::Text,
-            });
+            };
+            cursor.into()
+        };
+        if cursor != self.cursor {
+            self.cursor = cursor.clone();
+            window.set_cursor(cursor);
         }
         if keep_redrawing || output.needs_repaint {
             window.request_redraw();
@@ -451,6 +502,10 @@ impl<S: Scene> ApplicationHandler for Host<S> {
             .with_title(S::title())
             .with_inner_size(LogicalSize::new(1280.0, 800.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+        let (pixels,size) = rotation_cursor_image();
+        if let Ok(source) = winit::window::CustomCursor::from_rgba(pixels,size,size,size/2,size/2) {
+            self.rotate_cursor = Some(event_loop.create_custom_cursor(source));
+        }
         self.init_gpu(window.clone());
         window.request_redraw();
     }

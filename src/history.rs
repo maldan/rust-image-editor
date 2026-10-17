@@ -100,12 +100,23 @@ impl EditCapture {
 }
 
 enum HistoryEntry {
+    TrimCanvas {
+        origin: (i32,i32),
+        size_before: (u32,u32),
+        size_after: (u32,u32),
+    },
     Raster {
         layer: usize,
         before: SparsePixels,
         after: SparsePixels,
     },
     Pixels(HistoryEdit),
+    MergeDown {
+        index: usize,
+        lower: Layer,
+        upper: Layer,
+        merged: Layer,
+    },
     InsertLayer {
         index: usize,
         inserted: Option<Layer>,
@@ -136,6 +147,17 @@ pub struct History {
 }
 
 impl History {
+    pub fn trim_canvas(&mut self, project: &mut Project) -> bool {
+        let Some(bounds) = project.visible_content_bounds() else { return false; };
+        let size_before = (project.width,project.height);
+        let size_after = bounds.size();
+        let origin = (bounds.min_x,bounds.min_y);
+        if size_before == size_after && origin == (0,0) { return false; }
+        if !shift_canvas(project,(-origin.0,-origin.1),size_after) { return false; }
+        self.push_entry(HistoryEntry::TrimCanvas {origin,size_before,size_after});
+        true
+    }
+
     pub fn push_raster(&mut self, layer: usize, before: SparsePixels, after: SparsePixels) {
         if before != after {
             self.push_entry(HistoryEntry::Raster {
@@ -174,6 +196,20 @@ impl History {
         });
     }
 
+    pub fn merge_down(&mut self, project: &mut Project) -> bool {
+        let index = project.active_layer;
+        if index == 0 || index >= project.layers.len() { return false; }
+        let lower = project.layers[index - 1].clone();
+        let upper = project.layers[index].clone();
+        let merged = crate::editing::merge_layers(&lower, &upper);
+        project.layers[index - 1] = merged.clone();
+        project.layers.remove(index);
+        project.active_layer = index - 1;
+        project.sync_manifest_pub();
+        self.push_entry(HistoryEntry::MergeDown { index, lower, upper, merged });
+        true
+    }
+
     pub fn delete_layer(&mut self, project: &mut Project, index: usize) -> bool {
         let (width, height, active_before) = (project.width, project.height, project.active_layer);
         let Some(layer) = project.delete_layer(index) else {
@@ -192,6 +228,18 @@ impl History {
 
     pub fn undo(&mut self, project: &mut Project) -> Option<HistoryChange> {
         let change = match self.undo.last_mut()? {
+            HistoryEntry::TrimCanvas {origin,size_before,..} => {
+                if !shift_canvas(project,*origin,*size_before) { return None; }
+                HistoryChange::Layers
+            }
+            HistoryEntry::MergeDown { index, lower, upper, .. } => {
+                if *index == 0 || *index > project.layers.len() { return None; }
+                project.layers[*index - 1] = lower.clone();
+                project.layers.insert(*index, upper.clone());
+                project.active_layer = *index;
+                project.sync_manifest_pub();
+                HistoryChange::Layers
+            }
             HistoryEntry::InsertLayer { index, inserted, active_before, size_before, .. } => {
                 *inserted = Some(project.delete_layer(*index)?);
                 (project.width, project.height) = *size_before;
@@ -242,6 +290,18 @@ impl History {
 
     pub fn redo(&mut self, project: &mut Project) -> Option<HistoryChange> {
         let change = match self.redo.last_mut()? {
+            HistoryEntry::TrimCanvas {origin,size_after,..} => {
+                if !shift_canvas(project,(-origin.0,-origin.1),*size_after) { return None; }
+                HistoryChange::Layers
+            }
+            HistoryEntry::MergeDown { index, merged, .. } => {
+                if *index == 0 || *index >= project.layers.len() { return None; }
+                project.layers[*index - 1] = merged.clone();
+                project.layers.remove(*index);
+                project.active_layer = *index - 1;
+                project.sync_manifest_pub();
+                HistoryChange::Layers
+            }
             HistoryEntry::InsertLayer { index, inserted, size_after, .. } => {
                 if *index > project.layers.len() { return None; }
                 project.layers.insert(*index, inserted.take()?);
@@ -294,6 +354,19 @@ impl History {
     }
 }
 
+fn shift_canvas(project: &mut Project, delta: (i32,i32), size: (u32,u32)) -> bool {
+    // Check first so a distant hidden layer cannot cause a partial shift.
+    if project.layers.iter().any(|layer| layer.pixels.offset.0.checked_add(delta.0).is_none()
+        || layer.pixels.offset.1.checked_add(delta.1).is_none()) { return false; }
+    for layer in &mut project.layers {
+        layer.pixels.offset.0 += delta.0;
+        layer.pixels.offset.1 += delta.1;
+    }
+    (project.width,project.height) = size;
+    project.sync_manifest_pub();
+    true
+}
+
 fn apply_tiles(
     pixels: &mut SparsePixels,
     width: u32,
@@ -335,6 +408,73 @@ fn apply_tiles(
 mod tests {
     use super::*;
     use crate::raster::Raster;
+
+    #[test]
+    fn trim_canvas_removes_transparent_margins_without_copying_pixels_and_undoes() {
+        let mut project = Project::default();
+        project.resize_canvas(1000,10000).unwrap();
+        project.layers[0].pixels.write(0,320,450,[10,20,30,255]);
+        project.layers[0].pixels.write(0,419,549,[40,50,60,1]);
+        project.layers[0].pixels.write(0,0,0,[255,255,255,0]);
+        project.layers[0].pixels.write(0,-100000,500,[100,0,0,255]);
+        project.add_layer();
+        project.layers[1].visible = false;
+        project.layers[1].pixels.write(0,0,0,[0,255,0,255]);
+        project.add_layer();
+        project.layers[2].opacity = 0.0;
+        project.layers[2].pixels.write(0,999,9999,[0,0,255,255]);
+        let before:Vec<_> = project.layers.iter().map(|l|l.pixels.clone()).collect();
+        let mut history = History::default();
+        assert!(history.trim_canvas(&mut project));
+        assert_eq!((project.width,project.height),(100,100));
+        assert_eq!(project.active_layer,2);
+        assert_eq!(project.layers[0].pixels.read(0,0,0),[10,20,30,255]);
+        assert_eq!(project.layers[0].pixels.read(0,99,99),[40,50,60,1]);
+        assert_eq!(project.layers[1].pixels.read(0,-320,-450),[0,255,0,255]);
+        for (layer,original) in project.layers.iter().zip(&before) {
+            for (key,tile) in &original.tiles {
+                assert!(std::sync::Arc::ptr_eq(tile,&layer.pixels.tiles[key]));
+            }
+        }
+        let after:Vec<_> = project.layers.iter().map(|l|l.pixels.clone()).collect();
+        assert!(!history.trim_canvas(&mut project),"already fitted canvas is a no-op");
+        assert!(matches!(history.undo(&mut project),Some(HistoryChange::Layers)));
+        assert_eq!((project.width,project.height),(1000,10000));
+        for (layer,original) in project.layers.iter().zip(&before) { assert_eq!(&layer.pixels,original); }
+        assert!(history.undo(&mut project).is_none(),"no-op must not add an undo entry");
+        assert!(history.redo(&mut project).is_some());
+        assert_eq!((project.width,project.height),(100,100));
+        for (layer,original) in project.layers.iter().zip(&after) { assert_eq!(&layer.pixels,original); }
+    }
+
+    #[test]
+    fn trim_canvas_handles_empty_content_and_keeps_pixel_history_before_and_after() {
+        let mut project = Project::default();
+        let mut history = History::default();
+        assert!(!history.trim_canvas(&mut project));
+        project.resize_canvas(100,80).unwrap();
+        assert!(!history.trim_canvas(&mut project));
+        assert_eq!((project.width,project.height),(100,80));
+        project.layers[0].pixels.write(0,40,50,[255,0,0,255]);
+        let before = project.layers[0].pixels.clone();
+        project.layers[0].pixels.write(0,42,51,[0,0,255,255]);
+        history.push_raster(0,before,project.layers[0].pixels.clone());
+        assert!(history.trim_canvas(&mut project));
+        let before = project.layers[0].pixels.clone();
+        project.layers[0].pixels.write(0,0,0,[0,255,0,255]);
+        history.push_raster(0,before,project.layers[0].pixels.clone());
+        history.undo(&mut project).unwrap();
+        assert_eq!(project.layers[0].pixels.read(0,0,0),[255,0,0,255]);
+        history.undo(&mut project).unwrap();
+        assert_eq!((project.width,project.height),(100,80));
+        assert_eq!(project.layers[0].pixels.read(0,40,50),[255,0,0,255]);
+        history.undo(&mut project).unwrap();
+        assert_eq!(project.layers[0].pixels.read(0,42,51),[0;4]);
+        for _ in 0..3 { history.redo(&mut project).unwrap(); }
+        assert_eq!((project.width,project.height),(3,2));
+        assert_eq!(project.layers[0].pixels.read(0,0,0),[0,255,0,255]);
+        assert_eq!(project.layers[0].pixels.read(0,2,1),[0,0,255,255]);
+    }
 
     #[test]
     fn undo_restores_only_touched_tiles() {
