@@ -1,4 +1,5 @@
 use std::fs;
+use crate::raster::SparsePixels;
 use std::path::{Path, PathBuf};
 
 use image::{DynamicImage, ImageFormat, RgbaImage};
@@ -31,7 +32,7 @@ impl Default for Manifest {
     fn default() -> Self {
         Self {
             format: "mega-image-editor".into(),
-            version: 2,
+            version: 4,
             document_type: "image".into(),
             asset_path: None,
             width: 0,
@@ -60,7 +61,7 @@ pub struct Layer {
     pub name: String,
     pub visible: bool,
     pub opacity: f32,
-    pub pixels: Vec<u8>,
+    pub pixels: SparsePixels,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -96,7 +97,7 @@ impl Project {
             name: "Layer 1".into(),
             visible: true,
             opacity: 1.0,
-            pixels: rgba.into_raw(),
+            pixels: SparsePixels::from_rgba(rgba.as_raw(), width, height),
         }];
         self.active_layer = 0;
         self.sync_manifest();
@@ -112,14 +113,14 @@ impl Project {
             name: format!("Layer {index}"),
             visible: true,
             opacity: 1.0,
-            pixels: vec![0u8; self.width as usize * self.height as usize * 4],
+            pixels: SparsePixels::default(),
         });
         self.active_layer = self.layers.len() - 1;
         self.sync_manifest();
     }
 
     /// Insert into the existing canvas. Fit uses the original input bounds;
-    /// native-size insertion is clipped to the canvas, which is never enlarged.
+    /// native-size insertion preserves the complete image beyond the canvas.
     pub fn add_raster_layer(&mut self, image: &image::RgbaImage, name: String, region: crate::editing::PixelRect, fit: bool) -> Result<(), String> {
         if image.width() == 0 || image.height() == 0 { return Err("Result image is empty".into()); }
         if region.is_empty() || region.max_x > self.width || region.max_y > self.height {
@@ -134,21 +135,16 @@ impl Project {
             } else { image }
         } else { image };
         let (w, h) = image.dimensions();
-        let copy_w = w.min(self.width - region.min_x) as usize;
-        let copy_h = h.min(self.height - region.min_y) as usize;
         self.add_layer();
         let target = &mut self.layers[self.active_layer].pixels;
-        for y in 0..copy_h {
-            let source = y * w as usize * 4;
-            let dest = ((y + region.min_y as usize) * self.width as usize + region.min_x as usize) * 4;
-            target[dest..dest + copy_w * 4].copy_from_slice(&image.as_raw()[source..source + copy_w * 4]);
-        }
+        *target = SparsePixels::from_rgba(image.as_raw(), w, h);
+        target.offset = (region.min_x as i32, region.min_y as i32);
         self.layers[self.active_layer].name = name;
         self.sync_manifest();
         Ok(())
     }
 
-    /// Resize canvas; content is kept top-left, cropped or padded with transparency.
+    /// Resize the document frame without changing any layer pixels.
     pub fn resize_canvas(&mut self, width: u32, height: u32) -> Result<(), String> {
         let width = width.max(1);
         let height = height.max(1);
@@ -159,28 +155,11 @@ impl Project {
                 name: "Layer 1".into(),
                 visible: true,
                 opacity: 1.0,
-                pixels: vec![0u8; width as usize * height as usize * 4],
+                pixels: SparsePixels::default(),
             });
             self.active_layer = 0;
             self.sync_manifest();
             return Ok(());
-        }
-        let old_w = self.width;
-        let old_h = self.height;
-        if old_w == width && old_h == height {
-            return Ok(());
-        }
-        for layer in &mut self.layers {
-            let mut next = vec![0u8; width as usize * height as usize * 4];
-            let copy_w = old_w.min(width);
-            let copy_h = old_h.min(height);
-            for y in 0..copy_h {
-                let src = (y * old_w * 4) as usize;
-                let dst = (y * width * 4) as usize;
-                let bytes = (copy_w * 4) as usize;
-                next[dst..dst + bytes].copy_from_slice(&layer.pixels[src..src + bytes]);
-            }
-            layer.pixels = next;
         }
         self.width = width;
         self.height = height;
@@ -221,11 +200,11 @@ impl Project {
         self.sync_manifest();
     }
 
-    pub fn active_pixels(&self) -> Option<&[u8]> {
-        self.layers.get(self.active_layer).map(|layer| layer.pixels.as_slice())
+    pub fn active_pixels(&self) -> Option<&SparsePixels> {
+        self.layers.get(self.active_layer).map(|layer| &layer.pixels)
     }
 
-    pub fn active_pixels_mut(&mut self) -> Option<&mut Vec<u8>> {
+    pub fn active_pixels_mut(&mut self) -> Option<&mut SparsePixels> {
         self.layers
             .get_mut(self.active_layer)
             .map(|layer| &mut layer.pixels)
@@ -236,7 +215,7 @@ impl Project {
     }
 
     fn sync_manifest(&mut self) {
-        self.manifest.version = 2;
+        self.manifest.version = 4;
         self.manifest.width = self.width;
         self.manifest.height = self.height;
         self.manifest.active_layer = self.active_layer;
@@ -248,7 +227,7 @@ impl Project {
                 name: layer.name.clone(),
                 visible: layer.visible,
                 opacity: layer.opacity.clamp(0.0, 1.0),
-                path: format!("/layers/{index}.png"),
+                path: format!("/layers/{index}.tiles"),
             })
             .collect();
         self.manifest.asset_path = if self.layers.is_empty() {
@@ -284,9 +263,9 @@ impl Project {
         }
         for (index, layer) in self.layers.iter().enumerate() {
             files.push(WriteFile::new(
-                format!("/layers/{index}.png"),
-                IMAGE_KIND,
-                encode_png_rgba(&layer.pixels, self.width, self.height)?,
+                format!("/layers/{index}.tiles"),
+                "application/x-rgba-tiles-64",
+                layer.pixels.encode(),
             ));
         }
         archive
@@ -303,60 +282,21 @@ impl Project {
             .map_err(|e| format!("Project has no valid manifest: {e}"))?;
         let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
             .map_err(|e| format!("Invalid project manifest: {e}"))?;
-        if manifest.format != "mega-image-editor" || manifest.version > 2 {
+        if manifest.format != "mega-image-editor" || manifest.version != 4 {
             return Err("Unsupported project format or version".into());
         }
-        let mut project = if manifest.version >= 2 && !manifest.layers.is_empty() {
-            let mut layers = Vec::new();
-            let mut width = manifest.width;
-            let mut height = manifest.height;
-            for meta in &manifest.layers {
-                let bytes = archive
-                    .read_all(&meta.path)
-                    .map_err(|e| format!("Layer '{}' is missing: {e}", meta.name))?;
-                let rgba = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
-                    .map_err(|e| format!("Cannot decode layer '{}': {e}", meta.name))?
-                    .to_rgba8();
-                let (layer_w, layer_h) = rgba.dimensions();
-                if width == 0 || height == 0 {
-                    width = layer_w;
-                    height = layer_h;
-                }
-                layers.push(Layer {
-                    name: meta.name.clone(),
-                    visible: meta.visible,
-                    opacity: meta.opacity.clamp(0.0, 1.0),
-                    pixels: rgba.into_raw(),
-                });
-            }
-            Self {
-                width,
-                height,
-                layers,
-                active_layer: manifest.active_layer.min(manifest.layers.len() - 1),
-                manifest,
-                path: Some(path.to_path_buf()),
-            }
-        } else {
-            let image_png = match manifest.asset_path.as_deref() {
-                Some(asset_path) => Some(
-                    archive
-                        .read_all(asset_path)
-                        .map_err(|e| format!("Project image is missing: {e}"))?,
-                ),
-                None => None,
-            };
-            let mut project = Self {
-                manifest,
-                path: Some(path.to_path_buf()),
-                ..Self::default()
-            };
-            if let Some(bytes) = image_png {
-                let decoded = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
-                    .map_err(|e| format!("Cannot decode project image: {e}"))?;
-                project.set_image(decoded)?;
-            }
-            project
+        let mut layers = Vec::new();
+        for meta in &manifest.layers {
+            let bytes = archive.read_all(&meta.path).map_err(|e| format!("Layer missing: {e}"))?;
+            layers.push(Layer {
+                name: meta.name.clone(), visible: meta.visible, opacity: meta.opacity.clamp(0.0, 1.0),
+                pixels: SparsePixels::decode(&bytes)?,
+            });
+        }
+        let mut project = Self {
+            width: manifest.width, height: manifest.height,
+            active_layer: manifest.active_layer.min(layers.len().saturating_sub(1)),
+            layers, manifest, path: Some(path.to_path_buf()),
         };
         project.sync_manifest();
         Ok(project)
@@ -411,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn native_result_is_clipped_without_enlarging_canvas() {
+    fn native_result_preserves_pixels_without_enlarging_canvas() {
         let mut project = Project::default();
         let original = vec![10, 20, 30, 255].repeat(4);
         project.import_rgba(&original, 2, 2).unwrap();
@@ -419,11 +359,12 @@ mod tests {
         let region = crate::editing::PixelRect { min_x: 0, min_y: 0, max_x: 2, max_y: 2 };
         project.add_raster_layer(&result, "AI Edit".into(), region, false).unwrap();
         assert_eq!((project.width, project.height), (2, 2));
-        assert_eq!(project.layers[0].pixels, original);
-        assert_eq!(project.layers[1].pixels, [0, 0, 60, 255, 1, 0, 60, 255, 0, 1, 60, 255, 1, 1, 60, 255]);
+        assert_eq!(project.layers[0].pixels.to_rgba(project.width, project.height), original);
+        assert_eq!(project.layers[1].pixels.to_rgba(project.width, project.height), [0, 0, 60, 255, 1, 0, 60, 255, 0, 1, 60, 255, 1, 1, 60, 255]);
+        assert_eq!(project.layers[1].pixels.region(2, 2, 1, 1), [2, 2, 60, 255]);
         project.add_raster_layer(&RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 255])), "small".into(), region, false).unwrap();
-        assert_eq!(&project.layers[2].pixels[..4], &[1, 2, 3, 255]);
-        assert!(project.layers[2].pixels[4..].iter().all(|b| *b == 0));
+        assert_eq!(&project.layers[2].pixels.to_rgba(project.width, project.height)[..4], &[1, 2, 3, 255]);
+        assert!(project.layers[2].pixels.to_rgba(project.width, project.height)[4..].iter().all(|b| *b == 0));
     }
 
     #[test]
@@ -435,11 +376,11 @@ mod tests {
             let result = RgbaImage::from_pixel(side, side, Rgba([40, 50, 60, 128]));
             project.add_raster_layer(&result, "Fit".into(), region, true).unwrap();
             assert_eq!((project.width, project.height), (5, 4));
-            let actual = RgbaImage::from_raw(5, 4, project.layers[1].pixels.clone()).unwrap();
+            let actual = RgbaImage::from_raw(5, 4, project.layers[1].pixels.to_rgba(project.width, project.height).clone()).unwrap();
             for (x, y, pixel) in actual.enumerate_pixels() {
                 assert_eq!(*pixel, if (2..4).contains(&x) && (1..3).contains(&y) { Rgba([40, 50, 60, 128]) } else { Rgba([0; 4]) });
             }
-            assert!(project.layers[0].pixels.iter().all(|b| *b == 0));
+            assert!(project.layers[0].pixels.to_rgba(project.width, project.height).iter().all(|b| *b == 0));
         }
     }
 

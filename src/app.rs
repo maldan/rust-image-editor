@@ -147,6 +147,14 @@ impl EditorApp {
         self.open_ai_mode(AiMode::Inpaint);
     }
 
+    pub fn open_ai_lineart(&mut self) {
+        self.open_ai_mode(AiMode::Lineart);
+    }
+
+    pub fn open_ai_draw_cn(&mut self) {
+        self.open_ai_mode(AiMode::DrawCn);
+    }
+
     fn open_ai_mode(&mut self, mode: AiMode) {
         if (mode.needs_input() && self.image_size.is_none()) || self.ai.job.is_some() { return; }
         self.commit_transform();
@@ -154,6 +162,7 @@ impl EditorApp {
         self.workspace.clear_asset_drag();
         self.layer_drag = None;
         self.ai.open = true;
+        self.ai.preview_view = Default::default();
         self.ai.mode = mode;
         if mode == AiMode::Inpaint && self.ai.source == AiSource::Selection { self.ai.source = AiSource::Layer; }
         self.ai.catalog_load = None;
@@ -178,6 +187,7 @@ impl EditorApp {
 
     pub fn start_ai(&mut self) {
         if self.ai.job.is_some() { return; }
+        self.ai.preview_view = Default::default();
         let Some(config) = self.ai.config.clone() else { return; };
         if self.ai.mode == AiMode::Draw {
             if let Err(error) = self.ai.draw_settings.validate() {
@@ -204,6 +214,18 @@ impl EditorApp {
                 return;
             }
         }
+        if self.ai.mode == AiMode::DrawCn {
+            if let Err(error) = self.ai.control_net.validate(&self.ai.draw_settings) {
+                self.ai.message = error;
+                return;
+            }
+        }
+        if self.ai.mode == AiMode::Lineart {
+            if let Err(error) = crate::comfyui::validate_lineart_resolution(self.ai.lineart_resolution) {
+                self.ai.message = error;
+                return;
+            }
+        }
         let mask = if self.ai.mode == AiMode::Inpaint {
             match self.ai_mask() {
                 Ok(mask) => Some(mask),
@@ -226,6 +248,10 @@ impl EditorApp {
             crate::comfyui::Job::start_inpaint(config, image, mask, self.ai.scale, self.ai.draw_settings.clone(), self.ai.denoise)
         } else if self.ai.mode == AiMode::Redraw {
             crate::comfyui::Job::start_redraw(config, image, self.ai.scale, self.ai.draw_settings.clone(), self.ai.denoise)
+        } else if self.ai.mode == AiMode::Lineart {
+            crate::comfyui::Job::start_lineart(config, image, self.ai.scale, self.ai.lineart_resolution)
+        } else if self.ai.mode == AiMode::DrawCn {
+            crate::comfyui::Job::start_draw_cn(config, image, self.ai.scale, self.ai.draw_settings.clone(), self.ai.control_net)
         } else {
             crate::comfyui::Job::start(config, image, self.ai.scale, self.ai.prompt.clone())
         });
@@ -267,7 +293,7 @@ impl EditorApp {
         let height = region.max_y - region.min_y;
         crate::comfyui::scaled_size(width, height, self.ai.scale)?;
         let pixels = match self.ai.source {
-            AiSource::Layer => p.active_pixels().ok_or("Choose a raster layer first")?.to_vec(),
+            AiSource::Layer => p.active_pixels().ok_or("Choose a raster layer first")?.to_rgba(p.width, p.height),
             AiSource::Document | AiSource::Selection => crate::editing::composite_layers(&p.layers, p.width, p.height),
         };
         let image = if let Some(selection) = selection {
@@ -334,11 +360,13 @@ impl EditorApp {
         };
         match insertion {
             Ok(()) => {
-                let _ = self.refresh_image();
-                self.workspace.mark_active_thumb_dirty();
-                self.dirty = true;
+                let needs_fit = self.image_size.is_none();
+                self.history.clear();
+                self.sync_layer_structure();
+                if needs_fit { self.fit_image = true; }
                 self.status = format!("{action} added: {} × {} px", size.0, size.1);
-                self.close_ai();
+                self.ai.preview = self.ai.result.take();
+                self.ai.message = format!("{} — regenerate for another result", self.status);
             }
             Err(error) => self.ai.message = error,
         }
@@ -1143,7 +1171,7 @@ impl EditorApp {
             self.brush_last = None;
             if let Some(capture) = self.stroke_capture.take() {
                 let layer = capture.layer();
-                if let Some(pixels) = self.workspace.active_mut().layers.get(layer).map(|l| l.pixels.as_slice())
+                if let Some(pixels) = self.workspace.active_mut().layers.get_mut(layer).map(|l| &mut l.pixels)
                     && let Some(edit) = capture.finish(pixels)
                 {
                     self.history.push(edit);
@@ -1182,7 +1210,7 @@ impl EditorApp {
         let mut marks = std::mem::take(&mut self.stroke_marks);
         let predicted = brush_dirty_bounds(from, to, size, width, height);
         if let Some(capture) = self.stroke_capture.as_mut()
-            && let Some(pixels) = self.workspace.active_mut().layers.get(active).map(|l| l.pixels.as_slice())
+            && let Some(pixels) = self.workspace.active_mut().layers.get(active).map(|l| &l.pixels)
         {
             capture.touch_rect(pixels, predicted);
         }
@@ -1221,25 +1249,15 @@ impl EditorApp {
             self.status = "No image".into();
             return;
         };
-        let selection = self
-            .selection
-            .clone()
-            .unwrap_or_else(|| Selection::all(width, height));
-        let layer = self.workspace.active_mut().active_layer;
-        let opacity = self
-            .workspace
-            .active()
-            .layers
-            .get(layer)
-            .map(|l| l.opacity)
-            .unwrap_or(1.0);
-        let Some(pixels) = self.workspace.active().layers.get(layer).map(|l| l.pixels.as_slice()) else {
-            return;
+        let project = self.workspace.active();
+        let layer = project.active_layer;
+        let Some(target) = project.layers.get(layer) else { return; };
+        let floating = if let Some(selection) = self.selection.as_ref() {
+            FloatingTransform::extract(&target.pixels, width, height, selection, layer, target.opacity)
+        } else {
+            FloatingTransform::extract_layer(&target.pixels, layer, target.opacity)
         };
-        let Some(floating) = FloatingTransform::extract(pixels, width, height, &selection, layer, opacity)
-        else {
-            return;
-        };
+        let Some(floating) = floating else { return; };
         self.floating = Some(floating);
         self.floating_reload = true;
         self.clear_selection();
@@ -1270,64 +1288,33 @@ impl EditorApp {
             return;
         };
         let layer = floating.layer;
-        let mut capture = EditCapture::new(layer, width, height);
-        let source = PixelRect {
-            min_x: floating.origin_x,
-            min_y: floating.origin_y,
-            max_x: (floating.origin_x + floating.bw).min(width),
-            max_y: (floating.origin_y + floating.bh).min(height),
-        };
-        // Snapshot source and destination before stamping.
-        let corners = floating.corners();
-        let dest = PixelRect {
-            min_x: corners
-                .iter()
-                .map(|p| p.x)
-                .fold(f32::INFINITY, f32::min)
-                .floor()
-                .max(0.0) as u32,
-            min_y: corners
-                .iter()
-                .map(|p| p.y)
-                .fold(f32::INFINITY, f32::min)
-                .floor()
-                .max(0.0) as u32,
-            max_x: corners
-                .iter()
-                .map(|p| p.x)
-                .fold(f32::NEG_INFINITY, f32::max)
-                .ceil()
-                .min(width as f32) as u32,
-            max_y: corners
-                .iter()
-                .map(|p| p.y)
-                .fold(f32::NEG_INFINITY, f32::max)
-                .ceil()
-                .min(height as f32) as u32,
-        };
-        if let Some(pixels) = self.workspace.active().layers.get(layer).map(|l| l.pixels.as_slice()) {
-            capture.touch_rect(pixels, source);
-            capture.touch_rect(pixels, dest);
+        let Some(pixels) = self.workspace.active_mut().layers.get_mut(layer).map(|l| &mut l.pixels) else { return; };
+        let before = pixels.clone();
+        let mut transformed_selection = None;
+        if floating.whole_layer && floating.scale == 1.0 && floating.rotation == 0.0 {
+            let origin = glam::Vec2::new(floating.origin_x as f32 + floating.bw as f32 * 0.5,
+                floating.origin_y as f32 + floating.bh as f32 * 0.5);
+            let delta = (floating.center - origin).round();
+            pixels.offset.0 += delta.x as i32;
+            pixels.offset.1 += delta.y as i32;
+        } else if floating.whole_layer {
+            *pixels = crate::raster::SparsePixels::default();
+            floating.stamp_layer(pixels);
+        } else {
+            floating.clear_source(pixels, width, height);
+            transformed_selection = Some(floating.stamp(pixels, width, height).1);
+            pixels.prune();
         }
-        let Some(pixels) = self.workspace.active_mut().layers.get_mut(layer).map(|l| &mut l.pixels) else {
-            return;
-        };
-        floating.clear_source(pixels, width, height);
-        let (dirty, selection) = floating.stamp(pixels, width, height);
-        if let Some(edit) = capture.finish(pixels) {
-            self.history.push(edit);
-        }
-        self.set_selection(selection);
+        self.history.push_raster(layer, before, pixels.clone());
+        if let Some(selection) = transformed_selection { self.set_selection(selection); }
+        self.layers_reload = true;
         self.transform_drag = None;
         self.transform_last = None;
         self.floating_reload = false;
         self.dirty = true;
         self.workspace.mark_active_thumb_dirty();
         self.status = "Transform applied".into();
-        self.mark_layer_dirty(layer, source);
-        if let Some(rect) = dirty {
-            self.mark_layer_dirty(layer, rect);
-        }
+
     }
 
     fn handle_transform(&mut self, view: CanvasView) {
@@ -1415,6 +1402,7 @@ impl Scene for EditorApp {
     }
 
     fn begin_frame(&mut self, input: &FrameInput) {
+        self.ai.preview_input = input.clone();
         self.input = if self.ai.open {
             let mut blocked = FrameInput::default();
             blocked.key_escape = input.key_escape;
@@ -1455,7 +1443,13 @@ impl Scene for EditorApp {
 
     fn sync_ui_textures(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut mega_ui::wgpu::UiRenderer) {
         if self.ai.preview_dirty {
-            if let Some(preview) = &self.ai.preview {
+            if let Some(preview) = self.ai.result.as_ref().or(self.ai.preview.as_ref()) {
+                let limit = device.limits().max_texture_dimension_2d;
+                let resized;
+                let preview = if preview.width() > limit || preview.height() > limit {
+                    resized = image::imageops::thumbnail(preview, limit, limit);
+                    &resized
+                } else { preview };
                 renderer.set_texture_rgba(device, queue, crate::host::AI_PREVIEW_TEXTURE,
                     preview.as_raw(), preview.width(), preview.height(), "AI preview");
             }
@@ -1498,21 +1492,21 @@ impl Scene for EditorApp {
             self.selection_mask_dirty = false;
         }
         if self.layers_reload {
-            let pixels: Vec<&[u8]> = self
+            let pixels: Vec<&crate::raster::SparsePixels> = self
                 .workspace
                 .active()
                 .layers
                 .iter()
-                .map(|l| l.pixels.as_slice())
+                .map(|l| &l.pixels)
                 .collect();
-            canvas.upload_all_layers(device, queue, &pixels, width, height);
+            canvas.upload_sparse_layers(device, queue, &pixels, width, height);
             self.layers_reload = false;
             self.dirty_tiles.clear();
             self.dirty_layer = None;
         } else if let Some(layer) = self.dirty_layer
             && !self.dirty_tiles.is_empty()
         {
-            if let Some(pixels) = self.workspace.active_mut().layers.get(layer).map(|l| l.pixels.as_slice()) {
+            if let Some(pixels) = self.workspace.active_mut().layers.get(layer).map(|l| &l.pixels) {
                 canvas.upload_layer_dirty(
                     device,
                     queue,
@@ -1531,15 +1525,12 @@ impl Scene for EditorApp {
             canvas.clear_transform();
             self.floating_reload = false;
         } else if let Some(floating) = self.floating.as_ref() {
-            let ready = canvas.sync_transform(
-                device,
-                queue,
-                floating.layer,
-                &floating.mask,
-                floating.bw,
-                floating.bh,
-                self.floating_reload,
-            );
+            let ready = if let Some(source) = floating.source.as_ref() {
+                canvas.sync_sparse_transform(device, queue, source, self.floating_reload)
+            } else {
+                canvas.sync_transform(device, queue, floating.layer, &floating.mask, &floating.pixels,
+                    floating.bw, floating.bh, self.floating_reload)
+            };
             if ready {
                 self.floating_reload = false;
             }
@@ -1588,6 +1579,7 @@ impl Scene for EditorApp {
         if let Some(floating) = self.floating.as_ref() {
             overlay.floating = Some(FloatingDraw {
                 opacity: floating.opacity,
+                whole_layer: floating.whole_layer,
                 layer: floating.layer,
                 origin: Vec2::new(floating.origin_x as f32, floating.origin_y as f32),
                 size: Vec2::new(floating.bw as f32, floating.bh as f32),
@@ -1621,6 +1613,103 @@ fn paste_image_from_clipboard() -> Result<(Vec<u8>, u32, u32), String> {
         return Err("Clipboard image data is incomplete".into());
     }
     Ok((image.bytes[..expected].to_vec(), width, height))
+}
+
+#[cfg(test)]
+mod sparse_layer_tests {
+    use super::*;
+    use crate::raster::Raster;
+    use std::sync::Arc;
+
+    fn document() -> EditorApp {
+        let mut app = EditorApp::default();
+        app.project_mut().resize_canvas(10,10).unwrap();
+        app.project_mut().layers[0].pixels.write(0,2,3,[100,20,30,255]);
+        app.refresh_image().unwrap();
+        app
+    }
+
+    #[test]
+    fn whole_layer_moves_out_and_back_without_copying_or_losing_tiles_and_undoes() {
+        let mut app = document();
+        let original = app.project().layers[0].pixels.clone();
+        for delta in [Vec2::new(-30.0,40.0),Vec2::new(30.0,-40.0)] {
+            app.begin_transform();
+            let floating = app.floating.as_mut().unwrap();
+            assert!(floating.pixels.is_empty() && floating.mask.is_empty());
+            floating.center += delta;
+            app.commit_transform();
+            assert!(Arc::ptr_eq(&original.tiles[&(0,0)],&app.project().layers[0].pixels.tiles[&(0,0)]));
+        }
+        assert_eq!(app.project().layers[0].pixels,original);
+        app.undo();
+        assert_eq!(app.project().layers[0].pixels.read(0,-28,43),[100,20,30,255]);
+        app.redo();
+        assert_eq!(app.project().layers[0].pixels,original);
+    }
+
+    #[test]
+    fn selected_fragment_survives_negative_transform_save_and_canvas_resize() {
+        let mut app = document();
+        app.set_selection(Selection::from_rect(PixelRect { min_x:2,min_y:3,max_x:3,max_y:4 },10,10));
+        app.begin_transform();
+        app.floating.as_mut().unwrap().center -= Vec2::new(20.0,20.0);
+        app.commit_transform();
+        assert_eq!(app.project().layers[0].pixels.read(0,-18,-17),[100,20,30,255]);
+        assert_eq!(app.project().layers[0].pixels.read(0,2,3),[0;4]);
+        app.undo();
+        assert_eq!(app.project().layers[0].pixels.read(0,2,3),[100,20,30,255]);
+        assert_eq!(app.project().layers[0].pixels.read(0,-18,-17),[0;4]);
+        app.redo();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("offcanvas.mgimg");
+        app.workspace.save(&path).unwrap();
+        let loaded = Workspace::open(&path).unwrap();
+        assert_eq!(loaded.active().layers[0].pixels,app.project().layers[0].pixels);
+        app.project_mut().resize_canvas(1,1).unwrap();
+        app.project_mut().resize_canvas(100,100).unwrap();
+        assert_eq!(app.project().layers[0].pixels.read(0,-18,-17),[100,20,30,255]);
+    }
+
+    #[test]
+    fn brush_grows_moved_layer_and_undo_removes_new_tile() {
+        let mut app = document();
+        app.project_mut().layers[0].pixels.offset = (-100,0);
+        app.stroke_capture = Some(EditCapture::new(0,10,10));
+        app.brush_size = 1.0;
+        app.brush_opacity = 1.0;
+        app.brush_color = [1.0,0.0,0.0,1.0];
+        app.stroke_marks = vec![0;100];
+        app.stroke_id = 1;
+        app.apply_brush_segment((5.5,5.5),(5.5,5.5),10,10,false);
+        let pixels = &app.project().layers[0].pixels;
+        assert_eq!(pixels.tiles.len(),2);
+        assert_eq!(pixels.read(0,5,5),[255,0,0,255]);
+        assert_eq!(pixels.read(0,-98,3),[100,20,30,255]);
+        let edit = app.stroke_capture.take().unwrap().finish(&mut app.project_mut().layers[0].pixels).unwrap();
+        app.history.push(edit);
+        app.undo();
+        assert_eq!(app.project().layers[0].pixels.tiles.len(),1);
+        app.redo();
+        assert_eq!(app.project().layers[0].pixels.read(0,5,5),[255,0,0,255]);
+    }
+
+    #[test]
+    fn whole_layer_scale_preserves_sparse_gaps_and_offcanvas_pixels() {
+        let mut app = document();
+        app.project_mut().layers[0].pixels.write(0,100_000,3,[10,200,30,255]);
+        app.begin_transform();
+        let floating = app.floating.as_mut().unwrap();
+        assert!(floating.pixels.is_empty());
+        floating.scale = 2.0;
+        app.commit_transform();
+        let raster = &app.project().layers[0].pixels;
+        assert!(raster.tiles.len() <= 8);
+        assert!(raster.bounds().unwrap().0 < 0);
+        assert!(raster.bounds().unwrap().2 > 100_000);
+        app.undo();
+        assert_eq!(app.project().layers[0].pixels.read(0,100_000,3),[10,200,30,255]);
+    }
 }
 
 pub fn file_name(path: &Path) -> &str {
@@ -1682,6 +1771,7 @@ fn brush_overlaps_image(point: Vec2, radius_screen: f32, view: CanvasView) -> bo
 #[cfg(test)]
 mod ai_tests {
     use super::*;
+    use crate::raster::SparsePixels;
 
     #[test]
     fn asset_preview_is_read_only_and_switching_back_preserves_document_state() {
@@ -1700,7 +1790,7 @@ mod ai_tests {
         app.input.mouse_down = true;
         app.input.mouse_pos = view.image_to_screen(Vec2::splat(0.5));
         app.handle_canvas_edit(view);
-        assert_eq!(app.project().layers[0].pixels, [10, 20, 30, 128].repeat(16));
+        assert_eq!(app.project().layers[0].pixels.to_rgba(app.project().width, app.project().height), [10, 20, 30, 128].repeat(16));
         assert_eq!(app.workspace.assets[asset].pixels, [255, 0, 0, 255].repeat(6));
         app.switch_document(0);
         assert_eq!(app.display_size(), Some((4, 4)));
@@ -1764,7 +1854,7 @@ mod ai_tests {
         app.input.mouse_pos = Vec2::splat(300.0);
         app.handle_canvas_edit(view);
         assert!(!app.brush_last_active());
-        assert!(app.project().layers[0].pixels.chunks_exact(4).all(|p| p == [0, 0, 0, 255]));
+        assert!(app.project().layers[0].pixels.to_rgba(app.project().width, app.project().height).chunks_exact(4).all(|p| p == [0, 0, 0, 255]));
     }
 
     #[test]
@@ -1789,7 +1879,7 @@ mod ai_tests {
             let mut app = EditorApp::default();
             app.project_mut().import_rgba(&[20, 40, 60, 128].repeat(6 * 5), 6, 5).unwrap();
             app.project_mut().add_layer();
-            app.project_mut().layers[1].pixels = [255, 0, 0, 255].repeat(6 * 5);
+            app.project_mut().layers[1].pixels = SparsePixels::from_rgba(&[255, 0, 0, 255].repeat(6 * 5), 6, 5);
             app.project_mut().layers[1].visible = false;
             app.ai.mode = mode;
             app.ai.source = AiSource::Selection;
@@ -1820,10 +1910,12 @@ mod ai_tests {
     }
 
     #[test]
-    fn redraw_uploads_selected_source_and_accepts_as_new_layer() {
+    fn input_workflows_upload_selected_source_and_accept_as_new_layer() {
         use std::{io::{BufRead, BufReader, Read, Write}, net::TcpListener, time::{Duration, Instant}};
         for (mode, source) in [(AiMode::Redraw, AiSource::Layer), (AiMode::Redraw, AiSource::Document),
-            (AiMode::Redraw, AiSource::Selection), (AiMode::Inpaint, AiSource::Layer), (AiMode::Inpaint, AiSource::Document)] {
+            (AiMode::Redraw, AiSource::Selection), (AiMode::Inpaint, AiSource::Layer), (AiMode::Inpaint, AiSource::Document),
+            (AiMode::Lineart, AiSource::Layer), (AiMode::Lineart, AiSource::Document), (AiMode::Lineart, AiSource::Selection),
+            (AiMode::DrawCn, AiSource::Layer), (AiMode::DrawCn, AiSource::Document), (AiMode::DrawCn, AiSource::Selection)] {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let host = format!("http://{}", listener.local_addr().unwrap());
             let server = std::thread::spawn(move || {
@@ -1871,11 +1963,26 @@ mod ai_tests {
                         "/prompt" => {
                             let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
                             let graph = request["prompt"].as_object().unwrap();
-                            let image = graph.values().find(|n| n["_meta"]["title"] == "Image").unwrap();
+                            let title = if mode == AiMode::DrawCn { "ReferenceImage" } else { "Image" };
+                            let image = graph.values().find(|n| n["_meta"]["title"] == title).unwrap();
                             assert_eq!(image["inputs"]["image"], "test/source.png");
-                            let sampler = graph.values().find(|n| n["_meta"]["title"] == "Sampler").unwrap();
-                            assert_eq!(sampler["inputs"]["denoise"], 0.5);
-                            assert!(graph.values().any(|n| n["class_type"] == "VAEEncode"));
+                            if mode == AiMode::Lineart {
+                                let lineart = graph.values().find(|n| n["class_type"] == "AnimeLineArtPreprocessor").unwrap();
+                                assert_eq!(lineart["inputs"]["resolution"], 1024);
+                                assert_eq!(graph.len(), 3);
+                            } else if mode == AiMode::DrawCn {
+                                let cn = graph.values().find(|n| n["_meta"]["title"] == "ControlNet").unwrap();
+                                assert_eq!(cn["inputs"]["strength"], 0.5);
+                                assert_eq!(cn["inputs"]["start_percent"], 0.25);
+                                assert_eq!(cn["inputs"]["end_percent"], 0.75);
+                                let latent = graph.values().find(|n| n["class_type"] == "EmptyLatentImage").unwrap();
+                                assert!(latent["inputs"]["width"].is_array());
+                                assert!(latent["inputs"]["height"].is_array());
+                            } else {
+                                let sampler = graph.values().find(|n| n["_meta"]["title"] == "Sampler").unwrap();
+                                assert_eq!(sampler["inputs"]["denoise"], 0.5);
+                                assert!(graph.values().any(|n| n["class_type"] == "VAEEncode"));
+                            }
                             if mode == AiMode::Inpaint {
                                 let mask = graph.values().find(|n| n["_meta"]["title"] == "Mask").unwrap();
                                 assert_eq!(mask["inputs"]["image"], "test/mask.png");
@@ -1884,7 +1991,10 @@ mod ai_tests {
                             }
                             br#"{"prompt_id":"job"}"#.to_vec()
                         }
-                        "/history/job" => br#"{"job":{"outputs":{"12":{"images":[{"filename":"result.png"}]}},"status":{"completed":true}}}"#.to_vec(),
+                        "/history/job" => {
+                            let save = if mode == AiMode::Lineart { "3" } else { "12" };
+                            serde_json::to_vec(&serde_json::json!({"job": {"outputs": {save: {"images": [{"filename": "result.png"}]}}, "status": {"completed": true}}})).unwrap()
+                        }
                         _ => crate::project::encode_png_rgba(&[1, 2, 3, 255].repeat(64 * 64), 64, 64).unwrap(),
                     };
                     write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len()).unwrap();
@@ -1894,7 +2004,7 @@ mod ai_tests {
             let mut app = EditorApp::default();
             app.project_mut().import_rgba(&[10, 20, 30, 255].repeat(128 * 128), 128, 128).unwrap();
             app.project_mut().add_layer();
-            app.project_mut().layers[1].pixels = [200, 100, 50, 255].repeat(128 * 128);
+            app.project_mut().layers[1].pixels = SparsePixels::from_rgba(&[200, 100, 50, 255].repeat(128 * 128), 128, 128);
             // Active layer source ignores visibility; composite source honors it.
             app.project_mut().layers[1].visible = false;
             app.refresh_image().unwrap();
@@ -1909,6 +2019,10 @@ mod ai_tests {
             }
             app.ai.scale = 0.5;
             app.ai.denoise = 0.5;
+            app.ai.lineart_resolution = 1024;
+            app.ai.control_net = crate::comfyui::ControlNetSettings {
+                strength: 0.5, start_percent: 0.25, end_percent: 0.75,
+            };
             app.ai.config = Some(crate::comfyui::HostConfig { host, ws: String::new(), login: String::new(), password: String::new() });
             app.start_ai();
             let started = Instant::now();
@@ -1921,7 +2035,7 @@ mod ai_tests {
             server.join().unwrap();
             assert!(app.ai.result.is_some(), "{}", app.ai.message);
             assert_eq!(app.project().layers.len(), 2);
-            assert_eq!(&app.project().layers[1].pixels[..4], &[200, 100, 50, 255]);
+            assert_eq!(&app.project().layers[1].pixels.to_rgba(app.project().width, app.project().height)[..4], &[200, 100, 50, 255]);
             assert_eq!(app.ai.input_region.unwrap().max_x, if source == AiSource::Selection { 112 } else { 128 });
             // Accept must retain the submitted region even if selection changes afterwards.
             app.selection = Some(Selection::all(128, 128));
@@ -1935,7 +2049,7 @@ mod ai_tests {
             assert_eq!(app.image_size, Some((128, 128)));
             assert_eq!(app.project().layers.len(), 3);
             assert_eq!(app.project().layers[2].name, format!("{} 3", mode.layer_prefix()));
-            let inserted = &app.project().layers[2].pixels;
+            let inserted = &app.project().layers[2].pixels.to_rgba(app.project().width, app.project().height);
             if source == AiSource::Selection {
                 for y in 0..128 {
                     for x in 0..128 {
@@ -1944,7 +2058,7 @@ mod ai_tests {
                     }
                 }
             } else { assert_eq!(&inserted[..4], &[1, 2, 3, 255]); }
-            assert!(!app.ai.open);
+            assert!(app.ai.open);
         }
     }
 
@@ -1971,8 +2085,8 @@ mod ai_tests {
         assert_eq!(app.image_size, Some((64, 128)));
         assert_eq!(app.project().layers.len(), 1);
         assert_eq!(app.project().layers[0].name, "AI Draw 1");
-        assert_eq!(&app.project().layers[0].pixels[..4], &[1, 2, 3, 255]);
-        assert!(!app.ai.open);
+        assert_eq!(&app.project().layers[0].pixels.to_rgba(app.project().width, app.project().height)[..4], &[1, 2, 3, 255]);
+        assert!(app.ai.open);
         app.accept_ai();
         assert_eq!(app.project().layers.len(), 1);
     }
@@ -1998,12 +2112,13 @@ mod ai_tests {
         assert!(!app.dirty);
 
         app.accept_ai();
-        assert!(!app.ai.open);
+        assert!(app.ai.open);
         assert!(app.ai.result.is_none());
+        assert_eq!(app.ai.preview.as_ref(), Some(&result));
         assert_eq!(app.image_size, Some((1, 1)));
         assert_eq!(app.project().active_layer, 1);
-        assert_eq!(app.project().layers[1].pixels, [100, 120, 140, 255]);
-        assert_eq!(&app.project().layers[0].pixels[..4], &[20, 40, 60, 255]);
+        assert_eq!(app.project().layers[1].pixels.to_rgba(app.project().width, app.project().height), [100, 120, 140, 255]);
+        assert_eq!(&app.project().layers[0].pixels.to_rgba(app.project().width, app.project().height)[..4], &[20, 40, 60, 255]);
         assert!(app.dirty);
         app.accept_ai();
         assert_eq!(app.project().layers.len(), 2);
@@ -2039,7 +2154,7 @@ mod ai_tests {
             app.accept_ai();
             assert_eq!(app.image_size, Some((4, 2)));
             assert_eq!(app.project().layers.len(), 2);
-            let inserted = &app.project().layers[1].pixels;
+            let inserted = &app.project().layers[1].pixels.to_rgba(app.project().width, app.project().height);
             if fit {
                 assert_eq!(*inserted, vec![100, 120, 140, 255].repeat(8));
             } else {
@@ -2071,7 +2186,7 @@ mod ai_tests {
         assert!(app.ai.open);
         app.workspace.set_active_document(0);
         app.accept_ai();
-        assert_eq!(app.project().layers[1].pixels, [80, 0, 0, 255]);
+        assert_eq!(app.project().layers[1].pixels.to_rgba(app.project().width, app.project().height), [80, 0, 0, 255]);
     }
 
     #[test]
@@ -2100,13 +2215,14 @@ mod ai_tests {
         let preview = output.draw_list.iter().position(|c| c.kind == 1.0 && c.tex == crate::host::AI_PREVIEW_TEXTURE).unwrap();
         assert!(preview > canvas);
         assert!(ui.input_debug().modal_open);
-        assert_eq!(app.project().layers[0].pixels, [20, 40, 60, 255]);
+        assert_eq!(app.project().layers[0].pixels.to_rgba(app.project().width, app.project().height), [20, 40, 60, 255]);
     }
 }
 
 #[cfg(test)]
 mod layer_history_tests {
     use super::*;
+    use crate::raster::{Raster, SparsePixels};
 
     fn app_with_layers(count: usize) -> EditorApp {
         let mut app = EditorApp::default();
@@ -2116,7 +2232,7 @@ mod layer_history_tests {
             layer.name = format!("Layer {i}");
             layer.visible = i % 2 == 0;
             layer.opacity = 0.25 * (i + 1) as f32;
-            layer.pixels.fill((i + 1) as u8);
+            layer.pixels = SparsePixels::from_rgba(&vec![(i + 1) as u8; 4 * 2 * 4], 4, 2);
         }
         app.refresh_image().unwrap();
         app
@@ -2153,8 +2269,10 @@ mod layer_history_tests {
         let p = app.project_mut();
         let mut capture = EditCapture::new(layer, p.width, p.height);
         capture.touch_rect(&p.layers[layer].pixels, PixelRect { min_x: 0, min_y: 0, max_x: 1, max_y: 1 });
-        p.layers[layer].pixels[0] = value;
-        let edit = capture.finish(&p.layers[layer].pixels).unwrap();
+        let mut pixel = p.layers[layer].pixels.read(p.width, 0, 0);
+        pixel[0] = value;
+        p.layers[layer].pixels.write(p.width, 0, 0, pixel);
+        let edit = capture.finish(&mut p.layers[layer].pixels).unwrap();
         app.history.push(edit);
     }
 
@@ -2169,15 +2287,15 @@ mod layer_history_tests {
         assert_eq!(app.image_size, Some((4, 2)));
         assert_eq!(app.stroke_marks.len(), 8);
         assert!(app.layers_reload);
-        assert_eq!(app.project().layers[0].pixels[0], 99);
+        assert_eq!(app.project().layers[0].pixels.read(app.project().width, 0, 0)[0], 99);
         app.undo();
-        assert_eq!(app.project().layers[0].pixels[0], 1);
+        assert_eq!(app.project().layers[0].pixels.read(app.project().width, 0, 0)[0], 1);
         app.redo();
-        assert_eq!(app.project().layers[0].pixels[0], 99);
+        assert_eq!(app.project().layers[0].pixels.read(app.project().width, 0, 0)[0], 99);
         app.redo();
         assert!(app.image_size.is_none());
         app.undo();
-        assert_eq!(app.project().layers[0].pixels[0], 99);
+        assert_eq!(app.project().layers[0].pixels.read(app.project().width, 0, 0)[0], 99);
     }
 
     #[test]
@@ -2188,20 +2306,20 @@ mod layer_history_tests {
         paint_pixel(&mut app, 1, 90);
         app.project_mut().active_layer = 0;
         app.undo();
-        assert_eq!(app.project().layers[1].pixels[0], 80);
+        assert_eq!(app.project().layers[1].pixels.read(app.project().width, 0, 0)[0], 80);
         assert_eq!(app.dirty_layer, Some(1));
         app.undo();
         assert_eq!(app.project().layers.len(), 3);
         app.undo();
-        assert_eq!(app.project().layers[2].pixels[0], 3);
+        assert_eq!(app.project().layers[2].pixels.read(app.project().width, 0, 0)[0], 3);
         app.redo();
         app.redo();
         app.redo();
-        assert_eq!(app.project().layers[1].pixels[0], 90);
+        assert_eq!(app.project().layers[1].pixels.read(app.project().width, 0, 0)[0], 90);
         app.undo();
         paint_pixel(&mut app, 1, 100);
         app.redo();
-        assert_eq!(app.project().layers[1].pixels[0], 100);
+        assert_eq!(app.project().layers[1].pixels.read(app.project().width, 0, 0)[0], 100);
         app.delete_layer(1);
         app.undo();
         app.add_layer();

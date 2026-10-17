@@ -47,6 +47,15 @@ pub struct FrameInput {
     pub key_delete: bool,
     pub key_enter: bool,
     pub key_escape: bool,
+    pub key_left: bool,
+    pub key_right: bool,
+    pub key_up: bool,
+    pub key_down: bool,
+    pub key_home: bool,
+    pub key_end: bool,
+    pub key_copy: bool,
+    pub key_cut: bool,
+    pub key_select_all: bool,
     pub key_paste: bool,
     pub key_undo: bool,
     pub key_redo: bool,
@@ -56,6 +65,53 @@ pub struct FrameInput {
 }
 
 impl FrameInput {
+    fn press_key(&mut self, logical: &Key, physical: PhysicalKey) {
+        match logical {
+            Key::Named(NamedKey::Backspace) => self.key_backspace = true,
+            Key::Named(NamedKey::Delete) => self.key_delete = true,
+            Key::Named(NamedKey::Enter) => self.key_enter = true,
+            Key::Named(NamedKey::Escape) => self.key_escape = true,
+            Key::Named(NamedKey::ArrowLeft) => self.key_left = true,
+            Key::Named(NamedKey::ArrowRight) => self.key_right = true,
+            Key::Named(NamedKey::ArrowUp) => self.key_up = true,
+            Key::Named(NamedKey::ArrowDown) => self.key_down = true,
+            Key::Named(NamedKey::Home) => self.key_home = true,
+            Key::Named(NamedKey::End) => self.key_end = true,
+            _ => {}
+        }
+        if !self.shortcut_mod() { return; }
+        // Physical keys keep editing shortcuts working with Cyrillic layouts too.
+        let code = match physical {
+            PhysicalKey::Code(code) => Some(code),
+            _ => None,
+        };
+        let character = match logical {
+            Key::Character(c) => c.to_lowercase(),
+            _ => String::new(),
+        };
+        match (code, character.as_str()) {
+            (Some(KeyCode::KeyA), _) | (_, "a") => self.key_select_all = true,
+            (Some(KeyCode::KeyC), _) | (_, "c") => self.key_copy = true,
+            (Some(KeyCode::KeyX), _) | (_, "x") => self.key_cut = true,
+            (Some(KeyCode::KeyV), _) | (_, "v") => self.key_paste = true,
+            (Some(KeyCode::KeyZ), _) | (_, "z") if self.key_shift => self.key_redo = true,
+            (Some(KeyCode::KeyZ), _) | (_, "z") => self.key_undo = true,
+            (Some(KeyCode::KeyY), _) | (_, "y") => self.key_redo = true,
+            _ => {}
+        }
+    }
+
+    fn for_scene(&self, keyboard_captured: bool) -> Self {
+        let mut input = self.clone();
+        if keyboard_captured {
+            input.key_paste = false;
+            input.key_undo = false;
+            input.key_redo = false;
+            input.key_enter = false;
+        }
+        input
+    }
+
     fn to_ui(&self, viewport: Vec2, dt: f32) -> UiInput {
         UiInput {
             mouse_pos: self.mouse_pos,
@@ -75,6 +131,15 @@ impl FrameInput {
             key_backspace: self.key_backspace,
             key_delete: self.key_delete,
             key_enter: self.key_enter,
+            key_left: self.key_left,
+            key_right: self.key_right,
+            key_up: self.key_up,
+            key_down: self.key_down,
+            key_home: self.key_home,
+            key_end: self.key_end,
+            key_copy: self.key_copy,
+            key_cut: self.key_cut,
+            key_select_all: self.key_select_all,
             key_paste: self.key_paste,
             key_ctrl: self.key_ctrl,
             key_shift: self.key_shift,
@@ -101,6 +166,15 @@ impl FrameInput {
         self.key_delete = false;
         self.key_enter = false;
         self.key_escape = false;
+        self.key_left = false;
+        self.key_right = false;
+        self.key_up = false;
+        self.key_down = false;
+        self.key_home = false;
+        self.key_end = false;
+        self.key_copy = false;
+        self.key_cut = false;
+        self.key_select_all = false;
         self.key_paste = false;
         self.key_undo = false;
         self.key_redo = false;
@@ -146,6 +220,7 @@ pub struct Host<S: Scene> {
     cursor: CursorIcon,
     draw_stats: DrawStats,
     closing: bool,
+    keyboard_captured: bool,
 }
 
 impl<S: Scene> Host<S> {
@@ -167,6 +242,7 @@ impl<S: Scene> Host<S> {
             cursor: CursorIcon::Default,
             draw_stats: DrawStats::default(),
             closing: false,
+            keyboard_captured: false,
         };
         event_loop.run_app(&mut host).expect("run application");
     }
@@ -263,10 +339,20 @@ impl<S: Scene> Host<S> {
         self.last_frame = now;
         self.elapsed += dt;
         let viewport = Vec2::new(size.width as f32, size.height as f32);
-        self.scene.begin_frame(&self.input);
-        self.ui.begin_frame(self.input.to_ui(viewport, dt));
+        self.scene.begin_frame(&self.input.for_scene(self.keyboard_captured));
+        let mut ui_input = self.input.to_ui(viewport, dt);
+        if ui_input.key_paste {
+            ui_input.clipboard = arboard::Clipboard::new().and_then(|mut c| c.get_text()).unwrap_or_default();
+        }
+        self.ui.begin_frame(ui_input);
         let keep_redrawing = self.scene.build(&mut self.ui, viewport, self.draw_stats);
         let output = self.ui.end_frame();
+        self.keyboard_captured = output.want_capture_keyboard;
+        if let Some(text) = &output.clipboard {
+            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                let _ = clipboard.set_text(text.clone());
+            }
+        }
         let canvas_present = self.scene.canvas_present();
 
         let Some(gpu) = self.gpu.as_mut() else { return };
@@ -448,31 +534,7 @@ impl<S: Scene> ApplicationHandler for Host<S> {
                     return;
                 }
                 let shortcut = self.input.shortcut_mod();
-                match &event.logical_key {
-                    Key::Named(NamedKey::Backspace) => self.input.key_backspace = true,
-                    Key::Named(NamedKey::Delete) => self.input.key_delete = true,
-                    Key::Named(NamedKey::Enter) => self.input.key_enter = true,
-                    Key::Named(NamedKey::Escape) => self.input.key_escape = true,
-                    Key::Character(c) if shortcut => match c.to_lowercase().as_str() {
-                        "v" => self.input.key_paste = true,
-                        "z" if self.input.key_shift => self.input.key_redo = true,
-                        "z" => self.input.key_undo = true,
-                        "y" => self.input.key_redo = true,
-                        _ => {}
-                    },
-                    _ => {}
-                }
-                if shortcut {
-                    if let PhysicalKey::Code(code) = event.physical_key {
-                        match code {
-                            KeyCode::KeyV => self.input.key_paste = true,
-                            KeyCode::KeyZ if self.input.key_shift => self.input.key_redo = true,
-                            KeyCode::KeyZ => self.input.key_undo = true,
-                            KeyCode::KeyY => self.input.key_redo = true,
-                            _ => {}
-                        }
-                    }
-                }
+                self.input.press_key(&event.logical_key, event.physical_key);
                 if !shortcut {
                     if let Some(text) = event.text.as_ref() {
                         for ch in text.chars() {
@@ -494,5 +556,127 @@ impl<S: Scene> ApplicationHandler for Host<S> {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod text_edit_tests {
+    use super::*;
+
+    #[test]
+    fn navigation_shortcuts_reach_text_fields_and_edges_reset() {
+        let mut input = FrameInput::default();
+        for key in [NamedKey::ArrowLeft, NamedKey::ArrowRight, NamedKey::ArrowUp,
+            NamedKey::ArrowDown, NamedKey::Home, NamedKey::End] {
+            input.press_key(&Key::Named(key), PhysicalKey::Code(KeyCode::Space));
+        }
+        input.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        input.key_ctrl = true;
+        input.key_shift = true;
+        for code in [KeyCode::KeyA, KeyCode::KeyC, KeyCode::KeyX, KeyCode::KeyV] {
+            input.press_key(&Key::Character("я".into()), PhysicalKey::Code(code));
+        }
+        let ui_input = input.to_ui(Vec2::splat(400.0), 0.016);
+        assert!(ui_input.key_left && ui_input.key_right && ui_input.key_up && ui_input.key_down);
+        assert!(ui_input.key_home && ui_input.key_end && ui_input.key_shift);
+        assert!(ui_input.key_select_all && ui_input.key_copy && ui_input.key_cut && ui_input.key_paste);
+        input.key_undo = true;
+        input.key_redo = true;
+        input.key_enter = true;
+        let scene = input.for_scene(true);
+        assert!(!scene.key_paste && !scene.key_undo && !scene.key_redo && !scene.key_enter);
+        assert!(input.for_scene(false).key_paste);
+        input.clear_edges();
+        let ui_input = input.to_ui(Vec2::splat(400.0), 0.016);
+        assert!(!ui_input.key_left && !ui_input.key_right && !ui_input.key_up && !ui_input.key_down);
+        assert!(!ui_input.key_home && !ui_input.key_end && !ui_input.key_copy && !ui_input.key_cut && !ui_input.key_select_all);
+        assert!(ui_input.key_shift && ui_input.key_ctrl);
+    }
+
+    #[test]
+    fn keyboard_selection_replaces_text_and_delete_handles_unicode() {
+        let mut ui = Ui::new();
+        let mut text = "привет\nмир".to_string();
+        let out = frame(&mut ui, &mut text, FrameInput::default());
+        let mut input = FrameInput::default();
+        input.mouse_pos = out.draw_list[0].rect.min + Vec2::splat(8.0);
+        input.mouse_pressed = true;
+        input.mouse_down = true;
+        frame(&mut ui, &mut text, input);
+        let mut input = FrameInput::default();
+        input.mouse_released = true;
+        frame(&mut ui, &mut text, input);
+        let mut input = FrameInput::default();
+        input.key_end = true;
+        input.key_shift = true;
+        frame(&mut ui, &mut text, input);
+        let mut input = FrameInput::default();
+        input.text = "hello".into();
+        frame(&mut ui, &mut text, input);
+        assert_eq!(text, "hello\nмир");
+        let mut input = FrameInput::default();
+        input.key_down = true;
+        frame(&mut ui, &mut text, input);
+        let mut input = FrameInput::default();
+        input.key_home = true;
+        frame(&mut ui, &mut text, input);
+        let mut input = FrameInput::default();
+        input.key_delete = true;
+        frame(&mut ui, &mut text, input);
+        assert_eq!(text, "hello\nир");
+        let mut input = FrameInput::default();
+        input.key_select_all = true;
+        input.key_cut = true;
+        let out = frame(&mut ui, &mut text, input);
+        assert_eq!(out.clipboard.as_deref(), Some("hello\nир"));
+        assert!(text.is_empty());
+    }
+
+    fn frame(ui: &mut Ui, text: &mut String, input: FrameInput) -> mega_ui::UiOutput {
+        ui.begin_frame(input.to_ui(Vec2::new(400.0, 200.0), 0.016));
+        ui.text_area("prompt", text, Vec2::new(300.0, 100.0));
+        ui.end_frame()
+    }
+
+    #[test]
+    fn first_click_places_caret_before_typing() {
+        let mut ui = Ui::new();
+        let mut text = "abcdef".to_string();
+        let out = frame(&mut ui, &mut text, FrameInput::default());
+        let position = out.draw_list[0].rect.min + Vec2::splat(8.0);
+        let mut input = FrameInput::default();
+        input.mouse_pos = position;
+        input.mouse_pressed = true;
+        input.mouse_down = true;
+        frame(&mut ui, &mut text, input);
+        let mut input = FrameInput::default();
+        input.mouse_pos = position;
+        input.mouse_released = true;
+        frame(&mut ui, &mut text, input);
+        let mut input = FrameInput::default();
+        input.text = "X".into();
+        frame(&mut ui, &mut text, input);
+        assert_eq!(text, "Xabcdef");
+    }
+
+    #[test]
+    fn drag_selection_starts_at_pressed_position() {
+        let mut ui = Ui::new();
+        let mut text = "привет мир".to_string();
+        let out = frame(&mut ui, &mut text, FrameInput::default());
+        let start = out.draw_list[0].rect.min + Vec2::splat(8.0);
+        let mut input = FrameInput::default();
+        input.mouse_pos = start;
+        input.mouse_pressed = true;
+        input.mouse_down = true;
+        frame(&mut ui, &mut text, input);
+        let mut input = FrameInput::default();
+        input.mouse_pos = start + Vec2::new(200.0, 0.0);
+        input.mouse_down = true;
+        frame(&mut ui, &mut text, input);
+        let mut input = FrameInput::default();
+        input.key_copy = true;
+        let out = frame(&mut ui, &mut text, input);
+        assert_eq!(out.clipboard.as_deref(), Some("привет мир"));
     }
 }

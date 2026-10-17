@@ -1,0 +1,39 @@
+{
+  "1": {
+    "inputs": {
+      "resolution": 512,
+      "image": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "AnimeLineArtPreprocessor",
+    "_meta": {
+      "title": "Lineart"
+    }
+  },
+  "2": {
+    "inputs": {
+      "image": "0001.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Image"
+    }
+  },
+  "3": {
+    "inputs": {
+      "name": "",
+      "image_format": "webp",
+      "quality": 0.9,
+      "images": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "ImageSaveWithFormat (maga)",
+    "_meta": {
+      "title": "ImageSaveWithFormat (maga)"
+    }
+  }
+}

@@ -1,5 +1,5 @@
 use glam::Vec2;
-use mega_ui::{Ui, Window};
+use mega_ui::{Rect, Ui, Window};
 
 use crate::{
     app::EditorApp,
@@ -11,8 +11,10 @@ pub enum AiMode {
     #[default]
     Edit,
     Draw,
+    DrawCn,
     Redraw,
     Inpaint,
+    Lineart,
 }
 
 impl AiMode {
@@ -20,22 +22,26 @@ impl AiMode {
         self != Self::Draw
     }
     pub fn uses_sd(self) -> bool {
-        self != Self::Edit
+        matches!(self, Self::Draw | Self::DrawCn | Self::Redraw | Self::Inpaint)
     }
     pub fn title(self) -> &'static str {
         match self {
             Self::Edit => "Edit Image",
             Self::Draw => "Draw Image",
+            Self::DrawCn => "Draw with ControlNet",
             Self::Redraw => "Redraw Image",
             Self::Inpaint => "Inpaint Image",
+            Self::Lineart => "To Lineart",
         }
     }
     pub fn layer_prefix(self) -> &'static str {
         match self {
             Self::Edit => "AI Edit",
             Self::Draw => "AI Draw",
+            Self::DrawCn => "AI Draw CN",
             Self::Redraw => "AI Redraw",
             Self::Inpaint => "AI Inpaint",
+            Self::Lineart => "AI Lineart",
         }
     }
 }
@@ -48,12 +54,57 @@ pub enum AiSource {
     Selection,
 }
 
+pub struct PreviewView {
+    zoom: f32,
+    pan: Vec2,
+    panning: bool,
+}
+
+impl Default for PreviewView {
+    fn default() -> Self {
+        Self { zoom: 1.0, pan: Vec2::ZERO, panning: false }
+    }
+}
+
+impl PreviewView {
+    fn update(&mut self, viewport: Rect, hovered: bool, input: &crate::host::FrameInput) {
+        if input.mouse_middle_pressed && hovered {
+            self.panning = true;
+        }
+        if !input.mouse_middle_down {
+            self.panning = false;
+        }
+        if self.panning {
+            self.pan += input.mouse_delta;
+        }
+        if hovered && input.scroll_delta.y.abs() > 0.01 {
+            let old_zoom = self.zoom;
+            self.zoom = (self.zoom * (input.scroll_delta.y * 0.002).exp()).clamp(0.1, 32.0);
+            let center = (viewport.min + viewport.max) * 0.5;
+            self.pan -= (input.mouse_pos - center - self.pan) * (self.zoom / old_zoom - 1.0);
+        }
+    }
+
+    /// Crop both the rectangle and UVs so a zoomed image stays inside the preview pane.
+    fn visible_image(&self, viewport: Rect, image_size: Vec2) -> Option<(Rect, Vec2, Vec2)> {
+        let available = viewport.max - viewport.min;
+        let fit = (available.x / image_size.x).min(available.y / image_size.y);
+        let size = image_size * fit * self.zoom;
+        let origin = (viewport.min + viewport.max - size) * 0.5 + self.pan;
+        let clipped = Rect { min: origin.max(viewport.min), max: (origin + size).min(viewport.max) };
+        if clipped.width() <= 0.0 || clipped.height() <= 0.0 { return None; }
+        Some((clipped, (clipped.min - origin) / size, (clipped.max - origin) / size))
+    }
+}
+
 pub struct AiDialog {
     pub open: bool,
     pub mode: AiMode,
     pub denoise: f32,
     pub mask_softness: f32,
+    pub lineart_resolution: i32,
     pub draw_settings: crate::comfyui::DrawSettings,
+    pub control_net: crate::comfyui::ControlNetSettings,
     pub catalog: crate::comfyui::Catalog,
     pub catalog_load: Option<crate::comfyui::CatalogLoad>,
     pub catalog_message: String,
@@ -75,6 +126,8 @@ pub struct AiDialog {
     /// Full-resolution server output, held until explicitly accepted.
     pub result: Option<image::RgbaImage>,
     pub preview_dirty: bool,
+    pub preview_view: PreviewView,
+    pub preview_input: crate::host::FrameInput,
     pub close_when_stopped: bool,
 }
 
@@ -85,7 +138,9 @@ impl Default for AiDialog {
             mode: AiMode::Edit,
             denoise: 1.0,
             mask_softness: 0.0,
+            lineart_resolution: 512,
             draw_settings: Default::default(),
+            control_net: Default::default(),
             catalog: Default::default(),
             catalog_load: None,
             catalog_message: String::new(),
@@ -103,6 +158,8 @@ impl Default for AiDialog {
             preview: None,
             result: None,
             preview_dirty: false,
+            preview_view: PreviewView::default(),
+            preview_input: Default::default(),
             close_when_stopped: false,
         }
     }
@@ -148,8 +205,16 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                             draw_controls(ui, &mut app.ai, width, height);
                         } else {
                             source_controls(ui, &mut app.ai, width, height);
-                            ui.label("Prompt");
-                            ui.text_area("ai_prompt", &mut app.ai.prompt, Vec2::new(0.0, 110.0));
+                            if app.ai.mode == AiMode::Lineart {
+                                ui.label("Resolution");
+                                ui.drag_int("lineart_resolution", &mut app.ai.lineart_resolution, 64);
+                                if let Err(error) = crate::comfyui::validate_lineart_resolution(app.ai.lineart_resolution) {
+                                    ui.label(&error);
+                                }
+                            } else {
+                                ui.label("Prompt");
+                                ui.text_area("ai_prompt", &mut app.ai.prompt, Vec2::new(0.0, 110.0));
+                            }
                         }
                         ui.checkbox("ai_fit_image", "Fit Image", &mut app.ai.fit_image);
                     });
@@ -171,6 +236,14 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                         let valid = app.ai.config.is_some()
                             && match app.ai.mode {
                                 AiMode::Draw => app.ai.draw_settings.validate().is_ok(),
+                                AiMode::DrawCn => {
+                                    app.ai.control_net.validate(&app.ai.draw_settings).is_ok()
+                                        && input_valid(app, width, height)
+                                }
+                                AiMode::Lineart => {
+                                    crate::comfyui::validate_lineart_resolution(app.ai.lineart_resolution).is_ok()
+                                        && input_valid(app, width, height)
+                                }
                                 AiMode::Redraw | AiMode::Inpaint => {
                                     app.ai.draw_settings.validate_redraw(app.ai.denoise).is_ok()
                                         && input_valid(app, width, height)
@@ -187,7 +260,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                             }
                             ui.add_enabled(valid, |ui| {
                                 run = ui
-                                    .button("ai_run", if has_result { "Regenerate" } else { "Run" })
+                                    .button("ai_run", if has_result || app.ai.preview.is_some() { "Regenerate" } else { "Run" })
                                     .clicked();
                             });
                         });
@@ -198,14 +271,22 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     }
                 });
                 ui.flex(1.0, |ui| {
-                    if let Some(preview) = &app.ai.preview {
+                    if let Some(preview) = app.ai.result.as_ref().or(app.ai.preview.as_ref()) {
+                        let image_size = Vec2::new(preview.width() as f32, preview.height() as f32);
                         let available = ui.available_size().max(Vec2::splat(1.0));
-                        let factor = (available.x / preview.width() as f32)
-                            .min(available.y.min(560.0 * ui.scale()) / preview.height() as f32);
-                        ui.texture(
-                            crate::host::AI_PREVIEW_TEXTURE,
-                            Vec2::new(preview.width() as f32, preview.height() as f32) * factor,
-                        );
+                        let size = Vec2::new(available.x, available.y.min(560.0 * ui.scale()));
+                        let area = ui.area("ai_preview_view", size);
+                        app.ai.preview_view.update(area.rect, area.hovered, &app.ai.preview_input);
+                        ui.fill_rect(area.rect, [0.075, 0.08, 0.095, 1.0]);
+                        if let Some((rect, uv_min, uv_max)) = app.ai.preview_view.visible_image(area.rect, image_size) {
+                            ui.texture_rect(crate::host::AI_PREVIEW_TEXTURE, rect, uv_min.to_array(), uv_max.to_array());
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("ai_preview_reset", "Fit preview").clicked() {
+                                app.ai.preview_view = PreviewView::default();
+                            }
+                            ui.label("Wheel: zoom · Middle drag: pan");
+                        });
                     }
                 });
             });
@@ -255,10 +336,26 @@ fn draw_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
         Vec2::new(ui.available_size().x, form_height),
         mega_ui::ScrollAxes::Vertical,
         |ui| {
-            if matches!(ai.mode, AiMode::Redraw | AiMode::Inpaint) {
+            if ai.mode.needs_input() {
                 source_controls(ui, ai, width, height);
+            }
+            if matches!(ai.mode, AiMode::Redraw | AiMode::Inpaint) {
                 ui.label("Denoise");
                 ui.slider("redraw_denoise", &mut ai.denoise, 0.0..=1.0);
+            }
+            if ai.mode == AiMode::DrawCn {
+                ui.label("ControlNet strength");
+                ui.slider("cn_strength", &mut ai.control_net.strength, 0.0..=1.0);
+                ui.label("ControlNet start (%)");
+                let mut start = ai.control_net.start_percent * 100.0;
+                if ui.slider("cn_start", &mut start, 0.0..=100.0).changed() {
+                    ai.control_net.start_percent = start / 100.0;
+                }
+                ui.label("ControlNet end (%)");
+                let mut end = ai.control_net.end_percent * 100.0;
+                if ui.slider("cn_end", &mut end, 0.0..=100.0).changed() {
+                    ai.control_net.end_percent = end / 100.0;
+                }
             }
             ui.label("Model");
             choose(
@@ -321,6 +418,10 @@ fn draw_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
                     ui.drag_int("draw_height", &mut ai.draw_settings.height, 8);
                 });
                 if let Err(error) = ai.draw_settings.validate() {
+                    ui.label(&error);
+                }
+            } else if ai.mode == AiMode::DrawCn {
+                if let Err(error) = ai.control_net.validate(&ai.draw_settings) {
                     ui.label(&error);
                 }
             } else if let Err(error) = ai.draw_settings.validate_redraw(ai.denoise) {
@@ -394,6 +495,64 @@ fn source_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn lineart_defaults_to_512_and_uses_image_sources_without_sd() {
+        let mut ai = AiDialog::default();
+        ai.mode = AiMode::Lineart;
+        assert_eq!(ai.lineart_resolution, 512);
+        assert!(ai.mode.needs_input());
+        assert!(!ai.mode.uses_sd());
+        ai.source = AiSource::Selection;
+        assert!(input_size(&ai, 128, 128).is_err());
+        ai.selection_bounds = Some(crate::editing::PixelRect {
+            min_x: 16, min_y: 24, max_x: 112, max_y: 104,
+        });
+        assert_eq!(input_size(&ai, 128, 128).unwrap(), (96, 80));
+    }
+
+    #[test]
+    fn preview_zoom_preserves_the_pixel_under_the_cursor_and_clips_uvs() {
+        let viewport = Rect::from_min_size(Vec2::new(100.0, 50.0), Vec2::new(400.0, 300.0));
+        let mut view = PreviewView::default();
+        let mut input = crate::host::FrameInput::default();
+        input.mouse_pos = Vec2::new(350.0, 150.0);
+        input.scroll_delta.y = 400.0;
+        let center = (viewport.min + viewport.max) * 0.5;
+        let before = (input.mouse_pos - center - view.pan) / view.zoom;
+        view.update(viewport, true, &input);
+        let after = (input.mouse_pos - center - view.pan) / view.zoom;
+        assert!(before.distance(after) < 0.001);
+        let (rect, min, max) = view.visible_image(viewport, Vec2::splat(1024.0)).unwrap();
+        assert!(rect.min.cmpge(viewport.min).all() && rect.max.cmple(viewport.max).all());
+        assert!(min.cmpge(Vec2::ZERO).all() && max.cmple(Vec2::ONE).all());
+        assert!(min.x > 0.0 || min.y > 0.0 || max.x < 1.0 || max.y < 1.0);
+    }
+
+    #[test]
+    fn preview_pan_stays_active_outside_until_release_and_ignores_other_controls() {
+        let viewport = Rect::from_min_size(Vec2::ZERO, Vec2::splat(300.0));
+        let mut view = PreviewView::default();
+        let mut input = crate::host::FrameInput::default();
+        input.scroll_delta.y = 120.0;
+        input.mouse_middle_pressed = true;
+        input.mouse_middle_down = true;
+        input.mouse_delta = Vec2::new(10.0, 20.0);
+        view.update(viewport, false, &input);
+        assert_eq!((view.zoom, view.pan), (1.0, Vec2::ZERO));
+        input.scroll_delta = Vec2::ZERO;
+        view.update(viewport, true, &input);
+        assert_eq!(view.pan, Vec2::new(10.0, 20.0));
+        input.mouse_middle_pressed = false;
+        view.update(viewport, false, &input);
+        assert_eq!(view.pan, Vec2::new(20.0, 40.0));
+        input.mouse_middle_down = false;
+        view.update(viewport, false, &input);
+        assert!(!view.panning);
+        assert_eq!(view.pan, Vec2::new(20.0, 40.0));
+        view.pan = Vec2::splat(10000.0);
+        assert!(view.visible_image(viewport, Vec2::splat(1024.0)).is_none());
+    }
+
     fn render_controls(ai: &mut AiDialog) -> usize {
         let mut ui = Ui::new();
         ui.begin_frame(mega_ui::UiInput {
@@ -406,7 +565,7 @@ mod tests {
 
     #[test]
     fn lora_rows_appear_in_order_and_hidden_selections_are_cleared() {
-        for mode in [AiMode::Draw, AiMode::Redraw, AiMode::Inpaint] {
+        for mode in [AiMode::Draw, AiMode::DrawCn, AiMode::Redraw, AiMode::Inpaint] {
             let mut ai = AiDialog::default();
             ai.mode = mode;
             let one = render_controls(&mut ai);

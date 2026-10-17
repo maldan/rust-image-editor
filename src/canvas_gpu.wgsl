@@ -199,7 +199,7 @@ fn fs_float(in: VsOut) -> @location(0) vec4<f32> {
     if (m < 0.5) {
         return vec4<f32>(0.0);
     }
-    let src_uv = (fu.origin + texel + vec2<f32>(0.5)) / fu.image_size;
+    let src_uv = (texel + vec2<f32>(0.5)) / fu.size;
     let tex = textureSampleLevel(fimg, fsamp, src_uv, 0.0);
     return vec4<f32>(tex.rgb, tex.a * fu.opacity);
 }

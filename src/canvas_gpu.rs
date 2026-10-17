@@ -1,3 +1,4 @@
+use crate::raster::{Raster, SparsePixels};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec2;
 use mega_ui::Rect;
@@ -96,12 +97,21 @@ pub struct CanvasOverlay {
 #[derive(Clone, Copy)]
 pub struct FloatingDraw {
     pub opacity: f32,
+    pub whole_layer: bool,
     pub layer: usize,
     pub origin: Vec2,
     pub size: Vec2,
 }
 
+struct FloatingTileGpu {
+    _texture: wgpu::Texture,
+    uniform: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    origin: Vec2,
+}
+
 struct LayerGpu {
+    uniform: wgpu::Buffer,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     bind_group: wgpu::BindGroup,
@@ -134,6 +144,9 @@ pub struct CanvasRenderer {
     transform_epoch: u64,
     transform_layer: Option<usize>,
     mask_texture: Option<wgpu::Texture>,
+    floating_texture: Option<wgpu::Texture>,
+    floating_tiles: Vec<FloatingTileGpu>,
+    tile_mask: Option<wgpu::Texture>,
     mask_view: Option<wgpu::TextureView>,
     mask_size: (u32, u32),
     punch_bind_group: Option<wgpu::BindGroup>,
@@ -436,6 +449,9 @@ impl CanvasRenderer {
             transform_epoch: 0,
             transform_layer: None,
             mask_texture: None,
+            floating_texture: None,
+            floating_tiles: Vec::new(),
+            tile_mask: None,
             mask_view: None,
             mask_size: (0, 0),
             punch_bind_group: None,
@@ -469,6 +485,9 @@ impl CanvasRenderer {
         self.mask_size = (0, 0);
         self.punch_bind_group = None;
         self.floating_bind_group = None;
+        self.floating_texture = None;
+        self.floating_tiles.clear();
+        self.tile_mask = None;
     }
 
     pub fn has_image(&self) -> bool {
@@ -520,13 +539,17 @@ impl CanvasRenderer {
                 view_formats: &[],
             });
             let view = texture.create_view(&Default::default());
+            let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("layer uniforms"), size: std::mem::size_of::<ViewUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+            });
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("canvas layer bg"),
                 layout: &self.view_bind_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.view_uniform_buf.as_entire_binding(),
+                        resource: uniform.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -539,6 +562,7 @@ impl CanvasRenderer {
                 ],
             });
             *slot = Some(LayerGpu {
+                uniform,
                 texture,
                 view,
                 bind_group,
@@ -555,27 +579,27 @@ impl CanvasRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         layer_index: usize,
-        pixels: &[u8],
+        pixels: &(impl Raster + ?Sized),
         width: u32,
         height: u32,
         dirty: &mut DirtyTiles,
     ) {
-        if width == 0 || height == 0 || pixels.len() < width as usize * height as usize * 4 {
+        if width == 0 || height == 0 {
             return;
         }
-        self.ensure_layers(device, layer_index + 1, width, height);
+        self.ensure_layers(device, self.layers.len().max(layer_index + 1), width, height);
         let Some(Some(layer)) = self.layers.get(layer_index) else {
             return;
         };
         if dirty.is_empty() {
             return;
         }
-        let bytes_per_row = width * 4;
+
         for (x, y, w, h) in dirty.drain() {
             if w == 0 || h == 0 {
                 continue;
             }
-            let offset = ((y * width + x) * 4) as usize;
+            let packed = pixels.packed_region(width, x as i32, y as i32, w, h);
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &layer.texture,
@@ -583,10 +607,10 @@ impl CanvasRenderer {
                     origin: wgpu::Origin3d { x, y, z: 0 },
                     aspect: wgpu::TextureAspect::All,
                 },
-                &pixels[offset..],
+                &packed,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(bytes_per_row),
+                    bytes_per_row: Some(w * 4),
                     rows_per_image: Some(h),
                 },
                 wgpu::Extent3d {
@@ -611,8 +635,50 @@ impl CanvasRenderer {
             let mut dirty = DirtyTiles::default();
             dirty.resize(width, height);
             dirty.mark_all();
-            self.upload_layer_dirty(device, queue, i, pixels, width, height, &mut dirty);
+            self.upload_layer_dirty(device, queue, i, *pixels, width, height, &mut dirty);
         }
+    }
+
+    pub fn upload_sparse_layers(&mut self, device: &wgpu::Device, queue: &wgpu::Queue,
+        layers: &[&SparsePixels], width: u32, height: u32) {
+        self.ensure_layers(device, layers.len(), width, height);
+        for (i, pixels) in layers.iter().enumerate() {
+            let mut dirty = DirtyTiles::default();
+            dirty.resize(width,height);
+            self.upload_layer_dirty(device,queue,i,*pixels,width,height,&mut dirty);
+        }
+    }
+
+    pub fn sync_sparse_transform(&mut self, device: &wgpu::Device, queue: &wgpu::Queue,
+        source: &SparsePixels, reload: bool) -> bool {
+        if !reload && !self.floating_tiles.is_empty() { return true; }
+        self.floating_tiles.clear();
+        let side = crate::tiles::TILE_SIZE;
+        let make_texture = |label, format| device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label), size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
+        });
+        let upload = |texture: &wgpu::Texture, bytes: &[u8], stride| queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All }, bytes,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(stride), rows_per_image: Some(side) },
+            wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 });
+        let mask = make_texture("tile mask", wgpu::TextureFormat::R8Unorm);
+        upload(&mask, &vec![255; (side*side) as usize], side);
+        let mask_view = mask.create_view(&Default::default());
+        for (&(tx,ty), pixels) in &source.tiles {
+            let texture = make_texture("floating tile", wgpu::TextureFormat::Rgba8UnormSrgb);
+            upload(&texture, pixels, side*4);
+            let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("floating tile uniforms"), size: std::mem::size_of::<FloatUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+            });
+            let bind_group = self.transform_bind_group(device, &uniform, &texture.create_view(&Default::default()), &mask_view, "floating tile");
+            self.floating_tiles.push(FloatingTileGpu { _texture: texture, uniform, bind_group,
+                origin: Vec2::new((tx*side as i32+source.offset.0) as f32,(ty*side as i32+source.offset.1) as f32) });
+        }
+        self.tile_mask = Some(mask);
+        true
     }
 
     /// Upload the transform mask and bind the active layer texture for the preview.
@@ -623,6 +689,7 @@ impl CanvasRenderer {
         queue: &wgpu::Queue,
         layer_index: usize,
         mask: &[u8],
+        pixels: &[u8],
         width: u32,
         height: u32,
         reload_mask: bool,
@@ -674,6 +741,21 @@ impl CanvasRenderer {
                     depth_or_array_layers: 1,
                 },
             );
+            let floating_texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("floating pixels"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &floating_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                pixels,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(height) },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            self.floating_texture = Some(floating_texture);
             self.mask_texture = Some(texture);
             self.mask_view = Some(view);
             self.mask_size = (width, height);
@@ -698,7 +780,7 @@ impl CanvasRenderer {
             self.floating_bind_group = Some(self.transform_bind_group(
                 device,
                 &self.float_uniform_buf,
-                &layer_view,
+                &self.floating_texture.as_ref().unwrap().create_view(&Default::default()),
                 mask_view,
                 "canvas float bg",
             ));
@@ -867,6 +949,30 @@ impl CanvasRenderer {
             let Some(Some(gpu)) = self.layers.get(i) else {
                 continue;
             };
+            if let (Some(draw), Some(corners)) = (overlay.floating, overlay.transform_corners)
+                && draw.layer == i && draw.whole_layer {
+                let side = crate::tiles::TILE_SIZE as f32;
+                for tile in &self.floating_tiles {
+                    let local = (tile.origin - draw.origin) / draw.size;
+                    let size = Vec2::splat(side) / draw.size;
+                    let corner = |uv: Vec2| corners[0] + (corners[1]-corners[0])*uv.x + (corners[3]-corners[0])*uv.y;
+                    let points = [corner(local),corner(local+Vec2::new(size.x,0.0)),corner(local+size),corner(local+Vec2::new(0.0,size.y))];
+                    // Skip tiles outside the visible panel without rebuilding their textures.
+                    if points.iter().all(|p|p.x<canvas_rect.min.x) || points.iter().all(|p|p.x>canvas_rect.max.x)
+                        || points.iter().all(|p|p.y<canvas_rect.min.y) || points.iter().all(|p|p.y>canvas_rect.max.y) { continue; }
+                    let fu = FloatUniforms {
+                        viewport: viewport.into(), opacity: draw.opacity, _pad: 0.0,
+                        origin: [0.0;2], size: [side;2], image_size: [side;2],
+                        c0: points[0].into(), c1: points[1].into(), c2: points[2].into(), c3: points[3].into(),
+                    };
+                    queue.write_buffer(&tile.uniform,0,bytemuck::bytes_of(&fu));
+                    pass.set_pipeline(&self.float_pipeline);
+                    pass.set_bind_group(0,&tile.bind_group,&[]);
+                    pass.draw(0..6,0..1);
+                }
+                pass.set_pipeline(&self.layer_pipeline);
+                continue;
+            }
             if overlay.floating.as_ref().is_some_and(|draw| draw.layer == i)
                 && let Some(bg) = self.punch_bind_group.as_ref()
                 && let Some(draw) = overlay.floating
@@ -886,40 +992,40 @@ impl CanvasRenderer {
                 pass.set_pipeline(&self.punch_pipeline);
                 pass.set_bind_group(0, bg, &[]);
                 pass.draw(0..6, 0..1);
+                if let (Some(draw), Some(corners), Some(bg)) = (
+                    overlay.floating,
+                    overlay.transform_corners,
+                    self.floating_bind_group.as_ref(),
+                ) && overlay
+                    .layers
+                    .get(draw.layer)
+                    .is_some_and(|layer| layer.visible && layer.opacity > f32::EPSILON)
+                {
+                    let fu = FloatUniforms {
+                        viewport: [viewport.x, viewport.y],
+                        opacity: draw.opacity.clamp(0.0, 1.0),
+                        _pad: 0.0,
+                        origin: [draw.origin.x, draw.origin.y],
+                        size: [draw.size.x, draw.size.y],
+                        image_size: [view.width as f32, view.height as f32],
+                        c0: [corners[0].x, corners[0].y],
+                        c1: [corners[1].x, corners[1].y],
+                        c2: [corners[2].x, corners[2].y],
+                        c3: [corners[3].x, corners[3].y],
+                    };
+                    queue.write_buffer(&self.float_uniform_buf, 0, bytemuck::bytes_of(&fu));
+                    pass.set_pipeline(&self.float_pipeline);
+                    pass.set_bind_group(0, bg, &[]);
+                    pass.draw(0..6, 0..1);
+                }
+
                 pass.set_pipeline(&self.layer_pipeline);
                 continue;
             }
             let mut u = view_u;
             u.opacity = layer.opacity.clamp(0.0, 1.0);
-            queue.write_buffer(&self.view_uniform_buf, 0, bytemuck::bytes_of(&u));
+            queue.write_buffer(&gpu.uniform, 0, bytemuck::bytes_of(&u));
             pass.set_bind_group(0, &gpu.bind_group, &[]);
-            pass.draw(0..6, 0..1);
-        }
-
-        if let (Some(draw), Some(corners), Some(bg)) = (
-            overlay.floating,
-            overlay.transform_corners,
-            self.floating_bind_group.as_ref(),
-        ) && overlay
-            .layers
-            .get(draw.layer)
-            .is_some_and(|layer| layer.visible && layer.opacity > f32::EPSILON)
-        {
-            let fu = FloatUniforms {
-                viewport: [viewport.x, viewport.y],
-                opacity: draw.opacity.clamp(0.0, 1.0),
-                _pad: 0.0,
-                origin: [draw.origin.x, draw.origin.y],
-                size: [draw.size.x, draw.size.y],
-                image_size: [view.width as f32, view.height as f32],
-                c0: [corners[0].x, corners[0].y],
-                c1: [corners[1].x, corners[1].y],
-                c2: [corners[2].x, corners[2].y],
-                c3: [corners[3].x, corners[3].y],
-            };
-            queue.write_buffer(&self.float_uniform_buf, 0, bytemuck::bytes_of(&fu));
-            pass.set_pipeline(&self.float_pipeline);
-            pass.set_bind_group(0, bg, &[]);
             pass.draw(0..6, 0..1);
         }
 
@@ -1145,5 +1251,73 @@ fn push_circle(out: &mut Vec<SolidVertex>, center: Vec2, radius: f32, thickness:
         let p0 = center + Vec2::new(a0.cos(), a0.sin()) * radius;
         let p1 = center + Vec2::new(a1.cos(), a1.sin()) * radius;
         push_line(out, p0, p1, thickness, color);
+    }
+}
+
+#[cfg(test)]
+mod gpu_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a GPU adapter; run explicitly for renderer changes"]
+    fn tiled_preview_uploads_and_composes_in_layer_order() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: None, force_fallback_adapter: false,
+            power_preference: wgpu::PowerPreference::HighPerformance, apply_limit_buckets: false,
+        })).unwrap();
+        let (device,queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let mut renderer = CanvasRenderer::new(&device,wgpu::TextureFormat::Rgba8Unorm);
+        let red = SparsePixels::from_rgba(&[255,0,0,255].repeat(64*64),64,64);
+        let blue = SparsePixels::from_rgba(&[0,0,255,255].repeat(64*64),64,64);
+        renderer.upload_sparse_layers(&device,&queue,&[&red,&blue],64,64);
+        let mut dirty = DirtyTiles::default(); dirty.resize(64,64);
+        renderer.upload_layer_dirty(&device,&queue,0,&red,64,64,&mut dirty);
+        assert_eq!(renderer.layers.len(),2,"dirty upload must retain higher layers");
+        renderer.sync_sparse_transform(&device,&queue,&red,true);
+        assert_eq!(renderer.floating_tiles.len(),1);
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: None, size: wgpu::Extent3d {width:64,height:64,depth_or_array_layers:1},
+            mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,
+            format:wgpu::TextureFormat::Rgba8Unorm,
+            usage:wgpu::TextureUsages::RENDER_ATTACHMENT|wgpu::TextureUsages::COPY_SRC,view_formats:&[],
+        });
+        let output = device.create_buffer(&wgpu::BufferDescriptor {
+            label:None,size:64*64*4,usage:wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::MAP_READ,mapped_at_creation:false,
+        });
+        let view = target.create_view(&Default::default());
+        // Upper blue layer must cover a floating red layer, including its preview.
+        for upper_opacity in [1.0,0.0] {
+            let mut encoder=device.create_command_encoder(&Default::default());
+            {
+                let mut pass=encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label:None,color_attachments:&[Some(wgpu::RenderPassColorAttachment {
+                        view:&view,resolve_target:None,depth_slice:None,
+                        ops:wgpu::Operations {load:wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),store:wgpu::StoreOp::Store},
+                    })],depth_stencil_attachment:None,timestamp_writes:None,occlusion_query_set:None,multiview_mask:None,
+                });
+                renderer.render(&queue,&mut pass,Vec2::splat(64.0),Rect {min:Vec2::ZERO,max:Vec2::splat(64.0)},
+                    CanvasView {center:Vec2::splat(32.0),zoom:1.0,rotation:0.0,width:64,height:64},
+                    CanvasOverlay {
+                        layers:vec![LayerDraw {visible:true,opacity:1.0},LayerDraw {visible:true,opacity:upper_opacity}],
+                        floating:Some(FloatingDraw {opacity:1.0,whole_layer:true,layer:0,origin:Vec2::ZERO,size:Vec2::splat(64.0)}),
+                        transform_corners:Some([Vec2::ZERO,Vec2::new(64.0,0.0),Vec2::splat(64.0),Vec2::new(0.0,64.0)]),
+                        ..Default::default()
+                    },0.0);
+            }
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {texture:&target,mip_level:0,origin:wgpu::Origin3d::ZERO,aspect:wgpu::TextureAspect::All},
+                wgpu::TexelCopyBufferInfo {buffer:&output,layout:wgpu::TexelCopyBufferLayout {offset:0,bytes_per_row:Some(256),rows_per_image:Some(64)}},
+                wgpu::Extent3d {width:64,height:64,depth_or_array_layers:1});
+            queue.submit([encoder.finish()]);
+            let (tx,rx)=std::sync::mpsc::channel();
+            output.slice(..).map_async(wgpu::MapMode::Read,move |r| { tx.send(r).unwrap(); });
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            rx.recv().unwrap().unwrap();
+            let data=output.slice(..).get_mapped_range().unwrap();
+            let offset=(32*64+32)*4;
+            assert_eq!(&data[offset..offset+4],if upper_opacity==1.0 { &[0,0,255,255] } else { &[255,0,0,255] });
+            drop(data);output.unmap();
+        }
     }
 }

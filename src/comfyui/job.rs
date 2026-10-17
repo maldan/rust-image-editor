@@ -26,6 +26,8 @@ pub enum JobResult {
 
 enum InputWorkflow {
     Edit(String),
+    Lineart(i32),
+    DrawCn { settings: super::DrawSettings, control: super::ControlNetSettings },
     Inpaint {
         settings: super::DrawSettings,
         denoise: f32,
@@ -73,6 +75,25 @@ impl Job {
                 workflow: InputWorkflow::Edit(prompt),
             },
         )
+    }
+
+    pub fn start_lineart(config: HostConfig, pixels: RgbaImage, scale: f32, resolution: i32) -> Self {
+        Self::start_request(
+            config,
+            Request::Input { pixels, scale, workflow: InputWorkflow::Lineart(resolution) },
+        )
+    }
+
+    pub fn start_draw_cn(
+        config: HostConfig,
+        pixels: RgbaImage,
+        scale: f32,
+        settings: super::DrawSettings,
+        control: super::ControlNetSettings,
+    ) -> Self {
+        Self::start_request(config, Request::Input {
+            pixels, scale, workflow: InputWorkflow::DrawCn { settings, control },
+        })
     }
 
     pub fn start_draw(config: HostConfig, settings: super::DrawSettings) -> Self {
@@ -231,6 +252,12 @@ fn run(
             scale,
             workflow,
         } => {
+            if let InputWorkflow::Lineart(resolution) = &workflow {
+                super::workflow::validate_lineart_resolution(*resolution)?;
+            }
+            if let InputWorkflow::DrawCn { settings, control } = &workflow {
+                control.validate(settings)?;
+            }
             if let InputWorkflow::Inpaint {
                 mask,
                 settings,
@@ -279,6 +306,12 @@ fn run(
                     )?
                 }
                 InputWorkflow::Edit(prompt) => super::workflow::prepare(&filename, &prompt, seed)?,
+                InputWorkflow::DrawCn { settings, control } => {
+                    super::workflow::prepare_draw_cn(&filename, &settings, control, seed)?
+                }
+                InputWorkflow::Lineart(resolution) => {
+                    super::workflow::prepare_lineart(&filename, resolution)?
+                }
                 InputWorkflow::Redraw { settings, denoise } => {
                     super::workflow::prepare_redraw(&filename, &settings, denoise, seed)?
                 }

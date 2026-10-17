@@ -1,3 +1,4 @@
+use crate::raster::Raster;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Brush,
@@ -246,12 +247,12 @@ pub struct BrushStroke<'a> {
 
 /// Returns axis-aligned dirty pixel bounds if anything changed.
 pub fn apply_brush(
-    pixels: &mut [u8],
+    pixels: &mut (impl Raster + ?Sized),
     width: u32,
     height: u32,
     stroke: &mut BrushStroke<'_>,
 ) -> Option<PixelRect> {
-    if width == 0 || height == 0 || pixels.len() < width as usize * height as usize * 4 {
+    if width == 0 || height == 0 {
         return None;
     }
     let radius = (stroke.size * 0.5).max(0.5);
@@ -297,7 +298,7 @@ pub fn apply_brush(
 
 #[allow(clippy::too_many_arguments)]
 fn stamp(
-    pixels: &mut [u8],
+    pixels: &mut (impl Raster + ?Sized),
     width: u32,
     height: u32,
     center_x: f32,
@@ -342,12 +343,10 @@ fn stamp(
                 }
                 cov[index] = stroke_id;
             }
-            let offset = index * 4;
-            if erase {
-                erase_pixel(&mut pixels[offset..offset + 4], opacity);
-            } else {
-                paint_color(&mut pixels[offset..offset + 4], opacity, color);
-            }
+            let mut pixel = pixels.read(width, x as i32, y as i32);
+            if erase { erase_pixel(&mut pixel, opacity); }
+            else { paint_color(&mut pixel, opacity, color); }
+            pixels.write(width, x as i32, y as i32, pixel);
             changed = true;
             dirty_min_x = dirty_min_x.min(x);
             dirty_min_y = dirty_min_y.min(y);
@@ -401,14 +400,8 @@ pub fn color_distance(a: [u8; 4], b: [u8; 4]) -> u8 {
         .unwrap_or(0)
 }
 
-pub fn sample_pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
-    let offset = ((y * width + x) * 4) as usize;
-    [
-        pixels[offset],
-        pixels[offset + 1],
-        pixels[offset + 2],
-        pixels[offset + 3],
-    ]
+pub fn sample_pixel(pixels: &(impl Raster + ?Sized), width: u32, x: u32, y: u32) -> [u8; 4] {
+    pixels.read(width, x as i32, y as i32)
 }
 
 fn sample_pixel_clamped(pixels: &[u8], width: u32, height: u32, x: i32, y: i32) -> [u8; 4] {
@@ -583,7 +576,7 @@ fn area_sample_rgba(
 
 /// 4-connected flood fill visiting pixels within `threshold` of the seed color.
 pub fn flood_mask(
-    pixels: &[u8],
+    pixels: &(impl Raster + ?Sized),
     width: u32,
     height: u32,
     seed: (u32, u32),
@@ -633,7 +626,7 @@ pub fn flood_mask(
 }
 
 pub fn fill_bucket(
-    pixels: &mut [u8],
+    pixels: &mut (impl Raster + ?Sized),
     width: u32,
     height: u32,
     seed: (u32, u32),
@@ -653,12 +646,10 @@ pub fn fill_bucket(
             if !region.contains(x, y) {
                 continue;
             }
-            let offset = ((y * width + x) * 4) as usize;
-            if erase {
-                erase_pixel(&mut pixels[offset..offset + 4], opacity);
-            } else {
-                paint_color(&mut pixels[offset..offset + 4], opacity, color);
-            }
+            let mut pixel = pixels.read(width, x as i32, y as i32);
+            if erase { erase_pixel(&mut pixel, opacity); }
+            else { paint_color(&mut pixel, opacity, color); }
+            pixels.write(width, x as i32, y as i32, pixel);
             changed = true;
         }
     }
@@ -691,21 +682,25 @@ pub fn composite_region(
         }
     }
     for layer in layers {
-        if !layer.visible || layer.pixels.len() < width as usize * height as usize * 4 {
+        if !layer.visible {
             continue;
         }
         let opacity = layer.opacity.clamp(0.0, 1.0);
         if opacity <= f32::EPSILON {
             continue;
         }
-        for py in y..y1 {
-            for px in x..x1 {
-                let offset = ((py * width + px) * 4) as usize;
-                over(
-                    &mut out[offset..offset + 4],
-                    &layer.pixels[offset..offset + 4],
-                    opacity,
-                );
+        let side = crate::tiles::TILE_SIZE as i32;
+        for (&(tx,ty), tile) in &layer.pixels.tiles {
+            let ox = tx*side + layer.pixels.offset.0;
+            let oy = ty*side + layer.pixels.offset.1;
+            let x0 = ox.max(x as i32); let x1 = (ox+side).min(x1 as i32);
+            let y0 = oy.max(y as i32); let y1 = (oy+side).min(y1 as i32);
+            for py in y0..y1 {
+                for px in x0..x1 {
+                    let dst = (py as usize * width as usize + px as usize)*4;
+                    let src = ((py-oy)*side+px-ox) as usize*4;
+                    over(&mut out[dst..dst+4], &tile[src..src+4], opacity);
+                }
             }
         }
     }
@@ -731,6 +726,21 @@ fn over(dst: &mut [u8], src: &[u8], opacity: f32) {
     dst[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
 }
 
+fn sample_sparse_bilinear(source: &crate::raster::SparsePixels, x: f32, y: f32) -> [u8;4] {
+    let x = x - 0.5; let y = y - 0.5;
+    let ix = x.floor() as i32; let iy = y.floor() as i32;
+    let fx = x - x.floor(); let fy = y - y.floor();
+    let samples = [(ix,iy,(1.0-fx)*(1.0-fy)),(ix+1,iy,fx*(1.0-fy)),(ix,iy+1,(1.0-fx)*fy),(ix+1,iy+1,fx*fy)];
+    let mut sum = [0.0;4];
+    for (x,y,w) in samples {
+        let p = source.read(0,x,y); let a = p[3] as f32/255.0*w;
+        for c in 0..3 { sum[c] += p[c] as f32*a; }
+        sum[3] += a;
+    }
+    if sum[3] <= f32::EPSILON { return [0;4]; }
+    [(sum[0]/sum[3]).round() as u8,(sum[1]/sum[3]).round() as u8,(sum[2]/sum[3]).round() as u8,(sum[3]*255.0).round() as u8]
+}
+
 /// Floating selection used by the Transform tool.
 #[derive(Clone)]
 pub struct FloatingTransform {
@@ -739,13 +749,15 @@ pub struct FloatingTransform {
     pub mask: Vec<u8>,
     pub bw: u32,
     pub bh: u32,
-    pub origin_x: u32,
-    pub origin_y: u32,
+    pub origin_x: i32,
+    pub origin_y: i32,
     pub center: glam::Vec2,
     pub scale: f32,
     pub rotation: f32,
     /// Layer opacity baked into GPU preview; stamp writes raw pixels.
     pub opacity: f32,
+    pub whole_layer: bool,
+    pub source: Option<crate::raster::SparsePixels>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -757,7 +769,7 @@ pub enum TransformHit {
 
 impl FloatingTransform {
     pub fn extract(
-        pixels: &[u8],
+        pixels: &(impl Raster + ?Sized),
         width: u32,
         _height: u32,
         selection: &Selection,
@@ -778,11 +790,7 @@ impl FloatingTransform {
                     continue;
                 }
                 let li = ((y - bounds.min_y) * bw + (x - bounds.min_x)) as usize;
-                let src = ((y * width + x) * 4) as usize;
-                if src + 4 > pixels.len() {
-                    continue;
-                }
-                fp[li * 4..li * 4 + 4].copy_from_slice(&pixels[src..src + 4]);
+                fp[li * 4..li * 4 + 4].copy_from_slice(&pixels.read(width, x as i32, y as i32));
                 mask[li] = 1;
             }
         }
@@ -799,30 +807,34 @@ impl FloatingTransform {
             mask,
             bw,
             bh,
-            origin_x: bounds.min_x,
-            origin_y: bounds.min_y,
+            origin_x: bounds.min_x as i32,
+            origin_y: bounds.min_y as i32,
             center,
             scale: 1.0,
             rotation: 0.0,
             opacity: opacity.clamp(0.0, 1.0),
+            whole_layer: false,
+            source: None,
         })
     }
 
     /// Erase grabbed pixels. Call on commit, after the preview has been sampling them.
-    pub fn clear_source(&self, pixels: &mut [u8], width: u32, height: u32) {
+    pub fn extract_layer(pixels: &crate::raster::SparsePixels, layer: usize, opacity: f32) -> Option<Self> {
+        let (x,y,x1,y1) = pixels.bounds()?;
+        let bw = (x1-x) as u32; let bh = (y1-y) as u32;
+        Some(Self {
+            layer, pixels: Vec::new(), mask: Vec::new(),
+            bw, bh, origin_x: x, origin_y: y,
+            center: glam::Vec2::new(x as f32 + bw as f32 * 0.5, y as f32 + bh as f32 * 0.5),
+            scale: 1.0, rotation: 0.0, opacity, whole_layer: true, source: Some(pixels.clone()),
+        })
+    }
+
+    pub fn clear_source(&self, pixels: &mut (impl Raster + ?Sized), width: u32, _height: u32) {
         for y in 0..self.bh {
             for x in 0..self.bw {
-                if self.mask[(y * self.bw + x) as usize] == 0 {
-                    continue;
-                }
-                let px = self.origin_x + x;
-                let py = self.origin_y + y;
-                if px >= width || py >= height {
-                    continue;
-                }
-                let dst = ((py * width + px) * 4) as usize;
-                if dst + 4 <= pixels.len() {
-                    pixels[dst..dst + 4].fill(0);
+                if self.mask[(y * self.bw + x) as usize] != 0 {
+                    pixels.write(width, self.origin_x + x as i32, self.origin_y + y as i32, [0;4]);
                 }
             }
         }
@@ -874,7 +886,7 @@ impl FloatingTransform {
             let ly = (local.y + half.y).floor() as i32;
             if lx >= 0 && ly >= 0 && (lx as u32) < self.bw && (ly as u32) < self.bh {
                 let idx = (ly as u32 * self.bw + lx as u32) as usize;
-                if self.mask.get(idx).copied().unwrap_or(0) != 0 {
+                if self.whole_layer || self.mask.get(idx).copied().unwrap_or(0) != 0 {
                     return Some(TransformHit::Body);
                 }
             }
@@ -883,9 +895,46 @@ impl FloatingTransform {
         None
     }
 
+    /// Resample occupied source tiles only, even when the layer spans a huge empty area.
+    pub fn stamp_layer(&self, target: &mut crate::raster::SparsePixels) {
+        let Some(source) = self.source.as_ref() else { return; };
+        let side = crate::tiles::TILE_SIZE as i32;
+        let half = glam::Vec2::new(self.bw as f32, self.bh as f32) * 0.5;
+        let origin = glam::Vec2::new(self.origin_x as f32, self.origin_y as f32) + half;
+        let (s,c) = self.rotation.sin_cos();
+        let transform = |p: glam::Vec2| {
+            let p = (p - origin) * self.scale;
+            self.center + glam::Vec2::new(p.x*c-p.y*s, p.x*s+p.y*c)
+        };
+        let mut destinations = std::collections::HashSet::new();
+        for &(tx,ty) in source.tiles.keys() {
+            let x = tx * side + source.offset.0;
+            let y = ty * side + source.offset.1;
+            let corners = [(x-1,y-1),(x+side+1,y-1),(x+side+1,y+side+1),(x-1,y+side+1)]
+                .map(|(x,y)| transform(glam::Vec2::new(x as f32,y as f32)));
+            let x0 = corners.iter().map(|p|p.x).fold(f32::INFINITY,f32::min).floor() as i32;
+            let y0 = corners.iter().map(|p|p.y).fold(f32::INFINITY,f32::min).floor() as i32;
+            let x1 = corners.iter().map(|p|p.x).fold(f32::NEG_INFINITY,f32::max).ceil() as i32;
+            let y1 = corners.iter().map(|p|p.y).fold(f32::NEG_INFINITY,f32::max).ceil() as i32;
+            for dy in y0.div_euclid(side)..=y1.div_euclid(side) {
+                for dx in x0.div_euclid(side)..=x1.div_euclid(side) { destinations.insert((dx,dy)); }
+            }
+        }
+        for (tx,ty) in destinations {
+            for y in ty*side..(ty+1)*side {
+                for x in tx*side..(tx+1)*side {
+                    let p = glam::Vec2::new(x as f32+0.5,y as f32+0.5)-self.center;
+                    let p = glam::Vec2::new(p.x*c+p.y*s,-p.x*s+p.y*c)/self.scale.max(0.05)+origin;
+                    let pixel = sample_sparse_bilinear(source,p.x,p.y);
+                    if pixel[3] != 0 { target.write(0,x,y,pixel); }
+                }
+            }
+        }
+    }
+
     pub fn stamp(
         &self,
-        pixels: &mut [u8],
+        pixels: &mut (impl Raster + ?Sized),
         width: u32,
         height: u32,
     ) -> (Option<PixelRect>, Selection) {
@@ -896,33 +945,33 @@ impl FloatingTransform {
             .map(|p| p.x)
             .fold(f32::INFINITY, f32::min)
             .floor()
-            .max(0.0) as u32;
+             as i32;
         let min_y = corners
             .iter()
             .map(|p| p.y)
             .fold(f32::INFINITY, f32::min)
             .floor()
-            .max(0.0) as u32;
+             as i32;
         let max_x = corners
             .iter()
             .map(|p| p.x)
             .fold(f32::NEG_INFINITY, f32::max)
             .ceil()
-            .min(width as f32) as u32;
+             as i32;
         let max_y = corners
             .iter()
             .map(|p| p.y)
             .fold(f32::NEG_INFINITY, f32::max)
             .ceil()
-            .min(height as f32) as u32;
+             as i32;
         let half = glam::Vec2::new(self.bw as f32, self.bh as f32) * 0.5;
         let inv_scale = 1.0 / self.scale.max(0.05);
         let (s, c) = (-self.rotation).sin_cos();
         // Expand bounds by 1px so bilinear soft edges are not clipped.
-        let min_x = min_x.saturating_sub(1);
-        let min_y = min_y.saturating_sub(1);
-        let max_x = (max_x + 1).min(width);
-        let max_y = (max_y + 1).min(height);
+        let min_x = min_x - 1;
+        let min_y = min_y - 1;
+        let max_x = max_x + 1;
+        let max_y = max_y + 1;
         let mut dirty: Option<PixelRect> = None;
         for y in min_y..max_y {
             for x in min_x..max_x {
@@ -950,11 +999,12 @@ impl FloatingTransform {
                 if src_px[3] == 0 {
                     continue;
                 }
-                let dst = ((y * width + x) * 4) as usize;
-                over(&mut pixels[dst..dst + 4], &src_px, 1.0);
-                if coverage >= 0.5 {
-                    mask[(y * width + x) as usize] = 1;
-                }
+                let mut pixel = pixels.read(width, x, y);
+                over(&mut pixel, &src_px, 1.0);
+                pixels.write(width, x, y, pixel);
+                if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 { continue; }
+                let (x,y) = (x as u32, y as u32);
+                if coverage >= 0.5 { mask[(y * width + x) as usize] = 1; }
                 let rect = PixelRect {
                     min_x: x,
                     min_y: y,

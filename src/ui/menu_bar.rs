@@ -49,6 +49,12 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             if ui.menu_item("inpaint_image", "Inpaint Image...").clicked() {
                 app.open_ai_inpaint();
             }
+            if ui.menu_item("to_lineart", "To Lineart...").clicked() {
+                app.open_ai_lineart();
+            }
+            if ui.menu_item("draw_cn", "Draw with ControlNet...").clicked() {
+                app.open_ai_draw_cn();
+            }
         });
         if ui.menu_item("draw_image", "Draw Image...").clicked() {
             app.open_ai_draw();

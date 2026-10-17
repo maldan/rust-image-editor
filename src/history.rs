@@ -2,93 +2,109 @@ use std::collections::HashSet;
 
 use crate::editing::PixelRect;
 use crate::project::{Layer, Project};
+use crate::raster::{SparsePixels, Tile};
 use crate::tiles::TILE_SIZE;
 
 const MAX_ENTRIES: usize = 64;
 
 #[derive(Clone)]
 struct TileSnapshot {
-    tx: u32,
-    ty: u32,
-    w: u32,
-    h: u32,
-    data: Vec<u8>,
+    tx: i32,
+    ty: i32,
+    data: Option<Tile>,
 }
 
 #[derive(Clone)]
 pub struct HistoryEdit {
     pub layer: usize,
+    offset: (i32, i32),
     before: Vec<TileSnapshot>,
     after: Vec<TileSnapshot>,
 }
 
-/// Captures tile snapshots before pixels change, then freezes after on finish.
+/// Share physical tiles until a touched tile is changed (copy on write).
 pub struct EditCapture {
     layer: usize,
-    width: u32,
-    height: u32,
-    touched: HashSet<(u32, u32)>,
+    touched: HashSet<(i32, i32)>,
     before: Vec<TileSnapshot>,
+    offset: (i32, i32),
 }
 
 impl EditCapture {
-    pub fn new(layer: usize, width: u32, height: u32) -> Self {
+    pub fn new(layer: usize, _width: u32, _height: u32) -> Self {
         Self {
             layer,
-            width,
-            height,
             touched: HashSet::new(),
             before: Vec::new(),
+            offset: (0, 0),
         }
     }
-
     pub fn layer(&self) -> usize {
         self.layer
     }
-
-    /// Snapshot tiles covering `rect` from current `pixels` (call before mutating).
-    pub fn touch_rect(&mut self, pixels: &[u8], rect: PixelRect) {
-        if rect.is_empty() || self.width == 0 || self.height == 0 {
+    pub fn touch_rect(&mut self, pixels: &SparsePixels, rect: PixelRect) {
+        if rect.is_empty() {
             return;
         }
-        let tx0 = rect.min_x / TILE_SIZE;
-        let ty0 = rect.min_y / TILE_SIZE;
-        let tx1 = (rect.max_x.saturating_sub(1)) / TILE_SIZE;
-        let ty1 = (rect.max_y.saturating_sub(1)) / TILE_SIZE;
-        for ty in ty0..=ty1 {
-            for tx in tx0..=tx1 {
-                if !self.touched.insert((tx, ty)) {
-                    continue;
-                }
-                if let Some(snap) = snapshot_tile(pixels, self.width, self.height, tx, ty) {
-                    self.before.push(snap);
+        self.offset = pixels.offset;
+        let side = TILE_SIZE as i32;
+        let x0 = (rect.min_x as i32 - pixels.offset.0).div_euclid(side);
+        let y0 = (rect.min_y as i32 - pixels.offset.1).div_euclid(side);
+        let x1 = (rect.max_x as i32 - 1 - pixels.offset.0).div_euclid(side);
+        let y1 = (rect.max_y as i32 - 1 - pixels.offset.1).div_euclid(side);
+        for ty in y0..=y1 {
+            for tx in x0..=x1 {
+                if self.touched.insert((tx, ty)) {
+                    self.before.push(TileSnapshot {
+                        tx,
+                        ty,
+                        data: pixels.tiles.get(&(tx, ty)).cloned(),
+                    });
                 }
             }
         }
     }
-
-    pub fn finish(self, pixels: &[u8]) -> Option<HistoryEdit> {
-        if self.before.is_empty() {
+    pub fn finish(self, pixels: &mut SparsePixels) -> Option<HistoryEdit> {
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        for b in self.before {
+            let key = (b.tx, b.ty);
+            if pixels
+                .tiles
+                .get(&key)
+                .is_some_and(|p| p.chunks_exact(4).all(|p| p[3] == 0))
+            {
+                pixels.tiles.remove(&key);
+            }
+            let data = pixels.tiles.get(&(b.tx, b.ty)).cloned();
+            if data == b.data {
+                continue;
+            }
+            after.push(TileSnapshot {
+                tx: b.tx,
+                ty: b.ty,
+                data,
+            });
+            before.push(b);
+        }
+        if before.is_empty() {
             return None;
         }
-        let after = self
-            .before
-            .iter()
-            .filter_map(|b| snapshot_tile(pixels, self.width, self.height, b.tx, b.ty))
-            .collect::<Vec<_>>();
         Some(HistoryEdit {
             layer: self.layer,
-            before: self.before,
+            offset: self.offset,
+            before,
             after,
         })
-    }
-
-    pub fn restore_before(&self, pixels: &mut [u8]) -> Option<PixelRect> {
-        apply_tiles(pixels, self.width, self.height, &self.before)
     }
 }
 
 enum HistoryEntry {
+    Raster {
+        layer: usize,
+        before: SparsePixels,
+        after: SparsePixels,
+    },
     Pixels(HistoryEdit),
     DeleteLayer {
         index: usize,
@@ -113,6 +129,16 @@ pub struct History {
 }
 
 impl History {
+    pub fn push_raster(&mut self, layer: usize, before: SparsePixels, after: SparsePixels) {
+        if before != after {
+            self.push_entry(HistoryEntry::Raster {
+                layer,
+                before,
+                after,
+            });
+        }
+    }
+
     pub fn push(&mut self, edit: HistoryEdit) {
         self.push_entry(HistoryEntry::Pixels(edit));
     }
@@ -143,9 +169,19 @@ impl History {
 
     pub fn undo(&mut self, project: &mut Project) -> Option<HistoryChange> {
         let change = match self.undo.last_mut()? {
+            HistoryEntry::Raster { layer, before, .. } => {
+                project.layers.get_mut(*layer)?.pixels = before.clone();
+                HistoryChange::Layers
+            }
             HistoryEntry::Pixels(edit) => {
                 let pixels = &mut project.layers.get_mut(edit.layer)?.pixels;
-                let rect = apply_tiles(pixels, project.width, project.height, &edit.before)?;
+                let rect = apply_tiles(
+                    pixels,
+                    project.width,
+                    project.height,
+                    edit.offset,
+                    &edit.before,
+                )?;
                 HistoryChange::Pixels {
                     layer: edit.layer,
                     rect,
@@ -176,9 +212,19 @@ impl History {
 
     pub fn redo(&mut self, project: &mut Project) -> Option<HistoryChange> {
         let change = match self.redo.last_mut()? {
+            HistoryEntry::Raster { layer, after, .. } => {
+                project.layers.get_mut(*layer)?.pixels = after.clone();
+                HistoryChange::Layers
+            }
             HistoryEntry::Pixels(edit) => {
                 let pixels = &mut project.layers.get_mut(edit.layer)?.pixels;
-                let rect = apply_tiles(pixels, project.width, project.height, &edit.after)?;
+                let rect = apply_tiles(
+                    pixels,
+                    project.width,
+                    project.height,
+                    edit.offset,
+                    &edit.after,
+                )?;
                 HistoryChange::Pixels {
                     layer: edit.layer,
                     rect,
@@ -210,73 +256,52 @@ impl History {
     }
 }
 
-fn snapshot_tile(pixels: &[u8], width: u32, height: u32, tx: u32, ty: u32) -> Option<TileSnapshot> {
-    let x = tx * TILE_SIZE;
-    let y = ty * TILE_SIZE;
-    if x >= width || y >= height {
-        return None;
-    }
-    let w = TILE_SIZE.min(width - x);
-    let h = TILE_SIZE.min(height - y);
-    let mut data = vec![0u8; (w * h * 4) as usize];
-    for row in 0..h {
-        let src = (((y + row) * width + x) * 4) as usize;
-        let dst = (row * w * 4) as usize;
-        data[dst..dst + (w * 4) as usize].copy_from_slice(&pixels[src..src + (w * 4) as usize]);
-    }
-    Some(TileSnapshot { tx, ty, w, h, data })
-}
-
 fn apply_tiles(
-    pixels: &mut [u8],
+    pixels: &mut SparsePixels,
     width: u32,
     height: u32,
+    offset: (i32, i32),
     tiles: &[TileSnapshot],
 ) -> Option<PixelRect> {
-    let mut dirty: Option<PixelRect> = None;
+    let mut dirty = PixelRect {
+        min_x: width,
+        min_y: height,
+        max_x: 0,
+        max_y: 0,
+    };
     for tile in tiles {
-        let x = tile.tx * TILE_SIZE;
-        let y = tile.ty * TILE_SIZE;
-        if x >= width || y >= height {
-            continue;
-        }
-        let w = tile.w.min(width - x);
-        let h = tile.h.min(height - y);
-        for row in 0..h {
-            let dst = (((y + row) * width + x) * 4) as usize;
-            let src = (row * tile.w * 4) as usize;
-            let bytes = (w * 4) as usize;
-            if src + bytes <= tile.data.len() && dst + bytes <= pixels.len() {
-                pixels[dst..dst + bytes].copy_from_slice(&tile.data[src..src + bytes]);
+        let key = (tile.tx, tile.ty);
+        match &tile.data {
+            Some(data) => {
+                pixels.tiles.insert(key, data.clone());
+            }
+            None => {
+                pixels.tiles.remove(&key);
             }
         }
-        let rect = PixelRect {
-            min_x: x,
-            min_y: y,
-            max_x: x + w,
-            max_y: y + h,
-        };
-        dirty = Some(match dirty {
-            Some(prev) => PixelRect {
-                min_x: prev.min_x.min(rect.min_x),
-                min_y: prev.min_y.min(rect.min_y),
-                max_x: prev.max_x.max(rect.max_x),
-                max_y: prev.max_y.max(rect.max_y),
-            },
-            None => rect,
-        });
+        let x = tile.tx * TILE_SIZE as i32 + offset.0;
+        let y = tile.ty * TILE_SIZE as i32 + offset.1;
+        dirty.min_x = dirty.min_x.min(x.clamp(0, width as i32) as u32);
+        dirty.min_y = dirty.min_y.min(y.clamp(0, height as i32) as u32);
+        dirty.max_x = dirty
+            .max_x
+            .max((x + TILE_SIZE as i32).clamp(0, width as i32) as u32);
+        dirty.max_y = dirty
+            .max_y
+            .max((y + TILE_SIZE as i32).clamp(0, height as i32) as u32);
     }
-    dirty
+    Some(dirty)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raster::Raster;
 
     #[test]
     fn undo_restores_only_touched_tiles() {
-        let mut pixels = vec![0u8; 128 * 128 * 4];
-        pixels[0] = 9;
+        let mut pixels = SparsePixels::default();
+        pixels.write(128, 0, 0, [9, 0, 0, 255]);
         let mut capture = EditCapture::new(0, 128, 128);
         capture.touch_rect(
             &pixels,
@@ -287,8 +312,8 @@ mod tests {
                 max_y: 1,
             },
         );
-        pixels[0] = 42;
-        let edit = capture.finish(&pixels).unwrap();
+        pixels.write(128, 0, 0, [42, 0, 0, 255]);
+        let edit = capture.finish(&mut pixels).unwrap();
         let mut history = History::default();
         history.push(edit);
         let layers = vec![crate::project::Layer {
@@ -306,9 +331,9 @@ mod tests {
         let HistoryChange::Pixels { rect, .. } = history.undo(&mut project).unwrap() else {
             panic!("Expected pixel edit")
         };
-        assert_eq!(project.layers[0].pixels[0], 9);
+        assert_eq!(project.layers[0].pixels.read(128, 0, 0)[0], 9);
         assert!(!rect.is_empty());
         history.redo(&mut project).unwrap();
-        assert_eq!(project.layers[0].pixels[0], 42);
+        assert_eq!(project.layers[0].pixels.read(128, 0, 0)[0], 42);
     }
 }

@@ -16,3 +16,5 @@ use host::Host;
 fn main() {
     Host::run(EditorApp::default());
 }
+
+mod raster;

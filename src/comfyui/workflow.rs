@@ -4,6 +4,70 @@ pub const EMBEDDED: &str = include_str!("../../comfyui/image.qwen_edit_21.json")
 pub const INPAINT: &str = include_str!("../../comfyui/image.sd_inpaint.json");
 pub const REDRAW: &str = include_str!("../../comfyui/image.sd_redraw.json");
 pub const DRAW: &str = include_str!("../../comfyui/image.sd_draw.json");
+pub const LINEART: &str = include_str!("../../comfyui/image.to_lineart.json");
+pub const DRAW_CN: &str = include_str!("../../comfyui/image.sd_draw_cn.json");
+
+#[derive(Clone, Copy)]
+pub struct ControlNetSettings {
+    pub strength: f32,
+    pub start_percent: f32,
+    pub end_percent: f32,
+}
+
+impl Default for ControlNetSettings {
+    fn default() -> Self {
+        Self { strength: 1.0, start_percent: 0.0, end_percent: 1.0 }
+    }
+}
+
+impl ControlNetSettings {
+    pub fn validate(&self, settings: &DrawSettings) -> Result<(), String> {
+        settings.validate_loras()?;
+        if !self.strength.is_finite() || !(0.0..=1.0).contains(&self.strength) {
+            return Err("ControlNet strength must be between 0 and 1".into());
+        }
+        if !self.start_percent.is_finite() || !self.end_percent.is_finite()
+            || !(0.0..=1.0).contains(&self.start_percent)
+            || !(self.start_percent..=1.0).contains(&self.end_percent)
+        {
+            return Err("ControlNet requires 0 <= start <= end <= 100%".into());
+        }
+        Ok(())
+    }
+}
+
+pub fn prepare_draw_cn(
+    filename: &str,
+    settings: &DrawSettings,
+    control: ControlNetSettings,
+    seed: u64,
+) -> Result<(Value, String), String> {
+    control.validate(settings)?;
+    let mut graph: Value =
+        serde_json::from_str(DRAW_CN).map_err(|e| format!("Invalid ControlNet workflow: {e}"))?;
+    patch(&mut graph, "ReferenceImage", "image", filename.into())?;
+    patch(&mut graph, "ControlNet", "strength", control.strength.into())?;
+    patch(&mut graph, "ControlNet", "start_percent", control.start_percent.into())?;
+    patch(&mut graph, "ControlNet", "end_percent", control.end_percent.into())?;
+    prepare_sd(graph, settings, seed)
+}
+
+pub fn validate_lineart_resolution(resolution: i32) -> Result<(), String> {
+    if !(64..=2048).contains(&resolution) || resolution % 64 != 0 {
+        return Err("Resolution must be 64–2048 px and a multiple of 64".into());
+    }
+    Ok(())
+}
+
+pub fn prepare_lineart(filename: &str, resolution: i32) -> Result<(Value, String), String> {
+    validate_lineart_resolution(resolution)?;
+    let mut graph: Value =
+        serde_json::from_str(LINEART).map_err(|e| format!("Invalid lineart workflow: {e}"))?;
+    patch(&mut graph, "Image", "image", filename.into())?;
+    patch(&mut graph, "Lineart", "resolution", resolution.into())?;
+    let output = node_id(&graph, "ImageSaveWithFormat (maga)")?;
+    Ok((graph, output))
+}
 
 #[derive(Clone)]
 pub struct LoraSelection {
@@ -197,6 +261,91 @@ fn patch(graph: &mut Value, title: &str, key: &str, value: Value) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn draw_cn_uses_reference_size_control_settings_and_lora_chain() {
+        let original: Value = serde_json::from_str(DRAW_CN).unwrap();
+        let control = ControlNetSettings { strength: 0.5, start_percent: 0.25, end_percent: 0.75 };
+        for mask in 0..8 {
+            let mut settings = DrawSettings {
+                model: Some("chosen.safetensors".into()),
+                positive: "forest".into(), negative: "text".into(),
+                width: -1, height: 0, ..Default::default()
+            };
+            for (i, lora) in settings.loras.iter_mut().enumerate() {
+                if mask & (1 << i) != 0 {
+                    lora.name = Some(format!("lora{i}"));
+                    lora.strength = 0.5;
+                }
+            }
+            let (graph, save) = prepare_draw_cn("test/reference.png", &settings, control, 42).unwrap();
+            assert_eq!(graph[&save], original[&save]);
+            for title in ["Image", "Get Image Size", "Load ControlNet Model"] {
+                let id = node_id(&graph, title).unwrap();
+                assert_eq!(graph[&id], original[&id]);
+            }
+            assert_eq!(graph[node_id(&graph, "ReferenceImage").unwrap()]["inputs"]["image"], "test/reference.png");
+            let cn = node_id(&graph, "ControlNet").unwrap();
+            assert_eq!(graph[&cn]["inputs"]["strength"], 0.5);
+            assert_eq!(graph[&cn]["inputs"]["start_percent"], 0.25);
+            assert_eq!(graph[&cn]["inputs"]["end_percent"], 0.75);
+            let sampler = node_id(&graph, "Sampler").unwrap();
+            assert_eq!(graph[&sampler]["inputs"]["seed"], 42);
+            for key in ["positive", "negative", "latent_image", "denoise"] {
+                assert_eq!(graph[&sampler]["inputs"][key], original[&sampler]["inputs"][key]);
+            }
+            let mut upstream = node_id(&graph, "Model").unwrap();
+            assert_eq!(graph[&upstream]["inputs"]["ckpt_name"], "chosen.safetensors");
+            for (i, lora) in settings.loras.iter().enumerate() {
+                let id = node_id(&graph, &format!("Lora{}", i + 1));
+                if let Some(name) = &lora.name {
+                    let id = id.unwrap();
+                    assert_eq!(graph[&id]["inputs"]["lora_name"], *name);
+                    assert_eq!(graph[&id]["inputs"]["strength_model"], 0.5);
+                    assert_eq!(graph[&id]["inputs"]["strength_clip"], 0.5);
+                    assert_eq!(graph[&id]["inputs"]["model"], serde_json::json!([upstream, 0]));
+                    assert_eq!(graph[&id]["inputs"]["clip"], serde_json::json!([upstream, 1]));
+                    upstream = id;
+                } else { assert!(id.is_err()); }
+            }
+            assert_eq!(graph[&sampler]["inputs"]["model"], serde_json::json!([upstream, 0]));
+            for (title, text) in [("Positive", "forest"), ("Negative", "text")] {
+                let id = node_id(&graph, title).unwrap();
+                assert_eq!(graph[&id]["inputs"]["text"], text);
+                assert_eq!(graph[&id]["inputs"]["clip"], serde_json::json!([upstream, 1]));
+            }
+        }
+        for invalid in [
+            ControlNetSettings { strength: -1.0, ..control },
+            ControlNetSettings { strength: f32::NAN, ..control },
+            ControlNetSettings { strength: 1.01, ..control },
+            ControlNetSettings { start_percent: -0.1, ..control },
+            ControlNetSettings { start_percent: 0.8, ..control },
+            ControlNetSettings { end_percent: 1.1, ..control },
+            ControlNetSettings { end_percent: f32::INFINITY, ..control },
+        ] {
+            assert!(prepare_draw_cn("ref.png", &DrawSettings::default(), invalid, 0).is_err());
+        }
+    }
+
+    #[test]
+    fn lineart_patches_input_and_resolution_and_preserves_graph() {
+        let original: Value = serde_json::from_str(LINEART).unwrap();
+        for resolution in [64, 256, 512, 1024, 2048] {
+            let (mut graph, save) = prepare_lineart("folder/source.png", resolution).unwrap();
+            assert_eq!(graph[&save], original[&save]);
+            let image = node_id(&graph, "Image").unwrap();
+            let lineart = node_id(&graph, "Lineart").unwrap();
+            assert_eq!(graph[&image]["inputs"]["image"], "folder/source.png");
+            assert_eq!(graph[&lineart]["inputs"]["resolution"], resolution);
+            graph[&image]["inputs"]["image"] = original[&image]["inputs"]["image"].clone();
+            graph[&lineart]["inputs"]["resolution"] = original[&lineart]["inputs"]["resolution"].clone();
+            assert_eq!(graph, original);
+        }
+        for resolution in [-64, 0, 63, 513, 2112, i32::MAX] {
+            assert!(prepare_lineart("source.png", resolution).is_err());
+        }
+    }
+
     #[test]
     fn inpaint_patches_both_inputs_and_preserves_mask_latent_connections() {
         let settings = DrawSettings {

@@ -1,4 +1,5 @@
 use std::fs;
+use crate::raster::SparsePixels;
 use std::path::{Path, PathBuf};
 
 use image::{DynamicImage, ImageFormat, RgbaImage};
@@ -290,23 +291,10 @@ impl Workspace {
                 layer.name = asset.name;
             }
         } else {
-            // New layer sized to document; blit asset top-left.
             doc.add_layer();
-            let layer = doc.active_layer;
-            let (dw, dh) = (doc.width, doc.height);
-            let copy_w = asset.width.min(dw);
-            let copy_h = asset.height.min(dh);
-            {
-                let target = &mut doc.layers[layer];
-                target.name = asset.name;
-                for y in 0..copy_h {
-                    for x in 0..copy_w {
-                        let src = ((y * asset.width + x) * 4) as usize;
-                        let dst = ((y * dw + x) * 4) as usize;
-                        target.pixels[dst..dst + 4].copy_from_slice(&asset.pixels[src..src + 4]);
-                    }
-                }
-            }
+            let target = &mut doc.layers[doc.active_layer];
+            target.name = asset.name;
+            target.pixels = SparsePixels::from_rgba(&asset.pixels, asset.width, asset.height);
         }
         self.rebuild_active_thumb_now();
         Ok(())
@@ -335,12 +323,12 @@ impl Workspace {
         for doc in &self.documents {
             let mut layers = Vec::new();
             for (i, layer) in doc.project.layers.iter().enumerate() {
-                let layer_path = format!("/documents/{}/layers/{i}.png", doc.id);
+                let layer_path = format!("/documents/{}/layers/{i}.tiles", doc.id);
                 if doc.project.width > 0 && doc.project.height > 0 {
                     files.push(WriteFile::new(
                         layer_path.clone(),
-                        IMAGE_KIND,
-                        encode_png_rgba(&layer.pixels, doc.project.width, doc.project.height)?,
+                        "application/x-rgba-tiles-64",
+                        layer.pixels.encode(),
                     ));
                 }
                 layers.push(LayerMeta {
@@ -361,7 +349,7 @@ impl Workspace {
         }
         let manifest = WorkspaceManifest {
             format: "mega-image-editor".into(),
-            version: 3,
+            version: 5,
             active_document: self.active_document.min(self.documents.len().saturating_sub(1)),
             assets: asset_metas,
             documents: doc_metas,
@@ -383,21 +371,9 @@ impl Workspace {
             .map_err(|e| format!("Project has no valid manifest: {e}"))?;
         let value: serde_json::Value = serde_json::from_slice(&manifest_bytes)
             .map_err(|e| format!("Invalid project manifest: {e}"))?;
-        let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(1);
-        if version <= 2 {
-            let project = Project::open(path)?;
-            let mut ws = Self::default();
-            ws.documents.clear();
-            ws.documents
-                .push(Document::new("doc_1".into(), "Document 1".into(), project));
-            ws.active_document = 0;
-            ws.path = Some(path.to_path_buf());
-            ws.next_id = 2;
-            return Ok(ws);
-        }
         let manifest: WorkspaceManifest = serde_json::from_value(value)
             .map_err(|e| format!("Invalid project manifest: {e}"))?;
-        if manifest.format != "mega-image-editor" || manifest.version > 3 {
+        if manifest.format != "mega-image-editor" || manifest.version != 5 {
             return Err("Unsupported project format or version".into());
         }
         let mut next_id = 1u64;
@@ -426,25 +402,17 @@ impl Workspace {
         for meta in &manifest.documents {
             bump_id(&meta.id, &mut next_id);
             let mut layers = Vec::new();
-            let mut width = meta.width;
-            let mut height = meta.height;
+            let width = meta.width;
+            let height = meta.height;
             for layer_meta in &meta.layers {
                 let bytes = archive
                     .read_all(&layer_meta.path)
                     .map_err(|e| format!("Layer '{}' missing: {e}", layer_meta.name))?;
-                let rgba = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
-                    .map_err(|e| format!("Cannot decode layer '{}': {e}", layer_meta.name))?
-                    .to_rgba8();
-                let (lw, lh) = rgba.dimensions();
-                if width == 0 || height == 0 {
-                    width = lw;
-                    height = lh;
-                }
                 layers.push(Layer {
                     name: layer_meta.name.clone(),
                     visible: layer_meta.visible,
                     opacity: layer_meta.opacity.clamp(0.0, 1.0),
-                    pixels: rgba.into_raw(),
+                    pixels: SparsePixels::decode(&bytes)?,
                 });
             }
             let mut project = Project {

@@ -1,0 +1,207 @@
+{
+  "4": {
+    "inputs": {
+      "ckpt_name": "blendermixIllustrious_v01.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Model"
+    }
+  },
+  "5": {
+    "inputs": {
+      "width": [
+        "18",
+        0
+      ],
+      "height": [
+        "18",
+        1
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Image"
+    }
+  },
+  "6": {
+    "inputs": {
+      "text": "beautiful scenery nature glass bottle landscape, , purple galaxy bottle,",
+      "clip": [
+        "20",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Positive"
+    }
+  },
+  "7": {
+    "inputs": {
+      "text": "text, watermark",
+      "clip": [
+        "20",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Negative"
+    }
+  },
+  "10": {
+    "inputs": {
+      "lora_name": "2B_clean.safetensors",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": [
+        "4",
+        0
+      ],
+      "clip": [
+        "4",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "Lora1"
+    }
+  },
+  "11": {
+    "inputs": {
+      "seed": 205638098271855,
+      "steps": 20,
+      "cfg": 7,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "preview_method": "auto",
+      "vae_decode": "true",
+      "model": [
+        "20",
+        0
+      ],
+      "positive": [
+        "14",
+        0
+      ],
+      "negative": [
+        "14",
+        1
+      ],
+      "latent_image": [
+        "5",
+        0
+      ],
+      "optional_vae": [
+        "4",
+        2
+      ]
+    },
+    "class_type": "KSampler (Efficient)",
+    "_meta": {
+      "title": "Sampler"
+    }
+  },
+  "12": {
+    "inputs": {
+      "name": "img",
+      "image_format": "webp",
+      "quality": 0.95,
+      "images": [
+        "11",
+        5
+      ]
+    },
+    "class_type": "ImageSaveWithFormat (maga)",
+    "_meta": {
+      "title": "ImageSaveWithFormat (maga)"
+    }
+  },
+  "13": {
+    "inputs": {
+      "control_net_name": "controlnet-union-sdxl-1.0.safetensors"
+    },
+    "class_type": "ControlNetLoader",
+    "_meta": {
+      "title": "Load ControlNet Model"
+    }
+  },
+  "14": {
+    "inputs": {
+      "strength": 1,
+      "start_percent": 0,
+      "end_percent": 1,
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "control_net": [
+        "13",
+        0
+      ],
+      "image": [
+        "15",
+        0
+      ],
+      "vae": [
+        "4",
+        2
+      ]
+    },
+    "class_type": "ControlNetApplyAdvanced",
+    "_meta": {
+      "title": "ControlNet"
+    }
+  },
+  "15": {
+    "inputs": {
+      "image": "0001.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "ReferenceImage"
+    }
+  },
+  "19": {
+    "inputs": {
+      "lora_name": "2B_clean.safetensors",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": ["10", 0],
+      "clip": ["10", 1]
+    },
+    "class_type": "LoraLoader",
+    "_meta": { "title": "Lora2" }
+  },
+  "20": {
+    "inputs": {
+      "lora_name": "2B_clean.safetensors",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": ["19", 0],
+      "clip": ["19", 1]
+    },
+    "class_type": "LoraLoader",
+    "_meta": { "title": "Lora3" }
+  },
+  "18": {
+    "inputs": {
+      "image": [
+        "15",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Get Image Size"
+    }
+  }
+}
