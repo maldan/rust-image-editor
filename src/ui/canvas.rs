@@ -33,6 +33,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             app.handle_canvas_edit(view);
             app.canvas_cursor = app.transform_cursor(view);
         }
+        if app.eyedropper_armed() && app.canvas_rect.contains(app.input.mouse_pos) {
+            app.canvas_cursor = Some(crate::editing::TransformCursor::Eyedropper);
+        }
         if app.preview_asset.is_none() {
             app.draw_lasso_path(ui, view);
         }

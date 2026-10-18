@@ -53,9 +53,35 @@ pub struct Job {
     receiver: mpsc::Receiver<JobResult>,
     pub progress: Arc<Mutex<Progress>>,
     cancel: Arc<AtomicBool>,
+    remote: Option<Arc<RemoteCancellation>>,
+}
+
+struct RemoteCancellation {
+    config: HostConfig,
+    prompt_id: Arc<Mutex<Option<String>>>,
+    stop_ws: Arc<AtomicBool>,
+    requested: AtomicBool,
+    finished: AtomicBool,
+}
+
+impl RemoteCancellation {
+    fn stop(&self) -> Result<(),String> {
+        // An upload/submission may still be in flight. If no prompt id is known
+        // yet, the generation worker retries cleanup once it receives that id.
+        let Some(id) = self.prompt_id.lock().unwrap().clone() else { return Ok(()); };
+        if self.requested.swap(true,Ordering::Relaxed) { return Ok(()); }
+        Client::new(self.config.clone())?.cancel(&id)
+    }
 }
 
 impl Job {
+    #[cfg(test)]
+    pub(crate) fn pending() -> (Self,mpsc::Sender<JobResult>) {
+        let (sender,receiver) = mpsc::channel();
+        (Self {receiver,progress:Arc::new(Mutex::new(Progress::default())),
+            cancel:Arc::new(AtomicBool::new(false)),remote:None},sender)
+    }
+
     #[cfg(test)]
     pub(crate) fn with_result(result: JobResult) -> Self {
         let (sender, receiver) = mpsc::channel();
@@ -64,6 +90,7 @@ impl Job {
             receiver,
             progress: Arc::new(Mutex::new(Progress::default())),
             cancel: Arc::new(AtomicBool::new(false)),
+            remote: None,
         }
     }
 
@@ -158,23 +185,24 @@ impl Job {
         }));
         let worker_cancel = cancel.clone();
         let worker_progress = progress.clone();
+        let remote = Arc::new(RemoteCancellation {
+            config:config.clone(),prompt_id:Arc::new(Mutex::new(None)),
+            stop_ws:Arc::new(AtomicBool::new(false)),requested:AtomicBool::new(false),finished:AtomicBool::new(false),
+        });
+        let worker_remote = remote.clone();
         std::thread::spawn(move || {
-            let prompt_id = Arc::new(Mutex::new(None));
-            let stop_ws = Arc::new(AtomicBool::new(false));
             let result = run(
-                config.clone(),
+                config,
                 request,
                 &worker_cancel,
                 worker_progress,
-                prompt_id.clone(),
-                stop_ws.clone(),
+                worker_remote.prompt_id.clone(),
+                worker_remote.stop_ws.clone(),
             );
-            stop_ws.store(true, Ordering::Relaxed);
+            worker_remote.stop_ws.store(true, Ordering::Relaxed);
             let cancelled = worker_cancel.load(Ordering::Relaxed);
             let result = if cancelled || result.is_err() {
-                let id = prompt_id.lock().unwrap().clone();
-                let remote_error =
-                    id.and_then(|id| Client::new(config).and_then(|c| c.cancel(&id)).err());
+                let remote_error = worker_remote.stop().err();
                 if let Some(error) = remote_error {
                     JobResult::Failed(format!(
                         "Local job stopped; remote cancellation could not be confirmed: {error}"
@@ -190,17 +218,32 @@ impl Job {
                     Err(error) => JobResult::Failed(error),
                 }
             };
+            worker_remote.finished.store(true,Ordering::Relaxed);
             let _ = sender.send(result);
         });
         Self {
             receiver,
             progress,
             cancel,
+            remote: Some(remote),
         }
     }
 
     pub fn cancel(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        if self.cancel.swap(true,Ordering::Relaxed) { return; }
+        if let Some(remote) = &self.remote {
+            remote.stop_ws.store(true,Ordering::Relaxed);
+            if !remote.finished.load(Ordering::Relaxed) {
+                let remote = remote.clone();
+                // Independent of a stalled upload/history/download request.
+                // Neither cancellation nor dropping a Job waits for the server.
+                std::thread::spawn(move || {
+                    if let Err(error) = remote.stop() {
+                        log::warn!("Remote cancellation could not be confirmed: {error}");
+                    }
+                });
+            }
+        }
     }
 
     pub fn is_cancelling(&self) -> bool {
@@ -208,6 +251,7 @@ impl Job {
     }
 
     pub fn poll(&self) -> Option<JobResult> {
+        if self.is_cancelling() { return Some(JobResult::Cancelled); }
         match self.receiver.try_recv() {
             Ok(JobResult::Done(_)) if self.is_cancelling() => Some(JobResult::Cancelled),
             Ok(result) => Some(result),
@@ -373,12 +417,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cancelling_a_pending_job_reports_cancelled_without_worker_response() {
+        let (job,_sender) = Job::pending();
+        assert!(job.poll().is_none());
+        job.cancel();
+        assert!(matches!(job.poll(),Some(JobResult::Cancelled)));
+    }
+
+    #[test]
+    fn cancellation_before_prompt_id_is_known_keeps_late_cleanup_available() {
+        let remote = RemoteCancellation {
+            config:HostConfig {host:String::new(),ws:String::new(),login:String::new(),password:String::new()},
+            prompt_id:Arc::new(Mutex::new(None)),stop_ws:Arc::new(AtomicBool::new(false)),
+            requested:AtomicBool::new(false),finished:AtomicBool::new(false),
+        };
+        assert!(remote.stop().is_ok());
+        assert!(!remote.requested.load(Ordering::Relaxed),"an in-flight submission must still be cleaned up once its id arrives");
+    }
+
+    #[test]
     fn cancelled_job_discards_late_success() {
         let (tx, rx) = mpsc::channel();
         let job = Job {
             receiver: rx,
             progress: Arc::new(Mutex::new(Progress::default())),
             cancel: Arc::new(AtomicBool::new(false)),
+            remote: None,
         };
         job.cancel();
         tx.send(JobResult::Done(RgbaImage::new(1, 1))).ok();

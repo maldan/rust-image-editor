@@ -136,7 +136,6 @@ pub struct AiDialog {
     pub preview_dirty: bool,
     pub preview_view: PreviewView,
     pub preview_input: crate::host::FrameInput,
-    pub close_when_stopped: bool,
 }
 
 impl Default for AiDialog {
@@ -172,7 +171,6 @@ impl Default for AiDialog {
             preview_dirty: false,
             preview_view: PreviewView::default(),
             preview_input: Default::default(),
-            close_when_stopped: false,
         }
     }
 }

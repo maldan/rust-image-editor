@@ -27,6 +27,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             ui.space(12.0);
             ui.label(&format!("Opacity: {:.0}%", app.brush_opacity * 100.0));
             ui.slider("brush_opacity", &mut app.brush_opacity, 0.01..=1.0);
+            ui.space(8.0);
+            ui.label("Ctrl — eyedropper");
         }
         Tool::RectangleSelect | Tool::Lasso => {
             ui.label(if app.tool == Tool::Lasso { "Draw a freehand outline to select." } else { "Drag on the image to select an area." });

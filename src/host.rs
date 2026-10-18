@@ -16,7 +16,8 @@ use crate::view::CanvasView;
 use crate::editing::TransformCursor;
 
 pub const CANVAS_TEXTURE: u32 = 1;
-pub const AI_PREVIEW_TEXTURE: u32 = 2;
+/// Slot 2 is `mega_ui::TEX_SLOT_COLOR_SV` (the color-picker square).
+pub const AI_PREVIEW_TEXTURE: u32 = 3;
 
 /// Small outlined circular arrow for rotation (there is no native Rotate cursor).
 /// Generate once at startup; the native cursor follows the mouse without redraws.
@@ -47,6 +48,35 @@ fn rotation_cursor_image() -> (Vec<u8>,u16) {
         pixels.extend_from_slice(&[color,color,color,(alpha*255.0).round() as u8]);
     } }
     (pixels,size)
+}
+
+/// Eyedropper pointing down-left. Hotspot is the glass tip, in pixels.
+fn eyedropper_cursor_image() -> (Vec<u8>, u16, u16, u16) {
+    let size = 32u16;
+    let tip = Vec2::new(6.0, 26.0);
+    let bulb = Vec2::new(22.0, 9.0);
+    let axis = bulb - tip;
+    let mut pixels = Vec::with_capacity(size as usize * size as usize * 4);
+    for y in 0..size {
+        for x in 0..size {
+            let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+            let t = ((p - tip).dot(axis) / axis.length_squared()).clamp(0.0, 1.0);
+            let shaft = (p - tip - axis * t).length();
+            let radius = 0.55 + t * 2.1;
+            let bulb_d = (p - bulb).length();
+            let fill = shaft < radius || bulb_d < 4.4;
+            let edge = shaft < radius + 1.15 || bulb_d < 5.6;
+            let (rgb, alpha) = if fill {
+                ([245u8, 245, 245], 255u8)
+            } else if edge {
+                ([12u8, 12, 12], 255)
+            } else {
+                ([0u8, 0, 0], 0)
+            };
+            pixels.extend_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
+        }
+    }
+    (pixels, size, tip.x as u16, tip.y as u16)
 }
 
 struct Gpu {
@@ -253,6 +283,7 @@ pub struct Host<S: Scene> {
     elapsed: f32,
     cursor: winit::window::Cursor,
     rotate_cursor: Option<winit::window::CustomCursor>,
+    dropper_cursor: Option<winit::window::CustomCursor>,
     draw_stats: DrawStats,
     closing: bool,
     keyboard_captured: bool,
@@ -276,6 +307,7 @@ impl<S: Scene> Host<S> {
             elapsed: 0.0,
             cursor: winit::window::CursorIcon::Default.into(),
             rotate_cursor: None,
+            dropper_cursor: None,
             draw_stats: DrawStats::default(),
             closing: false,
             keyboard_captured: false,
@@ -464,6 +496,8 @@ impl<S: Scene> Host<S> {
             match cursor {
                 TransformCursor::Rotate => self.rotate_cursor.clone().map(winit::window::Cursor::Custom)
                     .unwrap_or(winit::window::CursorIcon::Crosshair.into()),
+                TransformCursor::Eyedropper => self.dropper_cursor.clone().map(winit::window::Cursor::Custom)
+                    .unwrap_or(winit::window::CursorIcon::Crosshair.into()),
                 TransformCursor::Move => winit::window::CursorIcon::Move.into(),
                 TransformCursor::Pivot => winit::window::CursorIcon::Crosshair.into(),
                 TransformCursor::ResizeEw => winit::window::CursorIcon::EwResize.into(),
@@ -505,6 +539,10 @@ impl<S: Scene> ApplicationHandler for Host<S> {
         let (pixels,size) = rotation_cursor_image();
         if let Ok(source) = winit::window::CustomCursor::from_rgba(pixels,size,size,size/2,size/2) {
             self.rotate_cursor = Some(event_loop.create_custom_cursor(source));
+        }
+        let (pixels, size, hot_x, hot_y) = eyedropper_cursor_image();
+        if let Ok(source) = winit::window::CustomCursor::from_rgba(pixels, size, size, hot_x, hot_y) {
+            self.dropper_cursor = Some(event_loop.create_custom_cursor(source));
         }
         self.init_gpu(window.clone());
         window.request_redraw();
@@ -584,6 +622,9 @@ impl<S: Scene> ApplicationHandler for Host<S> {
                 self.input.modifiers = mods.state();
                 self.input.key_ctrl = mods.state().control_key() || mods.state().super_key();
                 self.input.key_shift = mods.state().shift_key();
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
@@ -612,6 +653,16 @@ impl<S: Scene> ApplicationHandler for Host<S> {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod texture_slot_tests {
+    #[test]
+    fn canvas_and_ai_preview_do_not_overwrite_the_color_picker() {
+        assert_ne!(super::CANVAS_TEXTURE, mega_ui::TEX_SLOT_COLOR_SV);
+        assert_ne!(super::AI_PREVIEW_TEXTURE, mega_ui::TEX_SLOT_COLOR_SV);
+        assert_ne!(super::CANVAS_TEXTURE, super::AI_PREVIEW_TEXTURE);
     }
 }
 

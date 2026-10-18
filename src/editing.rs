@@ -767,6 +767,22 @@ pub fn fill_bucket(
     changed.then_some(bounds)
 }
 
+/// One composited pixel: visible layers, opacity, and offsets. Straight RGBA.
+pub fn composite_pixel(layers: &[crate::project::Layer], x: i32, y: i32) -> [u8; 4] {
+    let mut dst = [0u8; 4];
+    for layer in layers {
+        if !layer.visible {
+            continue;
+        }
+        let opacity = layer.opacity.clamp(0.0, 1.0);
+        if opacity <= f32::EPSILON {
+            continue;
+        }
+        over(&mut dst, &layer.pixels.read(0, x, y), opacity);
+    }
+    dst
+}
+
 pub fn composite_layers(layers: &[crate::project::Layer], width: u32, height: u32) -> Vec<u8> {
     let mut out = vec![0u8; width as usize * height as usize * 4];
     composite_region(layers, width, height, 0, 0, width, height, &mut out);
@@ -845,6 +861,24 @@ pub fn merge_layers(lower: &crate::project::Layer, upper: &crate::project::Layer
 mod merge_tests {
     use super::*;
     use crate::{project::Layer, raster::SparsePixels};
+
+    #[test]
+    fn composite_pixel_matches_the_full_image_composite() {
+        let mut lower = Layer { name: "Lower".into(), visible: true, opacity: 0.5,
+            pixels: SparsePixels::from_rgba(&[200, 40, 80, 255, 0, 0, 0, 0, 10, 20, 30, 128], 3, 1) };
+        lower.pixels.offset = (1, 2);
+        let mut upper = Layer { name: "Upper".into(), visible: false, opacity: 1.0,
+            pixels: SparsePixels::from_rgba(&[255, 255, 255, 255].repeat(3), 3, 1) };
+        upper.pixels.offset = (1, 2);
+        let layers = [lower, upper];
+        let full = composite_layers(&layers, 5, 4);
+        for y in 0..4u32 {
+            for x in 0..5u32 {
+                let i = ((y * 5 + x) * 4) as usize;
+                assert_eq!(composite_pixel(&layers, x as i32, y as i32), full[i..i + 4]);
+            }
+        }
+    }
 
     #[test]
     fn merge_down_matches_composite_with_alpha_opacity_offsets_and_visibility() {
@@ -997,6 +1031,7 @@ pub enum TransformCursor {
     ResizeNs,
     ResizeNwse,
     ResizeNesw,
+    Eyedropper,
 }
 
 impl TransformCursor {

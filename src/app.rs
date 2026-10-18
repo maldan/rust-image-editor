@@ -7,7 +7,7 @@ use mega_ui::{DockState, Rect, Theme, Ui};
 use crate::canvas_gpu::{CanvasOverlay, CanvasRenderer, FloatingDraw, LayerDraw};
 use crate::editing::{
     BrushStroke, FloatingTransform, PixelRect, SelectMode, Selection, SoftBrushCoverage, Tool, TransformHit, TransformCursor,
-    apply_brush, brush_dirty_bounds, fill_bucket, flood_mask,
+    apply_brush, brush_dirty_bounds, composite_pixel, fill_bucket, flood_mask,
 };
 use crate::history::{EditCapture, History, HistoryChange};
 use crate::host::{FrameInput, Scene};
@@ -207,7 +207,6 @@ impl EditorApp {
         if mode == AiMode::Inpaint && self.ai.source == AiSource::Selection { self.ai.source = AiSource::Layer; }
         self.ai.catalog_load = None;
         if mode.uses_sd() { self.ai.catalog = Default::default(); }
-        self.ai.close_when_stopped = false;
         self.ai.preview = None;
         self.ai.result = None;
         self.ai.input_region = None;
@@ -244,7 +243,6 @@ impl EditorApp {
             self.ai.result = None;
             self.ai.preview_dirty = false;
             self.ai.fraction = None;
-            self.ai.close_when_stopped = false;
             self.ai.job = Some(crate::comfyui::Job::start_draw(config, self.ai.draw_settings.clone()));
             return;
         }
@@ -289,7 +287,6 @@ impl EditorApp {
         self.ai.result = None;
         self.ai.preview_dirty = false;
         self.ai.fraction = None;
-        self.ai.close_when_stopped = false;
         self.ai.job = Some(if let Some(mask) = mask {
             crate::comfyui::Job::start_inpaint(config, image, mask, self.ai.scale, self.ai.draw_settings.clone(), self.ai.denoise)
         } else if self.ai.mode == AiMode::Redraw {
@@ -377,24 +374,23 @@ impl EditorApp {
     }
 
     pub fn cancel_ai(&mut self) {
-        if let Some(job) = &self.ai.job {
+        if let Some(job) = self.ai.job.take() {
             job.cancel();
-            self.ai.message = "Cancelling…".into();
+            self.ai.result = None;
+            self.ai.fraction = None;
+            self.ai.message = "Cancelled locally; remote stop requested in background".into();
         }
     }
 
     pub fn close_ai(&mut self) {
-        if self.ai.job.is_some() {
-            self.ai.close_when_stopped = true;
-            self.cancel_ai();
-        } else {
-            self.ai.open = false;
-            self.ai.result = None;
-            self.ai.input_region = None;
-            self.ai.preview = None;
-            self.ai.preview_dirty = false;
-            self.ai.fraction = None;
-        }
+        self.cancel_ai();
+        self.ai.open = false;
+        self.ai.catalog_load = None;
+        self.ai.result = None;
+        self.ai.input_region = None;
+        self.ai.preview = None;
+        self.ai.preview_dirty = false;
+        self.ai.fraction = None;
     }
 
     pub fn accept_ai(&mut self) {
@@ -467,7 +463,6 @@ impl EditorApp {
             crate::comfyui::JobResult::Cancelled => {
                 self.ai.message = "Cancelled".into();
                 self.ai.fraction = None;
-                if self.ai.close_when_stopped { self.close_ai(); }
             }
         }
     }
@@ -1306,7 +1301,30 @@ impl EditorApp {
         }
     }
 
+    /// Brush tool with Ctrl held samples the composited image instead of painting.
+    pub fn eyedropper_armed(&self) -> bool {
+        self.tool == Tool::Brush
+            && self.input.key_ctrl
+            && self.brush_last.is_none()
+            && self.preview_asset.is_none()
+    }
+
+    fn pick_composite_color(&mut self, view: CanvasView) {
+        let Some((x, y)) = screen_to_pixel(self.input.mouse_pos, view) else {
+            return;
+        };
+        let pixel = composite_pixel(&self.project().layers, x as i32, y as i32);
+        self.brush_color = pixel.map(|channel| channel as f32 / 255.0);
+        self.status = format!("Picked #{:02X}{:02X}{:02X}", pixel[0], pixel[1], pixel[2]);
+    }
+
     fn handle_brush(&mut self, view: CanvasView, erase: bool) {
+        if self.eyedropper_armed() {
+            if self.input.mouse_pressed {
+                self.pick_composite_color(view);
+            }
+            return;
+        }
         let radius_screen = (self.brush_size * self.zoom * 0.5).max(0.5);
         let overlaps = brush_overlaps_image(self.input.mouse_pos, radius_screen, view);
         if self.input.mouse_pressed {
@@ -1558,7 +1576,8 @@ impl EditorApp {
 
 impl Scene for EditorApp {
     fn request_close(&mut self) -> bool {
-        if self.ai.job.is_some() { self.cancel_ai(); false } else { true }
+        self.cancel_ai();
+        true
     }
 
     fn title() -> &'static str {
@@ -1735,7 +1754,7 @@ impl Scene for EditorApp {
         if self.hsv.open && self.hsv.preview && self.hsv.document_id == self.workspace.active_doc().id {
             overlay.hsv = Some((self.hsv.layer,self.hsv.adjustment));
         }
-        if matches!(self.tool, Tool::Brush | Tool::SelectionBrush) {
+        if matches!(self.tool, Tool::Brush | Tool::SelectionBrush) && !self.eyedropper_armed() {
             let radius = (self.brush_size * self.zoom * 0.5).max(2.5);
             let expanded = Rect {
                 min: self.canvas_rect.min - Vec2::splat(radius),
@@ -1997,6 +2016,42 @@ mod sparse_layer_tests {
         assert_eq!(app.project().layers[0].pixels, original);
         app.redo();
         assert_eq!(app.project().layers[0].pixels, painted);
+    }
+
+    #[test]
+    fn ctrl_click_picks_the_composite_and_leaves_the_layer_unchanged() {
+        let mut app = document();
+        app.set_tool(Tool::Brush);
+        app.project_mut().layers[0].opacity = 0.5;
+        app.project_mut().add_layer();
+        app.project_mut().layers[1].pixels.write(0, 4, 4, [0, 0, 255, 255]);
+        let before = app.project().layers.clone();
+        app.canvas_rect = Rect::from_min_size(Vec2::ZERO, Vec2::splat(400.0));
+        app.brush_color = [1.0, 1.0, 1.0, 1.0];
+        let view = app.canvas_view().unwrap();
+        app.input.mouse_pos = view.image_to_screen(Vec2::new(2.5, 3.5));
+        app.input.mouse_pressed = true;
+        app.input.mouse_down = true;
+        app.input.key_ctrl = true;
+        assert!(app.eyedropper_armed());
+        app.handle_canvas_edit(view);
+        let covered = composite_pixel(&app.project().layers, 2, 3);
+        assert_ne!(covered, [0, 0, 0, 0]);
+        assert_eq!(app.brush_color, covered.map(|c| c as f32 / 255.0));
+        app.input.mouse_pos = view.image_to_screen(Vec2::new(4.5, 4.5));
+        app.handle_canvas_edit(view);
+        assert_eq!(app.brush_color, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(app.project().layers[0].pixels, before[0].pixels);
+        assert_eq!(app.project().layers[1].pixels, before[1].pixels);
+        assert!(app.brush_last.is_none());
+        assert!(app.canvas_present().unwrap().2.brush_center.is_none());
+        app.input.key_ctrl = false;
+        app.input.mouse_pressed = true;
+        app.handle_canvas_edit(view);
+        assert_ne!(app.project().layers[1].pixels, before[1].pixels);
+        app.input.mouse_pressed = false;
+        app.input.key_ctrl = true;
+        assert!(!app.eyedropper_armed());
     }
 
     fn document() -> EditorApp {
@@ -2731,6 +2786,49 @@ mod ai_tests {
         assert_eq!(app.image_size, Some((1, 1)));
         assert_eq!(app.project().layers.len(), 1);
         assert!(!app.dirty);
+    }
+
+    #[test]
+    fn hung_generation_dialog_closes_without_waiting_for_the_worker() {
+        let mut app = EditorApp::default();
+        app.project_mut().import_rgba(&[20,40,60,255],1,1).unwrap();
+        app.refresh_image().unwrap();
+        let original = app.project().layers[0].pixels.clone();
+        let (job,sender) = crate::comfyui::Job::pending();
+        assert!(job.poll().is_none());
+        app.ai.open = true;
+        app.ai.job = Some(job);
+        app.close_ai();
+        assert!(!app.ai.open,"dialog close must not depend on a network response");
+        assert!(app.ai.job.is_none());
+        assert!(sender.send(crate::comfyui::JobResult::Done(image::RgbaImage::new(1,1))).is_err(),
+            "late result must be detached from the editor");
+        assert_eq!(app.project().layers[0].pixels,original);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn hung_generation_does_not_prevent_application_exit() {
+        let mut app = EditorApp::default();
+        let (job,_sender) = crate::comfyui::Job::pending();
+        app.ai.job = Some(job);
+        assert!(app.request_close(),"window close must not wait for a stalled worker");
+        assert!(app.ai.job.is_none());
+    }
+
+    #[test]
+    fn cancelling_hung_generation_frees_dialog_and_rejects_late_results() {
+        let mut app = EditorApp::default();
+        let (job,old_sender) = crate::comfyui::Job::pending();
+        app.ai.open = true;
+        app.ai.job = Some(job);
+        app.cancel_ai();
+        assert!(app.ai.open && app.ai.job.is_none());
+        let (replacement,_new_sender) = crate::comfyui::Job::pending();
+        app.ai.job = Some(replacement);
+        assert!(old_sender.send(crate::comfyui::JobResult::Done(image::RgbaImage::new(1,1))).is_err());
+        app.poll_ai(&mut Ui::new());
+        assert!(app.ai.job.is_some() && app.ai.result.is_none());
     }
 
     #[test]
