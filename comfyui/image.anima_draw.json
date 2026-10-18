@@ -1,0 +1,162 @@
+{
+  "62": {
+    "inputs": {
+      "name": "",
+      "image_format": "webp",
+      "quality": 0.95,
+      "images": [
+        "63",
+        5
+      ]
+    },
+    "class_type": "ImageSaveWithFormat (maga)",
+    "_meta": {
+      "title": "ImageSaveWithFormat (maga)"
+    }
+  },
+  "63": {
+    "inputs": {
+      "seed": 343136744163220,
+      "steps": 20,
+      "cfg": 7,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "preview_method": "auto",
+      "vae_decode": "true",
+      "model": [
+        "60_44",
+        0
+      ],
+      "positive": [
+        "60_11",
+        0
+      ],
+      "negative": [
+        "60_12",
+        0
+      ],
+      "latent_image": [
+        "64",
+        0
+      ],
+      "optional_vae": [
+        "60_15",
+        0
+      ]
+    },
+    "class_type": "KSampler (Efficient)",
+    "_meta": {
+      "title": "Sampler"
+    }
+  },
+  "64": {
+    "inputs": {
+      "switch": false,
+      "on_false": [
+        "66",
+        0
+      ],
+      "on_true": [
+        "60_28",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "UseEmpty"
+    }
+  },
+  "65": {
+    "inputs": {
+      "image": "2sticker (1).webp"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "LoadImage"
+    }
+  },
+  "66": {
+    "inputs": {
+      "pixels": [
+        "65",
+        0
+      ],
+      "vae": [
+        "60_15",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE Encode"
+    }
+  },
+  "60_45": {
+    "inputs": {
+      "clip_name": "qwen_3_06b_base.safetensors",
+      "type": "stable_diffusion",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "60_15": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "60_28": {
+    "inputs": {
+      "width": 768,
+      "height": 1472,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Image"
+    }
+  },
+  "60_44": {
+    "inputs": {
+      "unet_name": "anima-preview3-base.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "60_12": {
+    "inputs": {
+      "text": "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, sepia",
+      "clip": [
+        "60_45",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Negative"
+    }
+  },
+  "60_11": {
+    "inputs": {
+      "text": "masterpiece, best quality, score_8, highres, newest, safe, \n1girl, solo, tsunade, naruto, standing, full body, looking at viewer, \ngentle smile, blonde hair, long hair, high ponytail, brown eyes, \nlarge breasts, nipples, nude, pussy, detailed skin, \ncel shading, anime style, clean lineart, vibrant colors, \nsoft studio lighting, simple white background",
+      "clip": [
+        "60_45",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Positive"
+    }
+  }
+}

@@ -185,6 +185,20 @@ impl SparsePixels {
         bounds
     }
 
+    /// Invert visible RGB values across the layer, preserving alpha and sparse bounds.
+    pub fn invert_colors(&mut self) -> bool {
+        let mut changed = false;
+        for tile in self.tiles.values_mut() {
+            if !tile.chunks_exact(4).any(|pixel| pixel[3] != 0) { continue; }
+            for pixel in Arc::make_mut(tile).chunks_exact_mut(4) {
+                if pixel[3] == 0 { continue; }
+                for channel in &mut pixel[..3] { *channel = 255 - *channel; }
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Turn near-transparent pixels into transparent black, including off-canvas pixels.
     pub fn fix_alpha(&mut self) -> usize {
         let mut changed = 0;

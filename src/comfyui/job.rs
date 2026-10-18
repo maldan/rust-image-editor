@@ -26,6 +26,7 @@ pub enum JobResult {
 
 enum InputWorkflow {
     Edit(String),
+    AnimeRedraw { settings: super::DrawSettings, denoise: f32 },
     Lineart(i32),
     DrawCn { settings: super::DrawSettings, control: super::ControlNetSettings },
     Upscale { settings: super::DrawSettings, upscale: super::UpscaleSettings },
@@ -47,6 +48,8 @@ enum Request {
         workflow: InputWorkflow,
     },
     Draw(super::DrawSettings),
+    AnimeDraw(super::DrawSettings),
+    QwenDraw(super::DrawSettings),
 }
 
 pub struct Job {
@@ -135,6 +138,23 @@ impl Job {
 
     pub fn start_draw(config: HostConfig, settings: super::DrawSettings) -> Self {
         Self::start_request(config, Request::Draw(settings))
+    }
+
+    pub fn start_qwen_draw(config: HostConfig, settings: super::DrawSettings) -> Self {
+        Self::start_request(config, Request::QwenDraw(settings))
+    }
+
+    pub fn start_anime_draw(config: HostConfig, settings: super::DrawSettings) -> Self {
+        Self::start_request(config, Request::AnimeDraw(settings))
+    }
+
+    pub fn start_anime_redraw(
+        config: HostConfig, pixels: RgbaImage, scale: f32,
+        settings: super::DrawSettings, denoise: f32,
+    ) -> Self {
+        Self::start_request(config, Request::Input {
+            pixels, scale, workflow: InputWorkflow::AnimeRedraw { settings, denoise },
+        })
     }
 
     pub fn start_redraw(
@@ -300,6 +320,8 @@ fn run(
     // Fresh randomness for every Run/Regenerate; stay within exact JSON integer range.
     let seed = rand::random::<u64>() & ((1_u64 << 53) - 1);
     let (graph, save_node) = match request {
+        Request::QwenDraw(settings) => super::workflow::prepare_qwen_draw(&settings, seed)?,
+        Request::AnimeDraw(settings) => super::workflow::prepare_anime(None, &settings, 1.0, seed)?,
         Request::Draw(settings) => super::workflow::prepare_draw(&settings, seed)?,
         Request::Input {
             pixels,
@@ -372,6 +394,9 @@ fn run(
                 }
                 InputWorkflow::Lineart(resolution) => {
                     super::workflow::prepare_lineart(&filename, resolution)?
+                }
+                InputWorkflow::AnimeRedraw { settings, denoise } => {
+                    super::workflow::prepare_anime(Some(&filename), &settings, denoise, seed)?
                 }
                 InputWorkflow::Redraw { settings, denoise } => {
                     super::workflow::prepare_redraw(&filename, &settings, denoise, seed)?

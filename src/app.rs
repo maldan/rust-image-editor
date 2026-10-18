@@ -68,6 +68,7 @@ pub struct EditorApp {
     floating: Option<FloatingTransform>,
     transform_drag: Option<TransformHit>,
     transform_last: Option<Vec2>,
+    pub transform_keep_aspect_ratio: bool,
     pub canvas_cursor: Option<TransformCursor>,
     pub layer_drag: Option<usize>,
     canvas_cleared: bool,
@@ -127,6 +128,7 @@ impl Default for EditorApp {
             floating: None,
             transform_drag: None,
             transform_last: None,
+            transform_keep_aspect_ratio: true,
             canvas_cursor: None,
             layer_drag: None,
             canvas_cleared: true,
@@ -169,8 +171,20 @@ impl EditorApp {
         self.open_ai_mode(AiMode::Edit);
     }
 
+    pub fn open_ai_qwen_draw(&mut self) {
+        self.open_ai_mode(AiMode::QwenDraw);
+    }
+
     pub fn open_ai_draw(&mut self) {
         self.open_ai_mode(AiMode::Draw);
+    }
+
+    pub fn open_ai_anime_draw(&mut self) {
+        self.open_ai_mode(AiMode::AnimeDraw);
+    }
+
+    pub fn open_ai_anime_redraw(&mut self) {
+        self.open_ai_mode(AiMode::AnimeRedraw);
     }
 
     pub fn open_ai_redraw(&mut self) {
@@ -228,7 +242,7 @@ impl EditorApp {
         if self.ai.job.is_some() { return; }
         self.ai.preview_view = Default::default();
         let Some(config) = self.ai.config.clone() else { return; };
-        if self.ai.mode == AiMode::Draw {
+        if !self.ai.mode.needs_input() {
             if let Err(error) = self.ai.draw_settings.validate() {
                 self.ai.message = error;
                 return;
@@ -243,10 +257,16 @@ impl EditorApp {
             self.ai.result = None;
             self.ai.preview_dirty = false;
             self.ai.fraction = None;
-            self.ai.job = Some(crate::comfyui::Job::start_draw(config, self.ai.draw_settings.clone()));
+            self.ai.job = Some(if self.ai.mode == AiMode::QwenDraw {
+                crate::comfyui::Job::start_qwen_draw(config, self.ai.draw_settings.clone())
+            } else if self.ai.mode == AiMode::AnimeDraw {
+                crate::comfyui::Job::start_anime_draw(config, self.ai.draw_settings.clone())
+            } else {
+                crate::comfyui::Job::start_draw(config, self.ai.draw_settings.clone())
+            });
             return;
         }
-        if matches!(self.ai.mode, AiMode::Redraw | AiMode::Inpaint) {
+        if matches!(self.ai.mode, AiMode::Redraw | AiMode::AnimeRedraw | AiMode::Inpaint) {
             if let Err(error) = self.ai.draw_settings.validate_redraw(self.ai.denoise) {
                 self.ai.message = error;
                 return;
@@ -289,6 +309,8 @@ impl EditorApp {
         self.ai.fraction = None;
         self.ai.job = Some(if let Some(mask) = mask {
             crate::comfyui::Job::start_inpaint(config, image, mask, self.ai.scale, self.ai.draw_settings.clone(), self.ai.denoise)
+        } else if self.ai.mode == AiMode::AnimeRedraw {
+            crate::comfyui::Job::start_anime_redraw(config, image, self.ai.scale, self.ai.draw_settings.clone(), self.ai.denoise)
         } else if self.ai.mode == AiMode::Redraw {
             crate::comfyui::Job::start_redraw(config, image, self.ai.scale, self.ai.draw_settings.clone(), self.ai.denoise)
         } else if self.ai.mode == AiMode::Lineart {
@@ -408,7 +430,7 @@ impl EditorApp {
         let action = self.ai.mode.layer_prefix();
         let name = format!("{action} {}", self.workspace.active().layers.len() + 1);
         let project = self.workspace.active_mut();
-        let insertion = if self.ai.mode == AiMode::Draw && (project.width == 0 || project.height == 0) {
+        let insertion = if !self.ai.mode.needs_input() && (project.width == 0 || project.height == 0) {
             project.import_rgba(image.as_raw(), image.width(), image.height()).map(|()| {
                 project.layers[0].name = name;
                 project.sync_manifest_pub();
@@ -767,6 +789,21 @@ impl EditorApp {
             }
             Err(error) => self.show_error(ui, error),
         }
+    }
+
+    pub fn invert_layer(&mut self) {
+        if self.ai.open || self.hsv.open || self.project().layers.is_empty() { return; }
+        self.close_asset_preview();
+        self.commit_transform();
+        let index = self.project().active_layer;
+        let Some(layer) = self.workspace.active_mut().layers.get_mut(index) else { return; };
+        let before = layer.pixels.clone();
+        if !layer.pixels.invert_colors() { return; }
+        self.history.push_raster(index, before, layer.pixels.clone());
+        self.layers_reload = true;
+        self.dirty = true;
+        self.workspace.mark_active_thumb_dirty();
+        self.status = "Layer colors inverted".into();
     }
 
     pub fn fix_alpha(&mut self) {
@@ -1456,6 +1493,15 @@ impl EditorApp {
         self.status = "Transform — inside move · outside rotate · corners scale · Enter apply · Esc cancel".into();
     }
 
+    pub fn flip_transform(&mut self, horizontal: bool) {
+        if self.tool != Tool::Transform || self.ai.open || self.hsv.open || self.preview_asset.is_some() { return; }
+        self.begin_transform();
+        let Some(floating) = self.floating.as_mut() else { return; };
+        if horizontal { floating.flip_x = !floating.flip_x; }
+        else { floating.flip_y = !floating.flip_y; }
+        self.status = if horizontal { "Transform: Flip X" } else { "Transform: Flip Y" }.into();
+    }
+
     pub fn cancel_transform(&mut self) {
         if self.floating.take().is_none() {
             self.transform_drag = None;
@@ -1482,7 +1528,8 @@ impl EditorApp {
         let Some(pixels) = self.workspace.active_mut().layers.get_mut(layer).map(|l| &mut l.pixels) else { return; };
         let before = pixels.clone();
         let mut transformed_selection = None;
-        if floating.whole_layer && floating.scale == 1.0 && floating.rotation == 0.0 {
+        if floating.whole_layer && floating.scale == Vec2::ONE && floating.rotation == 0.0
+            && !floating.flip_x && !floating.flip_y {
             let origin = glam::Vec2::new(floating.origin_x as f32 + floating.bw as f32 * 0.5,
                 floating.origin_y as f32 + floating.bh as f32 * 0.5);
             let delta = (floating.center - origin).round();
@@ -1553,17 +1600,18 @@ impl EditorApp {
         if self.input.mouse_down
             && let (Some(hit), Some(prev)) = (self.transform_drag, self.transform_last)
         {
-            let mut scale = 1.0f32;
+            let mut scale = Vec2::ONE;
             let mut rotation = 0.0f32;
             if let Some(floating) = self.floating.as_mut() {
+                floating.keep_aspect_ratio = self.transform_keep_aspect_ratio;
                 floating.drag(hit,prev,image_pos);
                 scale = floating.scale;
                 rotation = floating.rotation;
             }
             self.transform_last = Some(image_pos);
             self.status = format!(
-                "Transform  scale {:.2}  rot {:.0}°",
-                scale,
+                "Transform  scale {:.2} × {:.2}  rot {:.0}°",
+                scale.x, scale.y,
                 rotation.to_degrees()
             );
         }
@@ -1779,7 +1827,7 @@ impl Scene for EditorApp {
                 origin: Vec2::new(floating.origin_x as f32, floating.origin_y as f32),
                 size: Vec2::new(floating.bw as f32, floating.bh as f32),
             });
-            let corners = floating.corners().map(|p| view.image_to_screen(p));
+            let corners = floating.source_corners().map(|p| view.image_to_screen(p));
             overlay.transform_corners = Some(corners);
             overlay.transform_pivot = Some(view.image_to_screen(floating.pivot));
         }
@@ -1903,6 +1951,52 @@ mod transform_interaction_tests {
         app.input.mouse_down = down;
         app.input.mouse_released = !down;
         app.handle_canvas_edit(view);
+    }
+
+    #[test]
+    fn transform_flip_buttons_preview_cancel_commit_and_undo() {
+        let bytes = [10,20,30,255, 40,50,60,255, 70,80,90,255, 100,110,120,255];
+        let mut app = EditorApp::default();
+        app.project_mut().import_rgba(&bytes,2,2).unwrap();
+        app.sync_layer_structure();
+        app.set_tool(Tool::Transform);
+        let original = app.project().layers[0].pixels.clone();
+        let corners = app.floating.as_ref().unwrap().corners();
+        app.flip_transform(true);
+        app.flip_transform(false);
+        assert_eq!(app.project().layers[0].pixels,original);
+        assert_eq!(app.floating.as_ref().unwrap().corners(),corners);
+        app.cancel_transform();
+        assert_eq!(app.project().layers[0].pixels,original);
+        app.flip_transform(true); // Also starts a new floating transform after Cancel.
+        app.flip_transform(true);
+        assert!(!app.floating.as_ref().unwrap().flip_x);
+        app.flip_transform(true);
+        app.flip_transform(false);
+        app.commit_transform();
+        let expected: Vec<u8> = bytes.chunks_exact(4).rev().flatten().copied().collect();
+        assert_eq!(app.project().layers[0].pixels.to_rgba(2,2),expected);
+        app.undo();
+        assert_eq!(app.project().layers[0].pixels,original);
+        app.redo();
+        assert_eq!(app.project().layers[0].pixels.to_rgba(2,2),expected);
+    }
+
+    #[test]
+    fn transform_aspect_checkbox_controls_pointer_scaling() {
+        for locked in [true,false] {
+            let mut app = document();
+            assert!(app.transform_keep_aspect_ratio);
+            app.transform_keep_aspect_ratio = locked;
+            let floating = app.floating.as_ref().unwrap();
+            let pivot = floating.pivot;
+            let corner = floating.corners()[2];
+            pointer(&mut app,corner,true,true);
+            pointer(&mut app,pivot+(corner-pivot)*Vec2::new(2.0,1.0),false,true);
+            let scale = app.floating.as_ref().unwrap().scale;
+            if locked { assert!((scale.x-scale.y).abs()<1.0e-5); }
+            else { assert!((scale-Vec2::new(2.0,1.0)).length()<1.0e-5); }
+        }
     }
 
     #[test]
@@ -2134,7 +2228,7 @@ mod sparse_layer_tests {
         app.begin_transform();
         let floating = app.floating.as_mut().unwrap();
         assert!(floating.pixels.is_empty());
-        floating.scale = 2.0;
+        floating.scale = Vec2::splat(2.0);
         app.commit_transform();
         let raster = &app.project().layers[0].pixels;
         assert!(raster.tiles.len() <= 8);
@@ -2287,6 +2381,38 @@ mod ai_tests {
         target.redo();
         assert_eq!(target.image_size, Some((4, 2)));
         assert_eq!(target.project().layers[0].pixels, source.project().layers[0].pixels);
+    }
+
+    #[test]
+    fn invert_layer_preserves_alpha_other_layers_and_supports_undo_redo() {
+        let mut app = EditorApp::default();
+        app.invert_layer();
+        assert!(!app.dirty);
+        app.project_mut().import_rgba(&[10, 20, 30, 255], 1, 1).unwrap();
+        app.project_mut().add_layer();
+        app.invert_layer();
+        assert!(!app.dirty);
+        let bytes = [0, 127, 255, 255, 10, 20, 30, 128, 40, 50, 60, 0];
+        let mut pixels = SparsePixels::from_rgba(&bytes, 3, 1);
+        pixels.offset = (-2, 1000);
+        app.project_mut().layers[1].pixels = pixels.clone();
+        app.project_mut().layers[1].visible = false;
+        app.selection = Some(Selection::all(1, 1));
+        app.invert_layer();
+        let inverted = app.project().layers[1].pixels.clone();
+        assert_eq!(inverted.region(-2, 1000, 3, 1),
+            [255, 128, 0, 255, 245, 235, 225, 128, 40, 50, 60, 0]);
+        assert_eq!(inverted.offset, pixels.offset);
+        assert_eq!(inverted.tiles.len(), pixels.tiles.len());
+        assert_eq!(app.project().layers[0].pixels.to_rgba(1, 1), [10, 20, 30, 255]);
+        assert!(app.dirty);
+        assert!(app.layers_reload);
+        app.undo();
+        assert_eq!(app.project().layers[1].pixels, pixels);
+        app.redo();
+        assert_eq!(app.project().layers[1].pixels, inverted);
+        app.invert_layer();
+        assert_eq!(app.project().layers[1].pixels, pixels);
     }
 
     #[test]
@@ -2549,7 +2675,9 @@ mod ai_tests {
     #[test]
     fn input_workflows_upload_selected_source_and_accept_as_new_layer() {
         use std::{io::{BufRead, BufReader, Read, Write}, net::TcpListener, time::{Duration, Instant}};
-        for (mode, source) in [(AiMode::Redraw, AiSource::Layer), (AiMode::Redraw, AiSource::Document),
+        for (mode, source) in [(AiMode::AnimeRedraw, AiSource::Layer),
+            (AiMode::AnimeRedraw, AiSource::Document), (AiMode::AnimeRedraw, AiSource::Selection),
+            (AiMode::Redraw, AiSource::Layer), (AiMode::Redraw, AiSource::Document),
             (AiMode::Redraw, AiSource::Selection), (AiMode::Inpaint, AiSource::Layer), (AiMode::Inpaint, AiSource::Document),
             (AiMode::Lineart, AiSource::Layer), (AiMode::Lineart, AiSource::Document), (AiMode::Lineart, AiSource::Selection),
             (AiMode::DrawCn, AiSource::Layer), (AiMode::DrawCn, AiSource::Document), (AiMode::DrawCn, AiSource::Selection),
@@ -2601,7 +2729,7 @@ mod ai_tests {
                         "/prompt" => {
                             let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
                             let graph = request["prompt"].as_object().unwrap();
-                            let title = if matches!(mode, AiMode::DrawCn | AiMode::Upscale) { "ReferenceImage" } else { "Image" };
+                            let title = if mode == AiMode::AnimeRedraw { "LoadImage" } else if matches!(mode, AiMode::DrawCn | AiMode::Upscale) { "ReferenceImage" } else { "Image" };
                             let image = graph.values().find(|n| n["_meta"]["title"] == title).unwrap();
                             assert_eq!(image["inputs"]["image"], "test/source.png");
                             if mode == AiMode::Lineart {
@@ -2638,7 +2766,7 @@ mod ai_tests {
                             br#"{"prompt_id":"job"}"#.to_vec()
                         }
                         "/history/job" => {
-                            let save = if mode == AiMode::Lineart { "3" } else { "12" };
+                            let save = if mode == AiMode::Lineart { "3" } else if mode == AiMode::AnimeRedraw { "62" } else { "12" };
                             serde_json::to_vec(&serde_json::json!({"job": {"outputs": {save: {"images": [{"filename": "result.png"}]}}, "status": {"completed": true}}})).unwrap()
                         }
                         _ => crate::project::encode_png_rgba(&[1, 2, 3, 255].repeat(64 * 64), 64, 64).unwrap(),
@@ -2713,31 +2841,33 @@ mod ai_tests {
 
     #[test]
     fn draw_on_empty_document_waits_for_acceptance_then_creates_canvas() {
-        let mut app = EditorApp::default();
-        app.ai.open = true;
-        app.ai.mode = AiMode::Draw;
-        assert!(app.project().layers.is_empty());
-        app.ai.document_id = app.workspace.active_doc().id.clone();
-        app.ai.input_region = Some(PixelRect { min_x: 0, min_y: 0, max_x: 64, max_y: 128 }.into());
-        let image = image::RgbaImage::from_pixel(64, 128, image::Rgba([1, 2, 3, 255]));
-        app.ai.job = Some(crate::comfyui::Job::with_result(crate::comfyui::JobResult::Done(image)));
-        let mut ui = Ui::new();
-        app.poll_ai(&mut ui);
-        assert!(app.project().layers.is_empty());
-        EditorApp::init(&mut ui);
-        let viewport = Vec2::new(1280.0, 800.0);
-        ui.begin_frame(mega_ui::UiInput { viewport, ..Default::default() });
-        app.build(&mut ui, viewport, DrawStats::default());
-        let output = ui.end_frame();
-        assert!(output.draw_list.iter().any(|c| c.kind == 1.0 && c.tex == crate::host::AI_PREVIEW_TEXTURE));
-        app.accept_ai();
-        assert_eq!(app.image_size, Some((64, 128)));
-        assert_eq!(app.project().layers.len(), 1);
-        assert_eq!(app.project().layers[0].name, "AI Draw 1");
-        assert_eq!(&app.project().layers[0].pixels.to_rgba(app.project().width, app.project().height)[..4], &[1, 2, 3, 255]);
-        assert!(app.ai.open);
-        app.accept_ai();
-        assert_eq!(app.project().layers.len(), 1);
+        for mode in [AiMode::Draw, AiMode::AnimeDraw, AiMode::QwenDraw] {
+            let mut app = EditorApp::default();
+            app.ai.open = true;
+            app.ai.mode = mode;
+            assert!(app.project().layers.is_empty());
+            app.ai.document_id = app.workspace.active_doc().id.clone();
+            app.ai.input_region = Some(PixelRect { min_x: 0, min_y: 0, max_x: 64, max_y: 128 }.into());
+            let image = image::RgbaImage::from_pixel(64, 128, image::Rgba([1, 2, 3, 255]));
+            app.ai.job = Some(crate::comfyui::Job::with_result(crate::comfyui::JobResult::Done(image)));
+            let mut ui = Ui::new();
+            app.poll_ai(&mut ui);
+            assert!(app.project().layers.is_empty());
+            EditorApp::init(&mut ui);
+            let viewport = Vec2::new(1280.0, 800.0);
+            ui.begin_frame(mega_ui::UiInput { viewport, ..Default::default() });
+            app.build(&mut ui, viewport, DrawStats::default());
+            let output = ui.end_frame();
+            assert!(output.draw_list.iter().any(|c| c.kind == 1.0 && c.tex == crate::host::AI_PREVIEW_TEXTURE));
+            app.accept_ai();
+            assert_eq!(app.image_size, Some((64, 128)));
+            assert_eq!(app.project().layers.len(), 1);
+            assert_eq!(app.project().layers[0].name, format!("{} 1", mode.layer_prefix()));
+            assert_eq!(&app.project().layers[0].pixels.to_rgba(app.project().width, app.project().height)[..4], &[1, 2, 3, 255]);
+            assert!(app.ai.open);
+            app.accept_ai();
+            assert_eq!(app.project().layers.len(), 1);
+        }
     }
 
     #[test]

@@ -64,6 +64,15 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             ui.slider_stepped("fill_threshold", &mut app.fill_threshold, 0.0..=255.0, 1.0);
         }
         Tool::Transform => {
+            ui.add_enabled(app.image_size.is_some() && app.preview_asset.is_none(), |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("transform_flip_x", "Flip X").clicked() { app.flip_transform(true); }
+                    if ui.button("transform_flip_y", "Flip Y").clicked() { app.flip_transform(false); }
+                });
+            });
+            ui.space(8.0);
+            ui.checkbox("transform_keep_aspect_ratio", "Keep aspect ratio", &mut app.transform_keep_aspect_ratio);
+            ui.space(8.0);
             ui.label("Inside — move · corners — scale");
             ui.label("Outside — rotate");
             ui.label("Center cross — move pivot");

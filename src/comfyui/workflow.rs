@@ -1,8 +1,10 @@
 use serde_json::Value;
 
+pub const QWEN_DRAW: &str = include_str!("../../comfyui/image.qwen_edit_21_draw.json");
 pub const EMBEDDED: &str = include_str!("../../comfyui/image.qwen_edit_21.json");
 pub const INPAINT: &str = include_str!("../../comfyui/image.sd_inpaint.json");
 pub const REDRAW: &str = include_str!("../../comfyui/image.sd_redraw.json");
+pub const ANIME: &str = include_str!("../../comfyui/image.anima_draw.json");
 pub const DRAW: &str = include_str!("../../comfyui/image.sd_draw.json");
 pub const LINEART: &str = include_str!("../../comfyui/image.to_lineart.json");
 pub const DRAW_CN: &str = include_str!("../../comfyui/image.sd_draw_cn.json");
@@ -174,6 +176,19 @@ impl DrawSettings {
     }
 }
 
+pub fn prepare_qwen_draw(settings: &DrawSettings, seed: u64) -> Result<(Value, String), String> {
+    settings.validate()?;
+    let mut graph: Value = serde_json::from_str(QWEN_DRAW)
+        .map_err(|e| format!("Invalid Qwen draw workflow: {e}"))?;
+    patch(&mut graph, "EmptyImage", "width", settings.width.into())?;
+    patch(&mut graph, "EmptyImage", "height", settings.height.into())?;
+    patch(&mut graph, "Prompt", "prompt", settings.positive.clone().into())?;
+    patch(&mut graph, "Prompt", "negative_prompt", settings.negative.clone().into())?;
+    patch(&mut graph, "Sampler", "seed", seed.into())?;
+    let output = node_id(&graph, "SaveImage")?;
+    Ok((graph, output))
+}
+
 pub fn prepare_draw(settings: &DrawSettings, seed: u64) -> Result<(Value, String), String> {
     settings.validate()?;
     let mut graph: Value =
@@ -181,6 +196,36 @@ pub fn prepare_draw(settings: &DrawSettings, seed: u64) -> Result<(Value, String
     patch(&mut graph, "Image", "width", settings.width.into())?;
     patch(&mut graph, "Image", "height", settings.height.into())?;
     prepare_sd(graph, settings, seed)
+}
+
+/// Both Anime modes use the same graph; UseEmpty selects the latent source.
+pub fn prepare_anime(
+    filename: Option<&str>, settings: &DrawSettings, denoise: f32, seed: u64,
+) -> Result<(Value, String), String> {
+    if filename.is_some() { settings.validate_redraw(denoise)?; }
+    else { settings.validate()?; }
+    let mut graph: Value =
+        serde_json::from_str(ANIME).map_err(|e| format!("Invalid anime workflow: {e}"))?;
+    patch(&mut graph, "UseEmpty", "switch", filename.is_none().into())?;
+    if let Some(filename) = filename {
+        patch(&mut graph, "LoadImage", "image", filename.into())?;
+    } else {
+        patch(&mut graph, "Image", "width", settings.width.into())?;
+        patch(&mut graph, "Image", "height", settings.height.into())?;
+        // ComfyUI validates even inactive inputs. Draw must not require a server image.
+        let switch = node_id(&graph, "UseEmpty")?;
+        graph[&switch]["inputs"]["on_false"] = graph[&switch]["inputs"]["on_true"].clone();
+        for title in ["LoadImage", "VAE Encode"] {
+            let id = node_id(&graph, title)?;
+            graph.as_object_mut().unwrap().remove(&id);
+        }
+    }
+    patch(&mut graph, "Positive", "text", settings.positive.clone().into())?;
+    patch(&mut graph, "Negative", "text", settings.negative.clone().into())?;
+    patch(&mut graph, "Sampler", "seed", seed.into())?;
+    patch(&mut graph, "Sampler", "denoise", if filename.is_some() { denoise } else { 1.0 }.into())?;
+    let output = node_id(&graph, "ImageSaveWithFormat (maga)")?;
+    Ok((graph, output))
 }
 
 pub fn prepare_redraw(
@@ -306,6 +351,72 @@ fn patch(graph: &mut Value, title: &str, key: &str, value: Value) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn qwen_draw_patches_prompts_size_seed_and_preserves_workflow() {
+        let settings = DrawSettings {
+            positive: "A forest".into(), negative: "blurry".into(),
+            width: 1024, height: 768, ..Default::default()
+        };
+        let original: Value = serde_json::from_str(QWEN_DRAW).unwrap();
+        let (mut graph, save) = prepare_qwen_draw(&settings, 123).unwrap();
+        assert_eq!(save, node_id(&original, "SaveImage").unwrap());
+        assert!(!graph.as_object().unwrap().values().any(|n| n["class_type"] == "LoadImage"));
+        for (title, key, expected) in [
+            ("EmptyImage", "width", Value::from(1024)),
+            ("EmptyImage", "height", Value::from(768)),
+            ("Prompt", "prompt", Value::from("A forest")),
+            ("Prompt", "negative_prompt", Value::from("blurry")),
+            ("Sampler", "seed", Value::from(123)),
+        ] {
+            let id = node_id(&graph, title).unwrap();
+            assert_eq!(graph[&id]["inputs"][key], expected);
+            graph[&id]["inputs"][key] = original[&id]["inputs"][key].clone();
+        }
+        assert_eq!(graph, original);
+        assert!(prepare_qwen_draw(&DrawSettings { width: 0, ..settings }, 0).is_err());
+    }
+
+    #[test]
+    fn anime_modes_share_graph_and_switch_latent_source() {
+        let settings = DrawSettings {
+            positive: "forest".into(), negative: "blurry".into(),
+            width: 640, height: 768, ..Default::default()
+        };
+        let original: Value = serde_json::from_str(ANIME).unwrap();
+        for filename in [None, Some("uploaded/source.png")] {
+            let (graph, output) = prepare_anime(filename, &settings, 0.5, 42).unwrap();
+            assert_eq!(output, "62");
+            assert_eq!(graph["64"]["inputs"]["switch"], filename.is_none());
+            assert_eq!(graph["63"]["inputs"]["seed"], 42);
+            assert_eq!(graph["63"]["inputs"]["denoise"], if filename.is_none() { 1.0 } else { 0.5 });
+            assert_eq!(graph["60_11"]["inputs"]["text"], "forest");
+            assert_eq!(graph["60_12"]["inputs"]["text"], "blurry");
+            for id in ["60_44", "60_45", "60_15", "62"] {
+                assert_eq!(graph[id], original[id]);
+            }
+            if filename.is_none() {
+                assert_eq!(graph["60_28"]["inputs"]["width"], 640);
+                assert_eq!(graph["60_28"]["inputs"]["height"], 768);
+                assert!(!graph.as_object().unwrap().values().any(|n| n["class_type"] == "LoadImage"));
+            } else {
+                assert_eq!(graph["65"]["inputs"]["image"], "uploaded/source.png");
+                assert_eq!(graph["64"]["inputs"]["on_false"], original["64"]["inputs"]["on_false"]);
+                assert_eq!(graph["66"], original["66"]);
+            }
+            for node in graph.as_object().unwrap().values() {
+                for value in node["inputs"].as_object().unwrap().values().filter(|v| v.is_array()) {
+                    assert!(graph.get(value[0].as_str().unwrap()).is_some(), "dangling link: {value}");
+                }
+            }
+        }
+        let invalid_size = DrawSettings { width: 0, ..settings };
+        assert!(prepare_anime(None, &invalid_size, 1.0, 0).is_err());
+        assert!(prepare_anime(Some("input.png"), &invalid_size, 0.5, 0).is_ok());
+        for denoise in [f32::NAN, -0.1, 1.1] {
+            assert!(prepare_anime(Some("input.png"), &invalid_size, denoise, 0).is_err());
+        }
+    }
+
     #[test]
     fn upscale_patches_settings_and_preserves_depth_and_latent_path() {
         let original: Value = serde_json::from_str(UPSCALE).unwrap();

@@ -62,16 +62,32 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     });
 
     ui.menu("filter", "Filter", |ui| {
+        if ui.menu_item_enabled("invert_colors", "Invert", !app.project().layers.is_empty()).clicked() {
+            app.invert_layer();
+        }
         if ui.menu_item_enabled("hsv_adjustment","HSV Adjustment…",!app.project().layers.is_empty()).clicked() {
             app.open_hsv();
         }
     });
 
     ui.menu("ai", "AI", |ui| {
-        ui.add_enabled(app.image_size.is_some(), |ui| {
-            if ui.menu_item("edit_image", "Edit Image…").clicked() {
+        ui.menu("anime", "Anime", |ui| {
+            if ui.menu_item("anime_draw", "Draw...").clicked() {
+                app.open_ai_anime_draw();
+            }
+            if ui.menu_item_enabled("anime_redraw", "Redraw...", app.image_size.is_some()).clicked() {
+                app.open_ai_anime_redraw();
+            }
+        });
+        ui.menu("qwen_21", "Qwen 2.1", |ui| {
+            if ui.menu_item("qwen_draw", "Draw...").clicked() {
+                app.open_ai_qwen_draw();
+            }
+            if ui.menu_item_enabled("qwen_redraw", "Redraw...", app.image_size.is_some()).clicked() {
                 app.open_ai();
             }
+        });
+        ui.add_enabled(app.image_size.is_some(), |ui| {
             if ui.menu_item("redraw_image", "Redraw Image...").clicked() {
                 app.open_ai_redraw();
             }

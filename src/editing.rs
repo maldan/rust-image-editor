@@ -954,26 +954,26 @@ fn linear_to_srgb(value: f32) -> u8 {
 /// Scale-aware Lanczos3 in linear light and premultiplied alpha. Missing source
 /// pixels are transparent; the selection is filtered together with the image.
 /// Widening the kernel when shrinking is essential to suppress aliasing.
-fn sample_transform(x: f32, y: f32, scale: f32,
+fn sample_transform(x: f32, y: f32, scale: glam::Vec2,
     read: impl Fn(i32, i32) -> ([u8; 4], f32)) -> ([u8; 4], f32) {
     static LINEAR: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
     let linear = LINEAR.get_or_init(|| std::array::from_fn(|i| {
         let s = i as f32 / 255.0;
         if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
     }));
-    let scale = scale.clamp(0.05, 1.0);
-    let radius = 3.0 / scale;
+    let scale = scale.clamp(glam::Vec2::splat(0.05), glam::Vec2::ONE);
+    let radius = glam::Vec2::splat(3.0) / scale;
     let (x, y) = (x - 0.5, y - 0.5);
     // At the minimum Transform scale there are at most 120 taps per axis.
-    let x0 = (x - radius).ceil() as i32;
-    let x1 = (x + radius).floor() as i32;
+    let x0 = (x - radius.x).ceil() as i32;
+    let x1 = (x + radius.x).floor() as i32;
     let mut wx = [0.0; 121];
-    for sx in x0..=x1 { wx[(sx - x0) as usize] = lanczos3((sx as f32 - x) * scale); }
+    for sx in x0..=x1 { wx[(sx - x0) as usize] = lanczos3((sx as f32 - x) * scale.x); }
     let mut sum = [0.0; 4];
     let mut weight = 0.0;
     let mut coverage = 0.0;
-    for sy in (y - radius).ceil() as i32..=(y + radius).floor() as i32 {
-        let wy = lanczos3((sy as f32 - y) * scale);
+    for sy in (y - radius.y).ceil() as i32..=(y + radius.y).floor() as i32 {
+        let wy = lanczos3((sy as f32 - y) * scale.y);
         for sx in x0..=x1 {
             let w = wx[(sx - x0) as usize] * wy;
             weight += w;
@@ -1006,7 +1006,10 @@ pub struct FloatingTransform {
     pub center: glam::Vec2,
     /// Rotation/scale origin in document coordinates; moving it does not move pixels.
     pub pivot: glam::Vec2,
-    pub scale: f32,
+    pub scale: glam::Vec2,
+    pub keep_aspect_ratio: bool,
+    pub flip_x: bool,
+    pub flip_y: bool,
     pub rotation: f32,
     /// Layer opacity baked into GPU preview; stamp writes raw pixels.
     pub opacity: f32,
@@ -1090,7 +1093,10 @@ impl FloatingTransform {
             origin_y: bounds.min_y as i32,
             center,
             pivot: center,
-            scale: 1.0,
+            scale: glam::Vec2::ONE,
+            keep_aspect_ratio: true,
+            flip_x: false,
+            flip_y: false,
             rotation: 0.0,
             opacity: opacity.clamp(0.0, 1.0),
             whole_layer: false,
@@ -1107,7 +1113,8 @@ impl FloatingTransform {
             bw, bh, origin_x: x, origin_y: y,
             center: glam::Vec2::new(x as f32 + bw as f32 * 0.5, y as f32 + bh as f32 * 0.5),
             pivot: glam::Vec2::new(x as f32 + bw as f32 * 0.5, y as f32 + bh as f32 * 0.5),
-            scale: 1.0, rotation: 0.0, opacity, whole_layer: true, source: Some(pixels.clone()),
+            scale: glam::Vec2::ONE, keep_aspect_ratio: true, flip_x: false, flip_y: false,
+            rotation: 0.0, opacity, whole_layer: true, source: Some(pixels.clone()),
         })
     }
 
@@ -1122,7 +1129,7 @@ impl FloatingTransform {
     }
 
     pub fn local_size(&self) -> glam::Vec2 {
-        glam::Vec2::new(self.bw as f32, self.bh as f32) * self.scale.max(0.05)
+        glam::Vec2::new(self.bw as f32, self.bh as f32) * self.scale.max(glam::Vec2::splat(0.05))
     }
 
     pub fn corners(&self) -> [glam::Vec2; 4] {
@@ -1137,6 +1144,21 @@ impl FloatingTransform {
         locals.map(|p| {
             self.center + glam::Vec2::new(p.x * c - p.y * s, p.x * s + p.y * c)
         })
+    }
+
+    /// Positions of the source corners; the frame itself stays fixed when flipped.
+    pub fn source_corners(&self) -> [glam::Vec2; 4] {
+        let mut corners = self.corners();
+        if self.flip_x { corners = [corners[1], corners[0], corners[3], corners[2]]; }
+        if self.flip_y { corners = [corners[3], corners[2], corners[1], corners[0]]; }
+        corners
+    }
+
+    fn source_scale(&self) -> glam::Vec2 {
+        self.scale.max(glam::Vec2::splat(0.05)) * glam::Vec2::new(
+            if self.flip_x { -1.0 } else { 1.0 },
+            if self.flip_y { -1.0 } else { 1.0 },
+        )
     }
 
     pub fn drag(&mut self, hit: TransformHit, from: glam::Vec2, to: glam::Vec2) {
@@ -1158,10 +1180,26 @@ impl FloatingTransform {
                 self.rotation += angle;
             }
             TransformHit::Scale(_) => {
-                let distance = (from-self.pivot).length();
-                if distance < 1.0e-4 { return; }
-                let scale = (self.scale*(to-self.pivot).length()/distance).clamp(0.05,32.0);
-                self.center = self.pivot+(self.center-self.pivot)*(scale/self.scale);
+                let (sin, cos) = self.rotation.sin_cos();
+                let local = |p: glam::Vec2| {
+                    let p = p-self.pivot;
+                    glam::Vec2::new(p.x*cos+p.y*sin, -p.x*sin+p.y*cos)
+                };
+                let from = local(from);
+                let to = local(to);
+                let factor = if self.keep_aspect_ratio {
+                    if from.length() < 1.0e-4 { return; }
+                    glam::Vec2::splat((to.length()/from.length())
+                        .clamp(0.05/self.scale.min_element(),32.0/self.scale.max_element()))
+                } else {
+                    glam::Vec2::new(
+                        if from.x.abs() < 1.0e-4 { 1.0 } else { to.x/from.x },
+                        if from.y.abs() < 1.0e-4 { 1.0 } else { to.y/from.y },
+                    )
+                };
+                let scale = (self.scale*factor).clamp(glam::Vec2::splat(0.05),glam::Vec2::splat(32.0));
+                let delta = local(self.center)*(scale/self.scale);
+                self.center = self.pivot+glam::Vec2::new(delta.x*cos-delta.y*sin,delta.x*sin+delta.y*cos);
                 self.scale = scale;
             }
         }
@@ -1183,7 +1221,7 @@ impl FloatingTransform {
         let delta = image_pos - self.center;
         let (s, c) = (-self.rotation).sin_cos();
         let local = glam::Vec2::new(delta.x * c - delta.y * s, delta.x * s + delta.y * c)
-            / self.scale.max(0.05);
+            / self.scale.max(glam::Vec2::splat(0.05));
         let half = glam::Vec2::new(self.bw as f32, self.bh as f32) * 0.5;
         if local.x.abs() <= half.x && local.y.abs() <= half.y {
             return Some(TransformHit::Body);
@@ -1198,14 +1236,15 @@ impl FloatingTransform {
         let half = glam::Vec2::new(self.bw as f32, self.bh as f32) * 0.5;
         let origin = glam::Vec2::new(self.origin_x as f32, self.origin_y as f32) + half;
         let (s,c) = self.rotation.sin_cos();
-        let radius = 3.0 / self.scale.clamp(0.05, 1.0);
+        let radius = glam::Vec2::splat(3.0) / self.scale.clamp(glam::Vec2::splat(0.05), glam::Vec2::ONE);
+        let scale = self.source_scale();
         let transform = |p: glam::Vec2| {
-            let p = (p - origin) * self.scale;
+            let p = (p - origin) * scale;
             self.center + glam::Vec2::new(p.x*c-p.y*s, p.x*s+p.y*c)
         };
         let inverse = |p: glam::Vec2| {
             let p = p - self.center;
-            glam::Vec2::new(p.x*c+p.y*s,-p.x*s+p.y*c)/self.scale.max(0.05)+origin
+            glam::Vec2::new(p.x*c+p.y*s,-p.x*s+p.y*c)/scale+origin
         };
         let mut destinations = std::collections::HashSet::new();
         for &(tx,ty) in source.tiles.keys() {
@@ -1213,10 +1252,10 @@ impl FloatingTransform {
             let y = ty * side + source.offset.1;
             let corners = [(x,y),(x+side,y),(x+side,y+side),(x,y+side)]
                 .map(|(x,y)| glam::Vec2::new(x as f32,y as f32));
-            let corners = [corners[0] - glam::Vec2::splat(radius),
-                corners[1] + glam::Vec2::new(radius,-radius),
-                corners[2] + glam::Vec2::splat(radius),
-                corners[3] + glam::Vec2::new(-radius,radius)].map(transform);
+            let corners = [corners[0] - radius,
+                corners[1] + glam::Vec2::new(radius.x,-radius.y),
+                corners[2] + radius,
+                corners[3] + glam::Vec2::new(-radius.x,radius.y)].map(transform);
             let x0 = corners.iter().map(|p|p.x).fold(f32::INFINITY,f32::min).floor() as i32;
             let y0 = corners.iter().map(|p|p.y).fold(f32::INFINITY,f32::min).floor() as i32;
             let x1 = corners.iter().map(|p|p.x).fold(f32::NEG_INFINITY,f32::max).ceil() as i32;
@@ -1231,18 +1270,18 @@ impl FloatingTransform {
             let corners = [(tx*side,ty*side),((tx+1)*side,ty*side),
                 ((tx+1)*side,(ty+1)*side),(tx*side,(ty+1)*side)]
                 .map(|(x,y)| inverse(glam::Vec2::new(x as f32,y as f32)));
-            let sx = (corners.iter().map(|p|p.x).fold(f32::INFINITY,f32::min)-radius).floor() as i32;
-            let sy = (corners.iter().map(|p|p.y).fold(f32::INFINITY,f32::min)-radius).floor() as i32;
-            let ex = (corners.iter().map(|p|p.x).fold(f32::NEG_INFINITY,f32::max)+radius).ceil() as i32;
-            let ey = (corners.iter().map(|p|p.y).fold(f32::NEG_INFINITY,f32::max)+radius).ceil() as i32;
+            let sx = (corners.iter().map(|p|p.x).fold(f32::INFINITY,f32::min)-radius.x).floor() as i32;
+            let sy = (corners.iter().map(|p|p.y).fold(f32::INFINITY,f32::min)-radius.y).floor() as i32;
+            let ex = (corners.iter().map(|p|p.x).fold(f32::NEG_INFINITY,f32::max)+radius.x).ceil() as i32;
+            let ey = (corners.iter().map(|p|p.y).fold(f32::NEG_INFINITY,f32::max)+radius.y).ceil() as i32;
             let stride = (ex-sx+1) as u32;
             let packed = source.region(sx,sy,stride,(ey-sy+1) as u32);
             for y in ty*side..(ty+1)*side {
                 for x in tx*side..(tx+1)*side {
                     let p = inverse(glam::Vec2::new(x as f32+0.5,y as f32+0.5));
-                    if p.x < self.origin_x as f32 - radius || p.y < self.origin_y as f32 - radius
-                        || p.x > (self.origin_x as f32 + self.bw as f32) + radius
-                        || p.y > (self.origin_y as f32 + self.bh as f32) + radius { continue; }
+                    if p.x < self.origin_x as f32 - radius.x || p.y < self.origin_y as f32 - radius.y
+                        || p.x > (self.origin_x as f32 + self.bw as f32) + radius.x
+                        || p.y > (self.origin_y as f32 + self.bh as f32) + radius.y { continue; }
                     let pixel = sample_transform(p.x,p.y,self.scale,|x,y| (packed.read(stride,x-sx,y-sy),1.0)).0;
                     if pixel[3] != 0 { target.write(0,x,y,pixel); }
                 }
@@ -1283,11 +1322,12 @@ impl FloatingTransform {
             .ceil()
              as i32;
         let half = glam::Vec2::new(self.bw as f32, self.bh as f32) * 0.5;
-        let inv_scale = 1.0 / self.scale.max(0.05);
+        let inv_scale = glam::Vec2::ONE / self.source_scale();
         let (s, c) = (-self.rotation).sin_cos();
         // Include the complete rotated filter footprint, including ringing lobes.
-        let radius = 3.0 / self.scale.clamp(0.05, 1.0);
-        let pad = (radius * self.scale.max(0.05) * (s.abs() + c.abs())).ceil() as i32;
+        let radius = glam::Vec2::splat(3.0) / self.scale.clamp(glam::Vec2::splat(0.05), glam::Vec2::ONE);
+        let footprint = radius * self.scale.max(glam::Vec2::splat(0.05));
+        let pad = (footprint.max_element() * (s.abs() + c.abs())).ceil() as i32;
         let min_x = min_x - pad;
         let min_y = min_y - pad;
         let max_x = max_x + pad;
@@ -1300,7 +1340,7 @@ impl FloatingTransform {
                     * inv_scale;
                 let lx = local.x + half.x;
                 let ly = local.y + half.y;
-                if lx < -radius || ly < -radius || lx >= self.bw as f32 + radius || ly >= self.bh as f32 + radius
+                if lx < -radius.x || ly < -radius.y || lx >= self.bw as f32 + radius.x || ly >= self.bh as f32 + radius.y
                 {
                     continue;
                 }
@@ -1630,7 +1670,7 @@ mod tests {
         assert_eq!(sample_bilinear(&pixels,96,96,49.5,49.5),[0,0,0,255]);
         let source = crate::raster::SparsePixels::from_rgba(&pixels,96,96);
         let mut layer = FloatingTransform::extract_layer(&source,0,1.0).unwrap();
-        layer.scale = 1.0/3.0;
+        layer.scale = glam::Vec2::splat(1.0/3.0);
         layer.center = glam::Vec2::splat(16.0);
         let mut output = crate::raster::SparsePixels::default();
         layer.stamp_layer(&mut output);
@@ -1648,6 +1688,110 @@ mod tests {
             assert_eq!(p[3],255);
             assert_eq!(selected.read(96,x,16),p);
         }
+    }
+
+    #[test]
+    fn transform_flip_maps_preview_and_pixels_for_layers_and_selections() {
+        use glam::Vec2;
+        let bytes: Vec<u8> = (0..8).flat_map(|i| [i*20,100,200,255]).collect();
+        let source = crate::raster::SparsePixels::from_rgba(&bytes,4,2);
+        for flip_x in [false,true] { for flip_y in [false,true] {
+            for rotated in [false,true] {
+                let selection = Selection::all(4,2);
+                let mut layer = FloatingTransform::extract_layer(&source,0,1.0).unwrap();
+                let mut fragment = FloatingTransform::extract(&source,4,2,&selection,0,1.0).unwrap();
+                for transform in [&mut layer,&mut fragment] {
+                    transform.center = Vec2::splat(10.0);
+                    transform.pivot = Vec2::new(1.0,3.0);
+                    transform.flip_x = flip_x;
+                    transform.flip_y = flip_y;
+                    if rotated { transform.rotation = std::f32::consts::FRAC_PI_2; }
+                    else { transform.scale = Vec2::new(2.0,3.0); }
+                    let corners = transform.corners();
+                    let mut indices = [0,1,2,3];
+                    if flip_x { indices = [indices[1],indices[0],indices[3],indices[2]]; }
+                    if flip_y { indices = [indices[3],indices[2],indices[1],indices[0]]; }
+                    assert_eq!(transform.source_corners(),indices.map(|i| corners[i]));
+                    let pivot = transform.pivot;
+                    transform.flip_x = !transform.flip_x;
+                    transform.flip_x = !transform.flip_x;
+                    assert_eq!(transform.corners(),corners);
+                    assert_eq!(transform.pivot,pivot);
+                }
+                let mut output = crate::raster::SparsePixels::default();
+                layer.stamp_layer(&mut output);
+                let mut selected = crate::raster::SparsePixels::default();
+                fragment.stamp(&mut selected,20,20);
+                for y in 0..2 { for x in 0..4 {
+                    // Source texel centers under the preview's source-corner mapping.
+                    let u = (x as f32+0.5)/4.0;
+                    let v = (y as f32+0.5)/2.0;
+                    let corners = layer.source_corners();
+                    let point = corners[0]+(corners[1]-corners[0])*u+(corners[3]-corners[0])*v;
+                    let px = point.x.floor() as i32;
+                    let py = point.y.floor() as i32;
+                    if rotated {
+                        assert_eq!(output.read(20,px,py),[ ((y*4+x)*20) as u8,100,200,255]);
+                    }
+                    // Compare all reflected source positions between both commit paths.
+                    assert_eq!(selected.read(20,px,py),output.read(20,px,py));
+                    assert_ne!(output.read(20,px,py)[3],0);
+                } }
+            }
+        } }
+    }
+
+    #[test]
+    fn transform_free_scaling_uses_rotated_axes_and_keeps_pivot_fixed() {
+        use glam::Vec2;
+        let source = crate::raster::SparsePixels::from_rgba(&[10,20,30,255].repeat(100*80),100,80);
+        let mut transform = FloatingTransform::extract_layer(&source,0,1.0).unwrap();
+        assert!(transform.keep_aspect_ratio);
+        transform.rotation = std::f32::consts::FRAC_PI_2;
+        transform.pivot = Vec2::new(30.0,20.0);
+        let pivot = transform.pivot;
+        let corners = transform.corners();
+        transform.keep_aspect_ratio = false;
+        // In rotated local axes this changes X by 2 and Y by 0.5.
+        transform.drag(TransformHit::Scale(2),pivot+Vec2::new(-40.0,50.0),pivot+Vec2::new(-20.0,100.0));
+        assert!((transform.scale-Vec2::new(2.0,0.5)).length()<1.0e-5);
+        assert_eq!(transform.pivot,pivot);
+        for (before,after) in corners.into_iter().zip(transform.corners()) {
+            let delta = before-pivot;
+            assert!((after-(pivot+delta*Vec2::new(0.5,2.0))).length()<1.0e-4);
+        }
+        let center = transform.center;
+        assert_eq!(transform.hit_test(center,0.1),Some(TransformHit::Body));
+        assert_eq!(transform.hit_test(center+Vec2::new(21.0,0.0),0.1),Some(TransformHit::Rotate));
+        // Re-enabling the lock preserves the current proportions.
+        transform.keep_aspect_ratio = true;
+        transform.drag(TransformHit::Scale(2),pivot+Vec2::new(10.0,10.0),pivot+Vec2::new(20.0,20.0));
+        assert!((transform.scale-Vec2::new(4.0,1.0)).length()<1.0e-5);
+    }
+
+    #[test]
+    fn transform_nonuniform_stamp_matches_for_layers_and_selections() {
+        use glam::Vec2;
+        let source = crate::raster::SparsePixels::from_rgba(&[10,20,30,255].repeat(16*16),16,16);
+        let selection = Selection::all(16,16);
+        let mut layer = FloatingTransform::extract_layer(&source,0,1.0).unwrap();
+        let mut fragment = FloatingTransform::extract(&source,16,16,&selection,0,1.0).unwrap();
+        for transform in [&mut layer,&mut fragment] {
+            transform.scale = Vec2::new(2.0,0.5);
+            transform.center = Vec2::splat(32.0);
+            assert_eq!(transform.local_size(),Vec2::new(32.0,8.0));
+        }
+        let mut output = crate::raster::SparsePixels::default();
+        layer.stamp_layer(&mut output);
+        let mut selected = crate::raster::SparsePixels::default();
+        let (_,mask) = fragment.stamp(&mut selected,64,64);
+        for x in 24..40 {
+            assert_eq!(output.read(64,x,32),[10,20,30,255]);
+            assert_eq!(selected.read(64,x,32),output.read(64,x,32));
+            assert!(mask.contains(x as u32,32));
+        }
+        assert_eq!(output.read(64,32,20),[0;4]);
+        assert_eq!(selected.read(64,32,20),[0;4]);
     }
 
     #[test]
@@ -1669,7 +1813,7 @@ mod tests {
         }
         let corners = transform.corners();
         transform.drag(TransformHit::Scale(0),pivot+glam::Vec2::X*10.0,pivot+glam::Vec2::X*20.0);
-        assert_eq!(transform.scale,2.0);
+        assert_eq!(transform.scale,glam::Vec2::splat(2.0));
         assert_eq!(transform.pivot,pivot);
         for (before,after) in corners.into_iter().zip(transform.corners()) {
             assert!((after-(pivot+(before-pivot)*2.0)).length()<1.0e-4);
@@ -1708,7 +1852,7 @@ mod tests {
         let source = crate::raster::SparsePixels::from_rgba(&[120,180,240,255].repeat(1024*1024),1024,1024);
         for scale in [0.5,0.05] {
             let mut transform = FloatingTransform::extract_layer(&source,0,1.0).unwrap();
-            transform.scale = scale;
+            transform.scale = glam::Vec2::splat(scale);
             let mut output = crate::raster::SparsePixels::default();
             let started = std::time::Instant::now();
             transform.stamp_layer(&mut output);
@@ -1720,10 +1864,10 @@ mod tests {
     #[test]
     fn transform_filter_preserves_identity_alpha_and_mask() {
         let pixel = [17,128,240,93];
-        assert_eq!(sample_transform(0.5,0.5,1.0,|x,y| {
+        assert_eq!(sample_transform(0.5,0.5,glam::Vec2::ONE,|x,y| {
             if x==0 && y==0 { (pixel,1.0) } else { ([0;4],0.0) }
         }).0,pixel);
-        let (p,coverage) = sample_transform(0.5,0.5,0.25,|x,_| {
+        let (p,coverage) = sample_transform(0.5,0.5,glam::Vec2::splat(0.25),|x,_| {
             // Unselected opaque blue and transparent green must not bleed into red.
             if x < 0 { ([0,0,255,255],0.0) }
             else if x % 2 == 0 { ([255,0,0,255],1.0) }
@@ -1743,7 +1887,7 @@ mod tests {
         } }
         let source = crate::raster::SparsePixels::from_rgba(&pixels,64,64);
         let mut transform = FloatingTransform::extract_layer(&source,0,1.0).unwrap();
-        transform.scale = 0.2;
+        transform.scale = glam::Vec2::splat(0.2);
         transform.rotation = 0.6;
         transform.center = glam::Vec2::splat(-10.0);
         let mut output = crate::raster::SparsePixels::default();

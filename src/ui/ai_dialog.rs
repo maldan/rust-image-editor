@@ -11,6 +11,9 @@ pub enum AiMode {
     #[default]
     Edit,
     Draw,
+    QwenDraw,
+    AnimeDraw,
+    AnimeRedraw,
     DrawCn,
     Upscale,
     Redraw,
@@ -20,15 +23,21 @@ pub enum AiMode {
 
 impl AiMode {
     pub fn needs_input(self) -> bool {
-        self != Self::Draw
+        !matches!(self, Self::Draw | Self::AnimeDraw | Self::QwenDraw)
+    }
+    pub fn is_anime(self) -> bool {
+        matches!(self, Self::AnimeDraw | Self::AnimeRedraw)
     }
     pub fn uses_sd(self) -> bool {
         matches!(self, Self::Draw | Self::DrawCn | Self::Upscale | Self::Redraw | Self::Inpaint)
     }
     pub fn title(self) -> &'static str {
         match self {
-            Self::Edit => "Edit Image",
+            Self::Edit => "Qwen 2.1 Redraw",
+            Self::QwenDraw => "Qwen 2.1 Draw",
             Self::Draw => "Draw Image",
+            Self::AnimeDraw => "Anime Draw",
+            Self::AnimeRedraw => "Anime Redraw",
             Self::DrawCn => "Draw with ControlNet",
             Self::Upscale => "Upscale Image",
             Self::Redraw => "Redraw Image",
@@ -38,8 +47,11 @@ impl AiMode {
     }
     pub fn layer_prefix(self) -> &'static str {
         match self {
-            Self::Edit => "AI Edit",
+            Self::Edit => "AI Qwen 2.1 Redraw",
+            Self::QwenDraw => "AI Qwen 2.1 Draw",
             Self::Draw => "AI Draw",
+            Self::AnimeDraw => "AI Anime Draw",
+            Self::AnimeRedraw => "AI Anime Redraw",
             Self::DrawCn => "AI Draw CN",
             Self::Upscale => "AI Upscale",
             Self::Redraw => "AI Redraw",
@@ -233,7 +245,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             ui.horizontal(|ui| {
                 ui.flex_width(controls_width, |ui| {
                     ui.add_enabled(!running, |ui| {
-                        if app.ai.mode.uses_sd() {
+                        if app.ai.mode.uses_sd() || app.ai.mode.is_anime() || app.ai.mode == AiMode::QwenDraw {
                             draw_controls(ui, &mut app.ai, width, height);
                         } else {
                             source_controls(ui, &mut app.ai, width, height);
@@ -267,7 +279,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     } else {
                         let valid = app.ai.config.is_some()
                             && match app.ai.mode {
-                                AiMode::Draw => app.ai.draw_settings.validate().is_ok(),
+                                AiMode::Draw | AiMode::AnimeDraw | AiMode::QwenDraw => app.ai.draw_settings.validate().is_ok(),
                                 AiMode::Upscale => {
                                     app.ai.upscale.validate(&app.ai.draw_settings).is_ok()
                                         && input_valid(app, width, height)
@@ -280,7 +292,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                                     crate::comfyui::validate_lineart_resolution(app.ai.lineart_resolution).is_ok()
                                         && input_valid(app, width, height)
                                 }
-                                AiMode::Redraw | AiMode::Inpaint => {
+                                AiMode::Redraw | AiMode::AnimeRedraw | AiMode::Inpaint => {
                                     app.ai.draw_settings.validate_redraw(app.ai.denoise).is_ok()
                                         && input_valid(app, width, height)
                                 }
@@ -375,7 +387,7 @@ fn draw_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
             if ai.mode.needs_input() {
                 source_controls(ui, ai, width, height);
             }
-            if matches!(ai.mode, AiMode::Redraw | AiMode::Inpaint) {
+            if matches!(ai.mode, AiMode::Redraw | AiMode::AnimeRedraw | AiMode::Inpaint) {
                 ui.label("Denoise");
                 ui.slider("redraw_denoise", &mut ai.denoise, 0.0..=1.0);
             }
@@ -400,46 +412,48 @@ fn draw_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
                     control.end_percent = end / 100.0;
                 }
             }
-            ui.label("Model");
-            choose(
-                ui,
-                "draw_model",
-                &mut ai.draw_settings.model,
-                &ai.catalog.models,
-                "Default (workflow)",
-            );
-            ui.add_enabled(ai.config.is_some() && ai.catalog_load.is_none(), |ui| {
-                if ui
-                    .button("draw_refresh", "Refresh models / LoRAs")
-                    .clicked()
-                {
-                    ai.catalog_load = Some(crate::comfyui::CatalogLoad::start(
-                        ai.config.clone().unwrap(),
-                        true,
-                    ));
-                    ai.catalog_message = "Refreshing models / LoRAs...".into();
-                }
-            });
-            ui.label(&ai.catalog_message);
-            for i in 0..ai.draw_settings.loras.len() {
-                if i > 0 && ai.draw_settings.loras[i - 1].name.is_none() {
-                    for lora in &mut ai.draw_settings.loras[i..] {
-                        lora.name = None;
-                    }
-                    break;
-                }
-                let lora = &mut ai.draw_settings.loras[i];
-                ui.label(&format!("LoRA {}", i + 1));
+            if ai.mode.uses_sd() {
+                ui.label("Model");
                 choose(
                     ui,
-                    &format!("draw_lora_{i}"),
-                    &mut lora.name,
-                    &ai.catalog.loras,
-                    "None",
+                    "draw_model",
+                    &mut ai.draw_settings.model,
+                    &ai.catalog.models,
+                    "Default (workflow)",
                 );
-                ui.add_enabled(lora.name.is_some(), |ui| {
-                    ui.slider(&format!("draw_strength_{i}"), &mut lora.strength, 0.0..=1.0);
+                ui.add_enabled(ai.config.is_some() && ai.catalog_load.is_none(), |ui| {
+                    if ui
+                        .button("draw_refresh", "Refresh models / LoRAs")
+                        .clicked()
+                    {
+                        ai.catalog_load = Some(crate::comfyui::CatalogLoad::start(
+                            ai.config.clone().unwrap(),
+                            true,
+                        ));
+                        ai.catalog_message = "Refreshing models / LoRAs...".into();
+                    }
                 });
+                ui.label(&ai.catalog_message);
+                for i in 0..ai.draw_settings.loras.len() {
+                    if i > 0 && ai.draw_settings.loras[i - 1].name.is_none() {
+                        for lora in &mut ai.draw_settings.loras[i..] {
+                            lora.name = None;
+                        }
+                        break;
+                    }
+                    let lora = &mut ai.draw_settings.loras[i];
+                    ui.label(&format!("LoRA {}", i + 1));
+                    choose(
+                        ui,
+                        &format!("draw_lora_{i}"),
+                        &mut lora.name,
+                        &ai.catalog.loras,
+                        "None",
+                    );
+                    ui.add_enabled(lora.name.is_some(), |ui| {
+                        ui.slider(&format!("draw_strength_{i}"), &mut lora.strength, 0.0..=1.0);
+                    });
+                }
             }
             ui.label("Positive prompt");
             ui.text_area(
@@ -453,7 +467,7 @@ fn draw_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
                 &mut ai.draw_settings.negative,
                 Vec2::new(0.0, 65.0),
             );
-            if ai.mode == AiMode::Draw {
+            if !ai.mode.needs_input() {
                 ui.horizontal(|ui| {
                     ui.label("Width");
                     ui.drag_int("draw_width", &mut ai.draw_settings.width, 8);
