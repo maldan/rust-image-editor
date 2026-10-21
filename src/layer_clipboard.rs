@@ -15,20 +15,32 @@ struct Payload {
     visible: bool,
     opacity: f32,
     tiles: String,
+    /// Selected pixels only. Paste starts a transform on the new layer.
+    #[serde(default)]
+    fragment: bool,
 }
 
 pub struct CopiedLayer {
     pub layer: Layer,
     pub canvas_size: (u32, u32),
+    pub fragment: bool,
 }
 
 pub fn encode(layer: &Layer, canvas_size: (u32, u32)) -> Result<String, String> {
+    encode_kind(layer, canvas_size, false)
+}
+
+pub fn encode_fragment(layer: &Layer, canvas_size: (u32, u32)) -> Result<String, String> {
+    encode_kind(layer, canvas_size, true)
+}
+
+fn encode_kind(layer: &Layer, canvas_size: (u32, u32), fragment: bool) -> Result<String, String> {
     let tiles = layer.pixels.encode();
     if tiles.len() > MAX_BYTES { return Err("Layer is too large for the clipboard".into()); }
     let payload = Payload {
         version: 1, canvas_width: canvas_size.0, canvas_height: canvas_size.1,
         name: layer.name.clone(), visible: layer.visible, opacity: layer.opacity,
-        tiles: STANDARD.encode(tiles),
+        tiles: STANDARD.encode(tiles), fragment,
     };
     serde_json::to_string(&payload).map(|json| format!("{PREFIX}{json}"))
         .map_err(|e| format!("Cannot copy layer: {e}"))
@@ -62,6 +74,7 @@ pub fn decode(text: &str) -> Result<Option<CopiedLayer>, String> {
     Ok(Some(CopiedLayer {
         layer: Layer { name: payload.name, visible: payload.visible, opacity: payload.opacity, pixels },
         canvas_size: (payload.canvas_width, payload.canvas_height),
+        fragment: payload.fragment,
     }))
 }
 
@@ -99,7 +112,10 @@ mod tests {
         assert_eq!(copied.layer.opacity, layer.opacity);
         assert_eq!(copied.layer.pixels, layer.pixels);
         assert_eq!(copied.layer.pixels.bounds(), layer.pixels.bounds());
+        assert!(!copied.fragment);
         assert!(text.len() < 100000); // Pack physical tiles, not the huge bounding rectangle.
+        let fragment = encode_fragment(&layer, (1000, 800)).unwrap();
+        assert!(decode(&fragment).unwrap().unwrap().fragment);
     }
 
     #[test]

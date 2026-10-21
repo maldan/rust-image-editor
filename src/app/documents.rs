@@ -1,4 +1,5 @@
 use super::*;
+use crate::raster::Raster;
 
 impl EditorApp {
     pub fn new_project(&mut self, ui: &mut Ui) {
@@ -49,6 +50,52 @@ impl EditorApp {
         self.copy_layer_at(self.project().active_layer, ui);
     }
 
+    /// Ctrl+C: copy the selection when one exists, otherwise the active layer.
+    pub fn copy_shortcut(&mut self, ui: &mut Ui) {
+        if self.session.selection.as_ref().is_some_and(|selection| !selection.is_empty()) {
+            self.copy_selection(ui);
+        } else {
+            self.copy_layer(ui);
+        }
+    }
+
+    pub fn copy_selection(&mut self, ui: &mut Ui) {
+        if self.session.floating.is_some() {
+            self.status = "Apply or cancel the transform before copying".into();
+            return;
+        }
+        match self.selection_clipboard_text().and_then(crate::layer_clipboard::write) {
+            Ok(()) => self.status = "Selection copied".into(),
+            Err(error) => self.show_error(ui, error),
+        }
+    }
+
+    pub fn cut_selection(&mut self, ui: &mut Ui) {
+        if self.session.floating.is_some() {
+            self.status = "Apply or cancel the transform before cutting".into();
+            return;
+        }
+        if self.session.selection.as_ref().is_none_or(|selection| selection.is_empty()) {
+            self.status = "Select an area to cut".into();
+            return;
+        }
+        if let Err(error) = self.selection_clipboard_text().and_then(crate::layer_clipboard::write) {
+            self.show_error(ui, error);
+            return;
+        }
+        if let Err(error) = self.erase_active_selection() {
+            self.show_error(ui, error);
+            return;
+        }
+        self.status = "Selection cut".into();
+    }
+
+    pub(in crate::app) fn selection_clipboard_text(&mut self) -> Result<String, String> {
+        let layer = self.capture_selection_layer()?;
+        let (width, height) = self.image_size.ok_or("No image")?;
+        crate::layer_clipboard::encode_fragment(&layer, (width, height))
+    }
+
     pub fn copy_layer_at(&mut self, index: usize, ui: &mut Ui) {
         match self.copy_layer_text(index).and_then(crate::layer_clipboard::write) {
             Ok(()) => self.status = "Layer copied with position and properties".into(),
@@ -57,6 +104,7 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn insert_copied_layer(&mut self, copied: crate::layer_clipboard::CopiedLayer) {
+        let fragment = copied.fragment;
         self.commit_transform();
         self.close_asset_preview();
         let was_empty = self.image_size.is_none();
@@ -64,17 +112,72 @@ impl EditorApp {
         self.sync_layer_structure();
         if was_empty { self.session.fit_image = true; }
         self.status = "Layer pasted with position and properties".into();
-    }
-
-    pub fn paste_layer(&mut self, ui: &mut Ui) {
-        match crate::layer_clipboard::read() {
-            Ok(Some(copied)) => self.insert_copied_layer(copied),
-            Ok(None) => self.show_error(ui, "Clipboard does not contain a copied layer".into()),
-            Err(error) => self.show_error(ui, error),
+        if fragment {
+            self.clear_selection();
+            if self.session.tool == Tool::Transform {
+                self.begin_transform();
+            } else {
+                self.set_tool(Tool::Transform);
+            }
+            if self.session.floating.is_some() {
+                self.status = "Pasted onto a new layer — drag inside to move, corners to scale, outside to rotate. Enter apply, Esc cancel".into();
+            }
         }
     }
 
-    pub(in crate::app) fn paste_clipboard(&mut self, ui: &mut Ui) {
+    fn capture_selection_layer(&self) -> Result<crate::project::Layer, String> {
+        let (width, _) = self.image_size.ok_or("No image")?;
+        let selection = self.session.selection.as_ref().ok_or("Select an area first")?;
+        let bounds = selection.bounds().ok_or("Selection is empty")?;
+        let project = self.project();
+        let source = project.layers.get(project.active_layer).ok_or("Choose a layer")?;
+        let mut pixels = crate::raster::SparsePixels::default();
+        let mut any = false;
+        for y in bounds.min_y..bounds.max_y {
+            for x in bounds.min_x..bounds.max_x {
+                if !selection.contains(x, y) { continue; }
+                let pixel = source.pixels.read(width, x as i32, y as i32);
+                if pixel[3] == 0 { continue; }
+                pixels.write(width, x as i32, y as i32, pixel);
+                any = true;
+            }
+        }
+        if !any { return Err("Selection has no pixels".into()); }
+        Ok(crate::project::Layer {
+            name: "Selection".into(),
+            visible: true,
+            opacity: source.opacity,
+            pixels,
+        })
+    }
+
+    pub(in crate::app) fn erase_active_selection(&mut self) -> Result<(), String> {
+        let (width, _) = self.image_size.ok_or("No image")?;
+        let selection = self.session.selection.clone().ok_or("Select an area to cut")?;
+        let bounds = selection.bounds().ok_or("Selection is empty")?;
+        let index = self.project().active_layer;
+        {
+            let pixels = &mut self.workspace.active_mut().layers.get_mut(index).ok_or("Choose a layer")?.pixels;
+            let before = pixels.clone();
+            let mut changed = false;
+            for y in bounds.min_y..bounds.max_y {
+                for x in bounds.min_x..bounds.max_x {
+                    if !selection.contains(x, y) { continue; }
+                    if pixels.read(width, x as i32, y as i32) == [0; 4] { continue; }
+                    pixels.write(width, x as i32, y as i32, [0; 4]);
+                    changed = true;
+                }
+            }
+            if !changed { return Ok(()); }
+            pixels.prune();
+            self.history.push_diff(index, &before, pixels);
+        }
+        self.mark_dirty_rect(bounds);
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn paste_clipboard(&mut self, ui: &mut Ui) {
         match crate::layer_clipboard::read() {
             Ok(Some(copied)) => self.insert_copied_layer(copied),
             Ok(None) => self.paste_image(ui),

@@ -167,6 +167,7 @@ impl FrameInput {
         let mut input = self.clone();
         if keyboard_captured {
             input.key_copy = false;
+            input.key_cut = false;
             input.key_paste = false;
             input.key_undo = false;
             input.key_redo = false;
@@ -691,7 +692,7 @@ mod text_edit_tests {
         input.key_redo = true;
         input.key_enter = true;
         let scene = input.for_scene(true);
-        assert!(!scene.key_copy && !scene.key_paste && !scene.key_undo && !scene.key_redo && !scene.key_enter);
+        assert!(!scene.key_copy && !scene.key_cut && !scene.key_paste && !scene.key_undo && !scene.key_redo && !scene.key_enter);
         assert!(input.for_scene(false).key_paste);
         input.clear_edges();
         let ui_input = input.to_ui(Vec2::splat(400.0), 0.016);

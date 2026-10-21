@@ -44,11 +44,11 @@ impl Scene for EditorApp {
         let thumb_waiting = self.workspace.tick_thumbs();
         let paste = self.input.key_paste;
         let copy = self.input.key_copy;
+        let cut = self.input.key_cut;
         ui::draw(ui, self, viewport);
-        if copy { self.copy_layer(ui); }
-        if paste {
-            self.paste_clipboard(ui);
-        }
+        if cut { self.cut_selection(ui); }
+        else if copy { self.copy_shortcut(ui); }
+        else if paste { self.paste_clipboard(ui); }
         self.ai.open || self.hsv.open
             || self.session.selection.is_some()
             || self.session.selection_anchor.is_some()

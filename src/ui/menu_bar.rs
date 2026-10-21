@@ -48,13 +48,18 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                 app.invert_selection();
             }
         });
-        ui.add_enabled(!app.project().layers.is_empty(), |ui| {
-            if ui.menu_item("copy_layer", "Copy Layer (Ctrl+C)").clicked() {
-                app.copy_layer(ui);
+        ui.add_enabled(app.session.selection.is_some(), |ui| {
+            if ui.menu_item("cut_selection", "Cut (Ctrl+X)").clicked() {
+                app.cut_selection(ui);
             }
         });
-        if ui.menu_item("paste_layer", "Paste Layer (Ctrl+V)").clicked() {
-            app.paste_layer(ui);
+        ui.add_enabled(!app.project().layers.is_empty(), |ui| {
+            if ui.menu_item("copy_layer", "Copy (Ctrl+C)").clicked() {
+                app.copy_shortcut(ui);
+            }
+        });
+        if ui.menu_item("paste_layer", "Paste (Ctrl+V)").clicked() {
+            app.paste_clipboard(ui);
         }
         if ui.menu_item("paste_image", "Paste Image").clicked() {
             app.paste_image(ui);

@@ -85,6 +85,50 @@
     }
 
     #[test]
+    fn selection_cut_and_copy_paste_onto_a_new_layer_and_start_transform() {
+        use crate::raster::Raster;
+        let mut pixels = vec![0u8; 4 * 2 * 4];
+        for i in 0..8u8 {
+            pixels[i as usize * 4..i as usize * 4 + 4].copy_from_slice(&[i, 1, 2, 255]);
+        }
+        let mut app = EditorApp::default();
+        app.project_mut().import_rgba(&pixels, 4, 2).unwrap();
+        app.refresh_image().unwrap();
+        let original = app.project().layers[0].pixels.clone();
+        app.session.selection = Some(Selection::from_rect(
+            PixelRect { min_x: 1, min_y: 0, max_x: 3, max_y: 2 }, 4, 2));
+        let text = app.selection_clipboard_text().unwrap();
+        let copied = crate::layer_clipboard::decode(&text).unwrap().unwrap();
+        assert!(copied.fragment);
+        assert_eq!(copied.layer.pixels.read(4, 1, 0), [1, 1, 2, 255]);
+        assert_eq!(copied.layer.pixels.read(4, 0, 0), [0; 4]);
+        assert_eq!(app.project().layers[0].pixels, original);
+
+        app.erase_active_selection().unwrap();
+        assert_eq!(app.project().layers[0].pixels.read(4, 1, 0), [0; 4]);
+        assert_eq!(app.project().layers[0].pixels.read(4, 0, 0), [0, 1, 2, 255]);
+        app.undo();
+        assert_eq!(app.project().layers[0].pixels, original);
+        app.redo();
+        assert_eq!(app.project().layers[0].pixels.read(4, 2, 1), [0; 4]);
+
+        app.insert_copied_layer(copied);
+        assert_eq!(app.project().layers.len(), 2);
+        assert_eq!(app.project().active_layer, 1);
+        assert_eq!(app.session.tool, Tool::Transform);
+        let floating = app.session.floating.as_mut().unwrap();
+        assert!(floating.whole_layer);
+        assert_eq!(floating.layer, 1);
+        floating.center.x += 1.0;
+        app.commit_transform();
+        assert!(app.session.floating.is_none());
+        assert_eq!(app.project().layers[1].pixels.read(4, 2, 0), [1, 1, 2, 255]);
+        assert_eq!(app.project().layers[1].pixels.read(4, 1, 0), [0; 4]);
+        assert_eq!(app.project().layers[0].pixels.read(4, 1, 0), [0; 4]);
+        assert_eq!(app.project().layers[0].pixels.read(4, 0, 0), [0, 1, 2, 255]);
+    }
+
+    #[test]
     fn invert_layer_preserves_alpha_other_layers_and_supports_undo_redo() {
         let mut app = EditorApp::default();
         app.invert_layer();
