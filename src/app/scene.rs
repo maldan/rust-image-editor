@@ -16,7 +16,7 @@ impl Scene for EditorApp {
     }
 
     fn begin_frame(&mut self, input: &FrameInput) {
-        self.canvas_cursor = None;
+        self.session.canvas_cursor = None;
         self.ai.preview_input = input.clone();
         self.input = if self.ai.open || self.hsv.open {
             let mut blocked = FrameInput::default();
@@ -27,7 +27,7 @@ impl Scene for EditorApp {
     }
 
     fn build(&mut self, ui: &mut Ui, viewport: Vec2, _stats: DrawStats) -> bool {
-        self.viewport_size = viewport;
+        self.session.viewport_size = viewport;
         self.poll_ai(ui);
         if self.input.key_undo {
             self.undo();
@@ -35,10 +35,10 @@ impl Scene for EditorApp {
         if self.input.key_redo {
             self.redo();
         }
-        if self.input.key_escape && self.floating.is_some() {
+        if self.input.key_escape && self.session.floating.is_some() {
             self.cancel_transform();
         }
-        if self.input.key_enter && self.floating.is_some() {
+        if self.input.key_enter && self.session.floating.is_some() {
             self.commit_transform();
         }
         let thumb_waiting = self.workspace.tick_thumbs();
@@ -50,12 +50,12 @@ impl Scene for EditorApp {
             self.paste_clipboard(ui);
         }
         self.ai.open || self.hsv.open
-            || self.selection.is_some()
-            || self.selection_anchor.is_some()
-            || self.floating.is_some()
+            || self.session.selection.is_some()
+            || self.session.selection_anchor.is_some()
+            || self.session.floating.is_some()
             || self.workspace.asset_drag.is_some()
             || thumb_waiting
-            || (matches!(self.tool, Tool::Brush | Tool::SelectionBrush) && self.canvas_rect.contains(self.input.mouse_pos))
+            || (matches!(self.session.tool, Tool::Brush | Tool::SelectionBrush) && self.session.canvas_rect.contains(self.input.mouse_pos))
             || !self.dirty_tiles.is_empty()
     }
 
@@ -81,12 +81,12 @@ impl Scene for EditorApp {
         queue: &wgpu::Queue,
         canvas: &mut CanvasRenderer,
     ) {
-        if let Some(id) = &self.preview_asset
+        if let Some(id) = &self.session.preview_asset
             && let Some(asset) = self.workspace.assets.iter().find(|a| &a.id == id)
         {
-            if self.preview_asset_dirty {
+            if self.session.preview_asset_dirty {
                 canvas.upload_all_layers(device, queue, &[&asset.pixels], asset.width, asset.height);
-                self.preview_asset_dirty = false;
+                self.session.preview_asset_dirty = false;
             }
             canvas.clear_transform();
             canvas.set_selection_mask(device, queue, None, 0, 0);
@@ -104,10 +104,10 @@ impl Scene for EditorApp {
         let Some((width, height)) = self.image_size else {
             return;
         };
-        if self.selection_mask_dirty {
-            let mask = self.selection.as_ref().map(|s| s.mask_r8());
+        if self.session.selection_mask_dirty {
+            let mask = self.session.selection.as_ref().map(|s| s.mask_r8());
             canvas.set_selection_mask(device, queue, mask.as_deref(), width, height);
-            self.selection_mask_dirty = false;
+            self.session.selection_mask_dirty = false;
         }
         if self.layers_reload {
             let pixels: Vec<&crate::raster::SparsePixels> = self
@@ -139,10 +139,10 @@ impl Scene for EditorApp {
             }
             self.dirty_layer = None;
         }
-        if self.floating.is_none() {
+        if self.session.floating.is_none() {
             canvas.clear_transform();
             self.floating_reload = false;
-        } else if let Some(floating) = self.floating.as_ref() {
+        } else if let Some(floating) = self.session.floating.as_ref() {
             let ready = if let Some(source) = floating.source.as_ref() {
                 canvas.sync_sparse_transform(device, queue, source, self.floating_reload)
             } else {
@@ -157,14 +157,14 @@ impl Scene for EditorApp {
 
     fn canvas_present(&self) -> Option<(Rect, CanvasView, CanvasOverlay)> {
         let view = self.canvas_view()?;
-        if self.preview_asset.is_some() {
-            return Some((self.canvas_rect, view, CanvasOverlay {
+        if self.session.preview_asset.is_some() {
+            return Some((self.session.canvas_rect, view, CanvasOverlay {
                 layers: vec![LayerDraw { visible: true, opacity: 1.0 }],
                 ..Default::default()
             }));
         }
         let mut overlay = CanvasOverlay {
-            dim_outside: self.dim_outside_selection && self.selection.is_some(),
+            dim_outside: self.session.dim_outside_selection && self.session.selection.is_some(),
             layers: self
                 .workspace
                 .active()
@@ -180,24 +180,24 @@ impl Scene for EditorApp {
         if self.hsv.open && self.hsv.preview && self.hsv.document_id == self.workspace.active_doc().id {
             overlay.hsv = Some((self.hsv.layer,self.hsv.adjustment));
         }
-        if matches!(self.tool, Tool::Brush | Tool::SelectionBrush) && !self.eyedropper_armed() {
-            let radius = (self.brush_size * self.zoom * 0.5).max(2.5);
+        if matches!(self.session.tool, Tool::Brush | Tool::SelectionBrush) && !self.eyedropper_armed() {
+            let radius = (self.session.brush_size * self.session.zoom * 0.5).max(2.5);
             let expanded = Rect {
-                min: self.canvas_rect.min - Vec2::splat(radius),
-                max: self.canvas_rect.max + Vec2::splat(radius),
+                min: self.session.canvas_rect.min - Vec2::splat(radius),
+                max: self.session.canvas_rect.max + Vec2::splat(radius),
             };
             if expanded.contains(self.input.mouse_pos) {
                 overlay.brush_center = Some(self.input.mouse_pos);
                 overlay.brush_radius = radius;
             }
         }
-        if let (Some(anchor), Some(current)) = (self.selection_anchor, self.selection_current) {
+        if let (Some(anchor), Some(current)) = (self.session.selection_anchor, self.session.selection_current) {
             let rect = PixelRect::from_points(anchor, current, view.width, view.height);
             if !rect.is_empty() {
                 overlay.selection_rect = Some(view.pixel_corners(rect));
             }
         }
-        if let Some(floating) = self.floating.as_ref() {
+        if let Some(floating) = self.session.floating.as_ref() {
             overlay.floating = Some(FloatingDraw {
                 opacity: floating.opacity,
                 whole_layer: floating.whole_layer,
@@ -209,8 +209,8 @@ impl Scene for EditorApp {
             overlay.transform_corners = Some(corners);
             overlay.transform_pivot = Some(view.image_to_screen(floating.pivot));
         }
-        Some((self.canvas_rect, view, overlay))
+        Some((self.session.canvas_rect, view, overlay))
     }
 
-    fn canvas_cursor(&self) -> Option<TransformCursor> { self.canvas_cursor }
+    fn canvas_cursor(&self) -> Option<TransformCursor> { self.session.canvas_cursor }
 }

@@ -9,7 +9,6 @@
         app.merge_layer_down();
         assert_eq!(app.project().layers.len(), 2);
         assert_eq!(app.project().active_layer, 1);
-        assert_eq!(app.project().manifest.layers.len(), 2);
         assert_eq!(app.project().layers[0].pixels, before[0].pixels);
         assert!(app.layers_reload && app.dirty);
         let merged = app.project().layers[1].pixels.clone();
@@ -74,7 +73,6 @@
                 assert!(app.workspace.active_doc().thumb_dirty);
                 app.undo();
                 assert_eq!(app.project().active_layer, 2);
-                assert_eq!(app.project().manifest.layers.len(), 3);
                 for (restored, original) in app.project().layers.iter().zip(&before) {
                     assert_eq!(restored.name, original.name);
                     assert_eq!(restored.visible, original.visible);

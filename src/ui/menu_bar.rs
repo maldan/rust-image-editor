@@ -44,7 +44,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             }
         });
         ui.menu("mask", "Mask", |ui| {
-            if ui.menu_item_enabled("invert", "Invert", app.selection.is_some()).clicked() {
+            if ui.menu_item_enabled("invert", "Invert", app.session.selection.is_some()).clicked() {
                 app.invert_selection();
             }
         });

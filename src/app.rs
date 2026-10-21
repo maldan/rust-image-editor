@@ -23,8 +23,11 @@ mod documents;
 mod history;
 mod layers;
 mod scene;
+mod session;
 mod tools;
 mod transform;
+
+pub use session::DocumentSession;
 
 #[cfg(test)]
 mod ai_tests;
@@ -44,37 +47,10 @@ pub struct EditorApp {
     dirty_layer: Option<usize>,
     layers_reload: bool,
     floating_reload: bool,
-    pub canvas_rect: Rect,
-    pub viewport_size: Vec2,
-    pub pan: Vec2,
-    pub zoom: f32,
-    pub rotation: f32,
-    pub fit_image: bool,
+    pub session: DocumentSession,
     pub dirty: bool,
     pub status: String,
     pub dock: DockState,
-    pub tool: Tool,
-    /// Erase mode for Brush and Fill (not a separate tool).
-    pub erase_mode: bool,
-    pub brush_size: f32,
-    pub brush_opacity: f32,
-    pub brush_hardness: f32,
-    pub brush_color: [f32; 4],
-    pub wand_threshold: f32,
-    pub fill_threshold: f32,
-    pub dim_outside_selection: bool,
-    pub preview_asset: Option<String>,
-    preview_asset_dirty: bool,
-    preview_document_view: Option<(Vec2, f32, f32)>,
-    pub selection_brush_erase: bool,
-    lasso_points: Vec<Vec2>,
-    selection_brush_last: Option<Vec2>,
-    pub selection: Option<Selection>,
-    pub selection_anchor: Option<(u32, u32)>,
-    pub selection_current: Option<(u32, u32)>,
-    selection_mode: SelectMode,
-    selection_deselect_press: Option<Vec2>,
-    selection_mask_dirty: bool,
     brush_last: Option<(f32, f32)>,
     brush_dirty: bool,
     stroke_marks: Vec<u32>,
@@ -82,11 +58,6 @@ pub struct EditorApp {
     stroke_id: u32,
     stroke_capture: Option<EditCapture>,
     history: History,
-    floating: Option<FloatingTransform>,
-    transform_drag: Option<TransformHit>,
-    transform_last: Option<Vec2>,
-    pub transform_keep_aspect_ratio: bool,
-    pub canvas_cursor: Option<TransformCursor>,
     pub layer_drag: Option<usize>,
     canvas_cleared: bool,
     pub resize_w: u32,
@@ -105,36 +76,10 @@ impl Default for EditorApp {
             dirty_layer: None,
             layers_reload: false,
             floating_reload: false,
-            canvas_rect: Rect::from_min_size(Vec2::ZERO, Vec2::ZERO),
-            viewport_size: Vec2::ZERO,
-            pan: Vec2::ZERO,
-            zoom: 1.0,
-            rotation: 0.0,
-            fit_image: false,
+            session: DocumentSession::default(),
             dirty: false,
             status: "Import assets, place them on a document, or resize canvas".into(),
             dock: ui::default_dock(),
-            tool: Tool::Brush,
-            erase_mode: false,
-            brush_size: 24.0,
-            brush_opacity: 1.0,
-            brush_hardness: 1.0,
-            brush_color: [0.0, 0.0, 0.0, 1.0],
-            wand_threshold: 32.0,
-            fill_threshold: 32.0,
-            dim_outside_selection: true,
-            preview_asset: None,
-            preview_asset_dirty: false,
-            preview_document_view: None,
-            selection_brush_erase: false,
-            lasso_points: Vec::new(),
-            selection_brush_last: None,
-            selection: None,
-            selection_anchor: None,
-            selection_current: None,
-            selection_mode: SelectMode::Replace,
-            selection_deselect_press: None,
-            selection_mask_dirty: true,
             brush_last: None,
             brush_dirty: false,
             stroke_marks: Vec::new(),
@@ -142,11 +87,6 @@ impl Default for EditorApp {
             stroke_id: 1,
             stroke_capture: None,
             history: History::default(),
-            floating: None,
-            transform_drag: None,
-            transform_last: None,
-            transform_keep_aspect_ratio: true,
-            canvas_cursor: None,
             layer_drag: None,
             canvas_cleared: true,
             resize_w: 512,
@@ -177,7 +117,8 @@ impl EditorApp {
         let Some(layer) = self.workspace.active_mut().layers.get_mut(index) else { return; };
         let before = layer.pixels.clone();
         if !adjustment.apply(&mut layer.pixels) { return; }
-        self.history.push_raster(index,before,layer.pixels.clone());
+        let edit = crate::history::HistoryEdit::from_diff(index, &before, &layer.pixels);
+        if let Some(edit) = edit { self.history.push(edit); }
         self.layers_reload = true;
         self.dirty = true;
         self.workspace.mark_active_thumb_dirty();
@@ -192,16 +133,16 @@ impl EditorApp {
     }
 
     pub fn brush_last_active(&self) -> bool {
-        self.brush_last.is_some() || self.transform_drag.is_some()
-            || !self.lasso_points.is_empty() || self.selection_brush_last.is_some()
+        self.brush_last.is_some() || self.session.transform_drag.is_some()
+            || !self.session.lasso_points.is_empty() || self.session.selection_brush_last.is_some()
     }
 
     pub fn has_floating_transform(&self) -> bool {
-        self.floating.is_some()
+        self.session.floating.is_some()
     }
 
     pub fn display_size(&self) -> Option<(u32, u32)> {
-        if let Some(id) = &self.preview_asset {
+        if let Some(id) = &self.session.preview_asset {
             return self.workspace.assets.iter().find(|a| &a.id == id).map(|a| (a.width, a.height));
         }
         self.image_size
@@ -210,60 +151,60 @@ impl EditorApp {
     pub fn show_asset_preview(&mut self, index: usize) {
         let Some(asset) = self.workspace.assets.get(index) else { return; };
         let id = asset.id.clone();
-        if self.preview_asset.as_ref() == Some(&id) { return; }
+        if self.session.preview_asset.as_ref() == Some(&id) { return; }
         self.commit_transform();
         self.brush_last = None;
-        self.lasso_points.clear();
-        self.selection_brush_last = None;
-        self.selection_anchor = None;
-        self.selection_current = None;
-        if self.preview_asset.is_none() {
-            self.preview_document_view = Some((self.pan, self.zoom, self.rotation));
+        self.session.lasso_points.clear();
+        self.session.selection_brush_last = None;
+        self.session.selection_anchor = None;
+        self.session.selection_current = None;
+        if self.session.preview_asset.is_none() {
+            self.session.preview_document_view = Some((self.session.pan, self.session.zoom, self.session.rotation));
         }
-        self.preview_asset = Some(id);
-        self.preview_asset_dirty = true;
-        self.rotation = 0.0;
-        self.fit_image = true;
+        self.session.preview_asset = Some(id);
+        self.session.preview_asset_dirty = true;
+        self.session.rotation = 0.0;
+        self.session.fit_image = true;
     }
 
     pub fn close_asset_preview(&mut self) {
-        if self.preview_asset.take().is_some() {
+        if self.session.preview_asset.take().is_some() {
             self.layers_reload = true;
-            self.selection_mask_dirty = true;
-            if let Some((pan, zoom, rotation)) = self.preview_document_view.take() {
-                self.pan = pan;
-                self.zoom = zoom;
-                self.rotation = rotation;
+            self.session.selection_mask_dirty = true;
+            if let Some((pan, zoom, rotation)) = self.session.preview_document_view.take() {
+                self.session.pan = pan;
+                self.session.zoom = zoom;
+                self.session.rotation = rotation;
             }
-            self.fit_image = false;
+            self.session.fit_image = false;
         }
     }
 
     pub fn canvas_view(&self) -> Option<CanvasView> {
         let (width, height) = self.display_size()?;
         Some(CanvasView {
-            center: self.canvas_rect.min + rect_size(self.canvas_rect) * 0.5 + self.pan,
-            zoom: self.zoom,
-            rotation: self.rotation.to_radians(),
+            center: self.session.canvas_rect.min + rect_size(self.session.canvas_rect) * 0.5 + self.session.pan,
+            zoom: self.session.zoom,
+            rotation: self.session.rotation.to_radians(),
             width,
             height,
         })
     }
 
     pub fn update_view(&mut self) {
-        if !self.canvas_rect.contains(self.input.mouse_pos) {
+        if !self.session.canvas_rect.contains(self.input.mouse_pos) {
             return;
         }
         if self.input.mouse_middle_down {
-            self.pan += self.input.mouse_delta;
+            self.session.pan += self.input.mouse_delta;
         }
         if self.input.scroll_delta.y.abs() > 0.01 {
-            let old_zoom = self.zoom;
+            let old_zoom = self.session.zoom;
             let factor = (self.input.scroll_delta.y * 0.002).exp();
-            self.zoom = (self.zoom * factor).clamp(0.05, 32.0);
-            let center = self.canvas_rect.min + rect_size(self.canvas_rect) * 0.5;
-            let cursor_from_image_center = self.input.mouse_pos - center - self.pan;
-            self.pan -= cursor_from_image_center * (self.zoom / old_zoom - 1.0);
+            self.session.zoom = (self.session.zoom * factor).clamp(0.05, 32.0);
+            let center = self.session.canvas_rect.min + rect_size(self.session.canvas_rect) * 0.5;
+            let cursor_from_image_center = self.input.mouse_pos - center - self.session.pan;
+            self.session.pan -= cursor_from_image_center * (self.session.zoom / old_zoom - 1.0);
         }
     }
 
@@ -271,27 +212,41 @@ impl EditorApp {
         let Some((width, height)) = self.display_size() else {
             return;
         };
-        let available = (rect_size(self.canvas_rect) - Vec2::splat(32.0)).max(Vec2::splat(1.0));
-        self.zoom = (available.x / width as f32)
+        let available = (rect_size(self.session.canvas_rect) - Vec2::splat(32.0)).max(Vec2::splat(1.0));
+        self.session.zoom = (available.x / width as f32)
             .min(available.y / height as f32)
             .clamp(0.05, 1.0);
-        self.pan = Vec2::ZERO;
-        self.fit_image = false;
+        self.session.pan = Vec2::ZERO;
+        self.session.fit_image = false;
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.session.clear_selection();
+    }
+
+    pub(in crate::app) fn set_selection(&mut self, selection: crate::editing::Selection) {
+        self.session.set_selection(selection);
+    }
+
+    pub fn invert_selection(&mut self) {
+        if self.session.invert_selection() {
+            self.status = "Selection inverted".into();
+        }
     }
 
     pub fn set_tool(&mut self, tool: Tool) {
-        if self.tool == tool {
+        if self.session.tool == tool {
             return;
         }
-        if self.tool == Tool::Transform && tool != Tool::Transform {
+        if self.session.tool == Tool::Transform && tool != Tool::Transform {
             self.commit_transform();
         }
         self.commit_selection_drag();
-        self.lasso_points.clear();
-        self.selection_brush_last = None;
+        self.session.lasso_points.clear();
+        self.session.selection_brush_last = None;
         self.brush_last = None;
-        self.tool = tool;
-        if tool == Tool::Transform && self.preview_asset.is_none() {
+        self.session.tool = tool;
+        if tool == Tool::Transform && self.session.preview_asset.is_none() {
             self.begin_transform();
         }
     }
@@ -367,7 +322,7 @@ mod hsv_tests {
         app.project_mut().layers[1].opacity = 0.7;
         app.sync_layer_structure();
         app.dirty = false;
-        app.canvas_rect = Rect::from_min_size(Vec2::ZERO,Vec2::splat(400.0));
+        app.session.canvas_rect = Rect::from_min_size(Vec2::ZERO,Vec2::splat(400.0));
         app
     }
 

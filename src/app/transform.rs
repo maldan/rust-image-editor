@@ -2,7 +2,7 @@ use super::*;
 
 impl EditorApp {
     pub(in crate::app) fn begin_transform(&mut self) {
-        if self.floating.is_some() {
+        if self.session.floating.is_some() {
             return;
         }
         let Some((width, height)) = self.image_size else {
@@ -12,13 +12,13 @@ impl EditorApp {
         let project = self.workspace.active();
         let layer = project.active_layer;
         let Some(target) = project.layers.get(layer) else { return; };
-        let floating = if let Some(selection) = self.selection.as_ref() {
+        let floating = if let Some(selection) = self.session.selection.as_ref() {
             FloatingTransform::extract(&target.pixels, width, height, selection, layer, target.opacity)
         } else {
             FloatingTransform::extract_layer(&target.pixels, layer, target.opacity)
         };
         let Some(floating) = floating else { return; };
-        self.floating = Some(floating);
+        self.session.floating = Some(floating);
         self.floating_reload = true;
         self.clear_selection();
         self.dirty = true;
@@ -26,31 +26,31 @@ impl EditorApp {
     }
 
     pub fn flip_transform(&mut self, horizontal: bool) {
-        if self.tool != Tool::Transform || self.ai.open || self.hsv.open || self.preview_asset.is_some() { return; }
+        if self.session.tool != Tool::Transform || self.ai.open || self.hsv.open || self.session.preview_asset.is_some() { return; }
         self.begin_transform();
-        let Some(floating) = self.floating.as_mut() else { return; };
+        let Some(floating) = self.session.floating.as_mut() else { return; };
         if horizontal { floating.flip_x = !floating.flip_x; }
         else { floating.flip_y = !floating.flip_y; }
         self.status = if horizontal { "Transform: Flip X" } else { "Transform: Flip Y" }.into();
     }
 
     pub fn cancel_transform(&mut self) {
-        if self.floating.take().is_none() {
-            self.transform_drag = None;
-            self.transform_last = None;
+        if self.session.floating.take().is_none() {
+            self.session.transform_drag = None;
+            self.session.transform_last = None;
             return;
         }
         self.stroke_capture = None;
-        self.transform_drag = None;
-        self.transform_last = None;
+        self.session.transform_drag = None;
+        self.session.transform_last = None;
         self.floating_reload = false;
         self.status = "Transform cancelled".into();
     }
 
     pub(in crate::app) fn commit_transform(&mut self) {
-        let Some(floating) = self.floating.take() else {
-            self.transform_drag = None;
-            self.transform_last = None;
+        let Some(floating) = self.session.floating.take() else {
+            self.session.transform_drag = None;
+            self.session.transform_last = None;
             return;
         };
         let Some((width, height)) = self.image_size else {
@@ -75,11 +75,12 @@ impl EditorApp {
             transformed_selection = Some(floating.stamp(pixels, width, height).1);
             pixels.prune();
         }
-        self.history.push_raster(layer, before, pixels.clone());
+        let edit = crate::history::HistoryEdit::from_diff(layer, &before, pixels);
+        if let Some(edit) = edit { self.history.push(edit); }
         if let Some(selection) = transformed_selection { self.set_selection(selection); }
         self.layers_reload = true;
-        self.transform_drag = None;
-        self.transform_last = None;
+        self.session.transform_drag = None;
+        self.session.transform_last = None;
         self.floating_reload = false;
         self.dirty = true;
         self.workspace.mark_active_thumb_dirty();
@@ -88,9 +89,9 @@ impl EditorApp {
     }
 
     pub fn transform_cursor(&self, view: CanvasView) -> Option<TransformCursor> {
-        if self.tool != Tool::Transform || self.preview_asset.is_some() || self.ai.open || self.hsv.open { return None; }
-        let floating = self.floating.as_ref()?;
-        let hit = self.transform_drag.or_else(|| floating.hit_test(
+        if self.session.tool != Tool::Transform || self.session.preview_asset.is_some() || self.ai.open || self.hsv.open { return None; }
+        let floating = self.session.floating.as_ref()?;
+        let hit = self.session.transform_drag.or_else(|| floating.hit_test(
             view.screen_to_image(self.input.mouse_pos),8.0/view.zoom.max(1.0e-6)))?;
         Some(match hit {
             TransformHit::Body => TransformCursor::Move,
@@ -102,7 +103,7 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn handle_transform(&mut self, view: CanvasView) {
-        if self.floating.is_none() {
+        if self.session.floating.is_none() {
             if self.input.mouse_pressed {
                 self.begin_transform();
             }
@@ -121,26 +122,26 @@ impl EditorApp {
 
         if self.input.mouse_pressed {
             let hit = self
-                .floating
+                .session.floating
                 .as_ref()
                 .and_then(|f| f.hit_test(image_pos, handle_r));
             if let Some(hit) = hit {
-                self.transform_drag = Some(hit);
-                self.transform_last = Some(image_pos);
+                self.session.transform_drag = Some(hit);
+                self.session.transform_last = Some(image_pos);
             }
         }
         if self.input.mouse_down
-            && let (Some(hit), Some(prev)) = (self.transform_drag, self.transform_last)
+            && let (Some(hit), Some(prev)) = (self.session.transform_drag, self.session.transform_last)
         {
             let mut scale = Vec2::ONE;
             let mut rotation = 0.0f32;
-            if let Some(floating) = self.floating.as_mut() {
-                floating.keep_aspect_ratio = self.transform_keep_aspect_ratio;
+            if let Some(floating) = self.session.floating.as_mut() {
+                floating.keep_aspect_ratio = self.session.transform_keep_aspect_ratio;
                 floating.drag(hit,prev,image_pos);
                 scale = floating.scale;
                 rotation = floating.rotation;
             }
-            self.transform_last = Some(image_pos);
+            self.session.transform_last = Some(image_pos);
             self.status = format!(
                 "Transform  scale {:.2} × {:.2}  rot {:.0}°",
                 scale.x, scale.y,
@@ -148,8 +149,8 @@ impl EditorApp {
             );
         }
         if self.input.mouse_released {
-            self.transform_drag = None;
-            self.transform_last = None;
+            self.session.transform_drag = None;
+            self.session.transform_last = None;
         }
     }
 }

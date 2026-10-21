@@ -1,25 +1,32 @@
 use glam::Vec2;
-use mega_ui::Ui;
+use mega_ui::{Rect, Ui};
 
-use crate::app::EditorApp;
-use crate::workspace::{self, THUMB_VIEW};
+use crate::host::FrameInput;
+use crate::workspace::{self, Workspace, THUMB_VIEW};
 
-pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
+#[derive(Default)]
+pub struct LibraryAction {
+    pub import: bool,
+    pub new_document: bool,
+    pub switch_doc: Option<usize>,
+    pub delete_doc: Option<usize>,
+    pub place_asset: Option<usize>,
+    pub delete_asset: Option<usize>,
+    pub preview_asset: Option<usize>,
+}
+
+pub fn draw(ui: &mut Ui, workspace: &mut Workspace, input: &FrameInput, canvas: Rect) -> LibraryAction {
+    let mut action = LibraryAction::default();
     ui.label("Library");
     ui.separator();
     ui.space(6.0);
 
     if ui.button("asset_import", "Import Asset…").clicked() {
-        app.import_image(ui);
+        action.import = true;
     }
     ui.space(4.0);
     if ui.button("doc_new", "New Document").clicked() {
-        app.cancel_transform();
-        let idx = app.workspace.create_document(&format!(
-            "Document {}",
-            app.workspace.documents.len() + 1
-        ));
-        app.switch_document(idx);
+        action.new_document = true;
     }
     ui.space(8.0);
 
@@ -28,29 +35,29 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     let mut place_asset: Option<usize> = None;
     let mut delete_asset: Option<usize> = None;
     let mut preview_asset: Option<usize> = None;
-    let mut sel = app.workspace.tree_selected.clone();
+    let mut sel = workspace.tree_selected.clone();
     let thumb_size = THUMB_VIEW * ui.scale();
 
     ui.tree_scope(&mut sel, |ui| {
         ui.tree_node_icon_open("images_root", "folder", "images", true, |ui| {
-            let asset_count = app.workspace.assets.len();
+            let asset_count = workspace.assets.len();
             let mut start_drag: Option<(usize, Vec2)> = None;
             for index in 0..asset_count {
-                let id = format!("asset_{}", app.workspace.assets[index].id);
+                let id = format!("asset_{}", workspace.assets[index].id);
                 let label = format!(
                     "{} ({}×{})",
-                    app.workspace.assets[index].name,
-                    app.workspace.assets[index].width,
-                    app.workspace.assets[index].height
+                    workspace.assets[index].name,
+                    workspace.assets[index].width,
+                    workspace.assets[index].height
                 );
-                let thumb_pixels = app.workspace.assets[index].thumb.clone();
+                let thumb_pixels = workspace.assets[index].thumb.clone();
                 ui.horizontal(|ui| {
                     let thumb = ui.area(&format!("asset_thumb_{index}"), Vec2::splat(thumb_size));
                     ui.fill_rect(thumb.rect, [0.12, 0.12, 0.14, 1.0]);
                     draw_thumb_in(ui, &thumb_pixels, thumb.rect);
                     // Grab thumbnail → drag onto canvas.
-                    if thumb.hovered && app.input.mouse_pressed {
-                        start_drag = Some((index, app.input.mouse_pos));
+                    if thumb.hovered && input.mouse_pressed {
+                        start_drag = Some((index, input.mouse_pos));
                     }
 
                     ui.flex(1.0, |ui| {
@@ -64,14 +71,14 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                 });
             }
             if let Some((index, origin)) = start_drag {
-                app.workspace.begin_asset_drag(index, origin);
+                workspace.begin_asset_drag(index, origin);
             }
         });
 
         ui.tree_node_icon_open("documents_root", "folder", "documents", true, |ui| {
-            for (index, doc) in app.workspace.documents.iter().enumerate() {
+            for (index, doc) in workspace.documents.iter().enumerate() {
                 let id = format!("doc_{}", doc.id);
-                let label = if index == app.workspace.active_document {
+                let label = if index == workspace.active_document {
                     format!("• {}", doc.name)
                 } else {
                     doc.name.clone()
@@ -80,13 +87,13 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     let thumb = ui.area(&format!("doc_thumb_{index}"), Vec2::splat(thumb_size));
                     ui.fill_rect(thumb.rect, [0.12, 0.12, 0.14, 1.0]);
                     draw_thumb_in(ui, &doc.thumb, thumb.rect);
-                    if thumb.hovered && app.input.mouse_released { switch_doc = Some(index); }
+                    if thumb.hovered && input.mouse_released { switch_doc = Some(index); }
                     ui.flex(1.0, |ui| {
                         let resp = ui.tree_leaf_icon(&id, "file", &label);
                         if resp.clicked() {
                             switch_doc = Some(index);
                         }
-                        if app.workspace.documents.len() > 1
+                        if workspace.documents.len() > 1
                             && ui.icon_button(&format!("doc_del_{index}"), "delete", false)
                         {
                             delete_doc = Some(index);
@@ -96,21 +103,21 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             }
         });
     });
-    app.workspace.tree_selected = sel;
+    workspace.tree_selected = sel;
 
     // Promote press → drag after threshold; ghost follows cursor.
     if let (Some(index), Some(origin)) = (
-        app.workspace.asset_drag,
-        app.workspace.asset_drag_origin,
+        workspace.asset_drag,
+        workspace.asset_drag_origin,
     ) {
-        if app.input.mouse_down {
-            if (app.input.mouse_pos - origin).length() > 6.0 * ui.scale() {
-                app.workspace.asset_dragging = true;
+        if input.mouse_down {
+            if (input.mouse_pos - origin).length() > 6.0 * ui.scale() {
+                workspace.asset_dragging = true;
             }
-            if app.workspace.asset_dragging {
-                if let Some(asset) = app.workspace.assets.get(index) {
+            if workspace.asset_dragging {
+                if let Some(asset) = workspace.assets.get(index) {
                     let ghost = mega_ui::Rect::from_min_size(
-                        app.input.mouse_pos - Vec2::splat(thumb_size * 0.5),
+                        input.mouse_pos - Vec2::splat(thumb_size * 0.5),
                         Vec2::splat(thumb_size),
                     );
                     ui.fill_rect(ghost, [0.12, 0.12, 0.14, 0.85]);
@@ -121,13 +128,13 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         }
     }
 
-    if app.input.mouse_released {
-        if let Some(asset) = app.workspace.asset_drag {
-            let clicked = !app.workspace.asset_dragging
-                && app.workspace.asset_drag_origin.is_some_and(|origin| app.input.mouse_pos.distance(origin) < 6.0 * ui.scale());
-            let dropped = app.workspace.asset_dragging
-                && app.canvas_rect.contains(app.input.mouse_pos);
-            app.workspace.clear_asset_drag();
+    if input.mouse_released {
+        if let Some(asset) = workspace.asset_drag {
+            let clicked = !workspace.asset_dragging
+                && workspace.asset_drag_origin.is_some_and(|origin| input.mouse_pos.distance(origin) < 6.0 * ui.scale());
+            let dropped = workspace.asset_dragging
+                && canvas.contains(input.mouse_pos);
+            workspace.clear_asset_drag();
             if dropped {
                 place_asset = Some(asset);
             } else if clicked {
@@ -136,29 +143,12 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         }
     }
 
-    if let Some(index) = switch_doc {
-        app.switch_document(index);
-    }
-    if let Some(index) = preview_asset {
-        app.show_asset_preview(index);
-    }
-    if let Some(index) = delete_doc {
-        app.cancel_transform();
-        app.workspace.delete_document(index);
-        app.clear_history();
-        let _ = app.refresh_image();
-        app.dirty = true;
-    }
-    if let Some(index) = place_asset {
-        app.place_asset(index, ui);
-    }
-    if let Some(index) = delete_asset {
-        if app.preview_asset.as_ref() == app.workspace.assets.get(index).map(|a| &a.id) {
-            app.close_asset_preview();
-        }
-        app.workspace.delete_asset(index);
-        app.dirty = true;
-    }
+    action.switch_doc = switch_doc;
+    action.preview_asset = preview_asset;
+    action.delete_doc = delete_doc;
+    action.place_asset = place_asset;
+    action.delete_asset = delete_asset;
+    action
 }
 
 fn draw_thumb_in(ui: &mut Ui, thumb: &[u8], rect: mega_ui::Rect) {

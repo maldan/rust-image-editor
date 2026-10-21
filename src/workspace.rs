@@ -7,7 +7,7 @@ use image::{DynamicImage, ImageFormat, RgbaImage};
 use mega_file::{MegaFile, WriteFile};
 use serde::{Deserialize, Serialize};
 
-use crate::project::{Layer, LayerMeta, Project, encode_png_rgba};
+use crate::project::{Layer, Project, encode_png_rgba};
 
 const MANIFEST_PATH: &str = "/manifest.json";
 const MANIFEST_KIND: &str = "mega-image-editor/manifest+json";
@@ -33,6 +33,17 @@ struct AssetMeta {
     name: String,
     width: u32,
     height: u32,
+    path: String,
+}
+
+fn default_opacity() -> f32 { 1.0 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct LayerMeta {
+    name: String,
+    visible: bool,
+    #[serde(default = "default_opacity")]
+    opacity: f32,
     path: String,
 }
 
@@ -120,11 +131,11 @@ pub struct Workspace {
     saved: Option<SavedResources>,
 }
 
-/// Last successful disk state. Sparse snapshots share tiles until an edit changes them.
+/// Last successful disk state. Layers are identified by a content hash, not a second pixel buffer.
 #[derive(Debug, Clone, Default)]
 struct SavedResources {
     assets: HashMap<String, (u32, u32, u64)>,
-    layers: HashMap<String, SparsePixels>,
+    layers: HashMap<String, u64>,
     manifest: Vec<u8>,
 }
 
@@ -340,14 +351,15 @@ impl Workspace {
             let mut layers = Vec::new();
             for (i, layer) in doc.project.layers.iter().enumerate() {
                 let layer_path = format!("/documents/{}/layers/{i}.tiles", doc.id);
-                if previous.and_then(|saved| saved.layers.get(&layer_path)) != Some(&layer.pixels) {
+                let fingerprint = layer.pixels.fingerprint();
+                if previous.and_then(|saved| saved.layers.get(&layer_path)).copied() != Some(fingerprint) {
                     files.push(WriteFile::new(
                         layer_path.clone(),
                         "application/x-rgba-tiles-64",
                         layer.pixels.encode(),
                     ));
                 }
-                next.layers.insert(layer_path.clone(), layer.pixels.clone());
+                next.layers.insert(layer_path.clone(), fingerprint);
                 layers.push(LayerMeta {
                     name: layer.name.clone(),
                     visible: layer.visible,
@@ -478,13 +490,10 @@ impl Workspace {
                 height,
                 layers,
                 active_layer: meta.active_layer,
-                path: None,
-                manifest: Default::default(),
             };
             if !project.layers.is_empty() {
                 project.active_layer = project.active_layer.min(project.layers.len() - 1);
             }
-            project.sync_manifest_pub();
             documents.push(Document::new(meta.id.clone(), meta.name.clone(), project));
         }
         if documents.is_empty() {
@@ -514,7 +523,10 @@ impl Workspace {
         }
         for document in &workspace.documents {
             for (index, layer) in document.project.layers.iter().enumerate() {
-                saved.layers.insert(format!("/documents/{}/layers/{index}.tiles", document.id), layer.pixels.clone());
+                saved.layers.insert(
+                    format!("/documents/{}/layers/{index}.tiles", document.id),
+                    layer.pixels.fingerprint(),
+                );
             }
         }
         workspace.saved = Some(saved);
@@ -677,7 +689,8 @@ mod tests {
         assert!(workspace.optimize().is_err());
         drop(lock);
         assert_eq!(fs::read(&path).unwrap(), original);
-        assert_ne!(workspace.saved.as_ref().unwrap().layers.values().next().unwrap(), &workspace.active().layers[0].pixels);
+        let saved_fp = *workspace.saved.as_ref().unwrap().layers.values().next().unwrap();
+        assert_ne!(saved_fp, workspace.active().layers[0].pixels.fingerprint());
         workspace.save(&path).unwrap();
         assert_eq!(Workspace::open(&path).unwrap().active().layers[0].pixels.read(0, 0, 0), [200, 201, 202, 255]);
     }

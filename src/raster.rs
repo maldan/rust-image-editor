@@ -222,6 +222,22 @@ impl SparsePixels {
             .retain(|_, p| p.chunks_exact(4).any(|p| p[3] != 0));
     }
 
+    /// Process-local content id of the offset and every tile. Used to skip unchanged
+    /// layer writes; it is not stored in the file.
+    pub fn fingerprint(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hash = DefaultHasher::new();
+        self.offset.hash(&mut hash);
+        let mut keys: Vec<_> = self.tiles.keys().copied().collect();
+        keys.sort_unstable();
+        for key in keys {
+            key.hash(&mut hash);
+            self.tiles[&key].as_slice().hash(&mut hash);
+        }
+        hash.finish()
+    }
+
     /// Fixed-size physical tiles; no transparent bounding rectangle in the file.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(8 + self.tiles.len() * (8 + TILE_BYTES));

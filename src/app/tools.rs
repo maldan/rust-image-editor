@@ -15,62 +15,40 @@ impl EditorApp {
         match mode {
             SelectMode::Replace => self.set_selection(next),
             SelectMode::Add => {
-                if let Some(sel) = self.selection.as_mut() {
+                if let Some(sel) = self.session.selection.as_mut() {
                     sel.union(&next);
                     if sel.is_empty() {
                         self.clear_selection();
                     } else {
-                        self.selection_mask_dirty = true;
+                        self.session.selection_mask_dirty = true;
                     }
                 } else {
                     self.set_selection(next);
                 }
             }
             SelectMode::Subtract => {
-                if let Some(sel) = self.selection.as_mut() {
+                if let Some(sel) = self.session.selection.as_mut() {
                     sel.subtract(&next);
                     if sel.is_empty() {
                         self.clear_selection();
                     } else {
-                        self.selection_mask_dirty = true;
+                        self.session.selection_mask_dirty = true;
                     }
                 }
             }
         }
     }
 
-    pub fn invert_selection(&mut self) {
-        let Some(selection) = self.selection.as_mut() else { return; };
-        selection.invert();
-        self.selection_mask_dirty = true;
-        self.status = "Selection inverted".into();
-    }
-
-    pub fn clear_selection(&mut self) {
-        self.lasso_points.clear();
-        self.selection_brush_last = None;
-        self.selection = None;
-        self.selection_anchor = None;
-        self.selection_current = None;
-        self.selection_deselect_press = None;
-        self.selection_mask_dirty = true;
-    }
-
-    pub(in crate::app) fn set_selection(&mut self, selection: Selection) {
-        self.selection = Some(selection);
-        self.selection_mask_dirty = true;
-    }
-
     pub(in crate::app) fn commit_selection_drag(&mut self) {
         let Some((width, height)) = self.image_size else {
-            self.selection_anchor = None;
-            self.selection_current = None;
-            self.selection_deselect_press = None;
+            self.session.selection_anchor = None;
+            self.session.selection_current = None;
+            self.session.selection_deselect_press = None;
             return;
         };
-        if let (Some(anchor), Some(current)) = (self.selection_anchor, self.selection_current) {
+        if let (Some(anchor), Some(current)) = (self.session.selection_anchor, self.session.selection_current) {
             let rect = PixelRect::from_points(anchor, current, width, height);
-            let mode = self.selection_mode;
+            let mode = self.session.selection_mode;
             if rect.is_empty() {
                 if mode == SelectMode::Replace {
                     self.clear_selection();
@@ -79,80 +57,80 @@ impl EditorApp {
                 self.apply_selection(Selection::from_rect(rect, width, height), mode);
             }
         }
-        self.selection_anchor = None;
-        self.selection_current = None;
-        self.selection_deselect_press = None;
-        self.selection_mode = SelectMode::Replace;
+        self.session.selection_anchor = None;
+        self.session.selection_current = None;
+        self.session.selection_deselect_press = None;
+        self.session.selection_mode = SelectMode::Replace;
     }
 
     pub fn handle_canvas_edit(&mut self, view: CanvasView) {
-        if self.preview_asset.is_some() { return; }
+        if self.session.preview_asset.is_some() { return; }
         let (width, height) = (view.width, view.height);
         if width == 0 || height == 0 {
             return;
         }
-        match self.tool {
+        match self.session.tool {
             Tool::RectangleSelect => self.handle_rect_select(view),
             Tool::Lasso => self.handle_lasso(view),
             Tool::SelectionBrush => self.handle_selection_brush(view),
             Tool::MagicWand => self.handle_wand(view),
             Tool::Fill => self.handle_fill(view),
-            Tool::Brush => self.handle_brush(view, self.erase_mode),
+            Tool::Brush => self.handle_brush(view, self.session.erase_mode),
             Tool::Transform => self.handle_transform(view),
         }
     }
 
     pub(in crate::app) fn handle_lasso(&mut self, view: CanvasView) {
         if self.input.key_escape {
-            self.lasso_points.clear();
+            self.session.lasso_points.clear();
             return;
         }
         let point = view.screen_to_image(self.input.mouse_pos);
-        if self.input.mouse_pressed && self.canvas_rect.contains(self.input.mouse_pos) {
-            self.lasso_points.clear();
-            self.lasso_points.push(point);
-            self.selection_mode = self.select_mode();
+        if self.input.mouse_pressed && self.session.canvas_rect.contains(self.input.mouse_pos) {
+            self.session.lasso_points.clear();
+            self.session.lasso_points.push(point);
+            self.session.selection_mode = self.select_mode();
         }
         if (self.input.mouse_down || self.input.mouse_released)
-            && let Some(last) = self.lasso_points.last()
+            && let Some(last) = self.session.lasso_points.last()
             && last.distance_squared(point) > 0.01
         {
-            self.lasso_points.push(point);
+            self.session.lasso_points.push(point);
         }
-        if self.input.mouse_released && !self.lasso_points.is_empty() {
-            let selection = Selection::from_polygon(&self.lasso_points, view.width, view.height);
-            self.lasso_points.clear();
-            self.apply_selection(selection, self.selection_mode);
+        if self.input.mouse_released && !self.session.lasso_points.is_empty() {
+            let selection = Selection::from_polygon(&self.session.lasso_points, view.width, view.height);
+            self.session.lasso_points.clear();
+            self.apply_selection(selection, self.session.selection_mode);
         }
     }
 
     pub(in crate::app) fn handle_selection_brush(&mut self, view: CanvasView) {
         let point = view.screen_to_image(self.input.mouse_pos);
-        if self.input.mouse_pressed && brush_overlaps_image(self.input.mouse_pos, self.brush_size * view.zoom * 0.5, view) {
-            self.selection_brush_last = Some(point);
+        if self.input.mouse_pressed && brush_overlaps_image(self.input.mouse_pos, self.session.brush_size * view.zoom * 0.5, view) {
+            self.session.selection_brush_last = Some(point);
         }
         if (self.input.mouse_down || self.input.mouse_pressed || self.input.mouse_released)
-            && let Some(previous) = self.selection_brush_last
+            && let Some(previous) = self.session.selection_brush_last
         {
-            let selection = self.selection.get_or_insert_with(|| Selection {
+            let selection = self.session.selection.get_or_insert_with(|| Selection {
                 width: view.width, height: view.height,
                 mask: vec![0; view.width as usize * view.height as usize],
             });
-            selection.paint_segment(previous, point, self.brush_size, self.selection_brush_erase);
-            self.selection_brush_last = Some(point);
-            self.selection_mask_dirty = true;
+            selection.paint_segment(previous, point, self.session.brush_size, self.session.selection_brush_erase);
+            self.session.selection_brush_last = Some(point);
+            self.session.selection_mask_dirty = true;
         }
         if self.input.mouse_released {
-            self.selection_brush_last = None;
+            self.session.selection_brush_last = None;
             // Keep an empty mask: an erased selection must not turn into an unrestricted canvas.
         }
     }
 
     pub fn draw_lasso_path(&self, ui: &mut Ui, view: CanvasView) {
-        for pair in self.lasso_points.windows(2) {
+        for pair in self.session.lasso_points.windows(2) {
             ui.line(view.image_to_screen(pair[0]), view.image_to_screen(pair[1]), 1.0, [1.0, 0.85, 0.2, 1.0]);
         }
-        if let (Some(first), Some(last)) = (self.lasso_points.first(), self.lasso_points.last()) {
+        if let (Some(first), Some(last)) = (self.session.lasso_points.first(), self.session.lasso_points.last()) {
             ui.line(view.image_to_screen(*last), view.image_to_screen(*first), 1.0, [1.0, 0.85, 0.2, 1.0]);
         }
     }
@@ -160,30 +138,30 @@ impl EditorApp {
     pub(in crate::app) fn handle_rect_select(&mut self, view: CanvasView) {
         if self.input.mouse_pressed {
             let mode = self.select_mode();
-            self.selection_mode = mode;
+            self.session.selection_mode = mode;
             if let Some(point) = screen_to_pixel(self.input.mouse_pos, view) {
                 if mode == SelectMode::Replace
                     && self
-                        .selection
+                        .session.selection
                         .as_ref()
                         .is_some_and(|sel| !sel.contains(point.0, point.1))
                 {
                     self.clear_selection();
-                    self.selection_deselect_press = Some(self.input.mouse_pos);
+                    self.session.selection_deselect_press = Some(self.input.mouse_pos);
                 } else {
-                    self.selection_deselect_press = None;
-                    self.selection_anchor = Some(point);
-                    self.selection_current = Some(point);
+                    self.session.selection_deselect_press = None;
+                    self.session.selection_anchor = Some(point);
+                    self.session.selection_current = Some(point);
                 }
             } else if mode == SelectMode::Replace
-                && self.canvas_rect.contains(self.input.mouse_pos)
-                && self.selection.is_some()
+                && self.session.canvas_rect.contains(self.input.mouse_pos)
+                && self.session.selection.is_some()
             {
                 self.clear_selection();
             }
         }
         if self.input.mouse_down {
-            if let Some(origin) = self.selection_deselect_press {
+            if let Some(origin) = self.session.selection_deselect_press {
                 let drag = self.input.mouse_pos - origin;
                 if drag.length() >= 4.0
                     && let (Some(anchor), Some(current)) = (
@@ -191,20 +169,20 @@ impl EditorApp {
                         screen_to_pixel_clamped(self.input.mouse_pos, view),
                     )
                 {
-                    self.selection_anchor = Some(anchor);
-                    self.selection_current = Some(current);
-                    self.selection_deselect_press = None;
+                    self.session.selection_anchor = Some(anchor);
+                    self.session.selection_current = Some(current);
+                    self.session.selection_deselect_press = None;
                 }
-            } else if self.selection_anchor.is_some()
+            } else if self.session.selection_anchor.is_some()
                 && let Some(point) = screen_to_pixel_clamped(self.input.mouse_pos, view)
             {
-                self.selection_current = Some(point);
+                self.session.selection_current = Some(point);
             }
         }
         if self.input.mouse_released {
-            if self.selection_deselect_press.is_some() {
-                self.selection_deselect_press = None;
-            } else if self.selection_anchor.is_some() {
+            if self.session.selection_deselect_press.is_some() {
+                self.session.selection_deselect_press = None;
+            } else if self.session.selection_anchor.is_some() {
                 self.commit_selection_drag();
             }
         }
@@ -216,7 +194,7 @@ impl EditorApp {
         }
         let mode = self.select_mode();
         let Some(point) = screen_to_pixel(self.input.mouse_pos, view) else {
-            if mode == SelectMode::Replace && self.canvas_rect.contains(self.input.mouse_pos) {
+            if mode == SelectMode::Replace && self.session.canvas_rect.contains(self.input.mouse_pos) {
                 self.clear_selection();
             }
             return;
@@ -229,7 +207,7 @@ impl EditorApp {
             view.width,
             view.height,
             point,
-            self.wand_threshold.round().clamp(0.0, 255.0) as u8,
+            self.session.wand_threshold.round().clamp(0.0, 255.0) as u8,
             None,
         ) {
             self.apply_selection(selection, mode);
@@ -250,22 +228,22 @@ impl EditorApp {
             return;
         };
         let color = [
-            self.brush_color[0],
-            self.brush_color[1],
-            self.brush_color[2],
+            self.session.brush_color[0],
+            self.session.brush_color[1],
+            self.session.brush_color[2],
         ];
-        let opacity = if self.erase_mode {
-            self.brush_opacity
+        let opacity = if self.session.erase_mode {
+            self.session.brush_opacity
         } else {
-            self.brush_opacity * self.brush_color[3]
+            self.session.brush_opacity * self.session.brush_color[3]
         }
         .clamp(0.0, 1.0);
-        let threshold = self.fill_threshold.round().clamp(0.0, 255.0) as u8;
-        let erase = self.erase_mode;
+        let threshold = self.session.fill_threshold.round().clamp(0.0, 255.0) as u8;
+        let erase = self.session.erase_mode;
         let layer = self.workspace.active_mut().active_layer;
-        let selection = self.selection.take();
+        let selection = self.session.selection.take();
         let Some(pixels) = self.workspace.active_mut().active_pixels_mut() else {
-            self.selection = selection;
+            self.session.selection = selection;
             return;
         };
         let mut capture = EditCapture::new(layer, view.width, view.height);
@@ -299,19 +277,19 @@ impl EditorApp {
             }
             self.dirty = true;
             self.status = if erase { "Erased fill" } else { "Filled" }.into();
-            self.selection = selection;
+            self.session.selection = selection;
             self.mark_dirty_rect(rect);
         } else {
-            self.selection = selection;
+            self.session.selection = selection;
         }
     }
 
     /// Brush tool with Ctrl held samples the composited image instead of painting.
     pub fn eyedropper_armed(&self) -> bool {
-        self.tool == Tool::Brush
+        self.session.tool == Tool::Brush
             && self.input.key_ctrl
             && self.brush_last.is_none()
-            && self.preview_asset.is_none()
+            && self.session.preview_asset.is_none()
     }
 
     pub(in crate::app) fn pick_composite_color(&mut self, view: CanvasView) {
@@ -319,7 +297,7 @@ impl EditorApp {
             return;
         };
         let pixel = composite_pixel(&self.project().layers, x as i32, y as i32);
-        self.brush_color = pixel.map(|channel| channel as f32 / 255.0);
+        self.session.brush_color = pixel.map(|channel| channel as f32 / 255.0);
         self.status = format!("Picked #{:02X}{:02X}{:02X}", pixel[0], pixel[1], pixel[2]);
     }
 
@@ -330,7 +308,7 @@ impl EditorApp {
             }
             return;
         }
-        let radius_screen = (self.brush_size * self.zoom * 0.5).max(0.5);
+        let radius_screen = (self.session.brush_size * self.session.zoom * 0.5).max(0.5);
         let overlaps = brush_overlaps_image(self.input.mouse_pos, radius_screen, view);
         if self.input.mouse_pressed {
             if !overlaps {
@@ -384,20 +362,20 @@ impl EditorApp {
         erase: bool,
     ) {
         let opacity = if erase {
-            self.brush_opacity
+            self.session.brush_opacity
         } else {
-            self.brush_opacity * self.brush_color[3]
+            self.session.brush_opacity * self.session.brush_color[3]
         }
         .clamp(0.0, 1.0);
         let color = [
-            self.brush_color[0],
-            self.brush_color[1],
-            self.brush_color[2],
+            self.session.brush_color[0],
+            self.session.brush_color[1],
+            self.session.brush_color[2],
         ];
-        let size = self.brush_size;
+        let size = self.session.brush_size;
         let active = self.workspace.active_mut().active_layer;
         let stroke_id = self.stroke_id;
-        let selection = self.selection.take();
+        let selection = self.session.selection.take();
         let mut marks = std::mem::take(&mut self.stroke_marks);
         let mut soft_coverage = std::mem::take(&mut self.soft_brush_coverage);
         let predicted = brush_dirty_bounds(from, to, size, width, height);
@@ -407,7 +385,7 @@ impl EditorApp {
             capture.touch_rect(pixels, predicted);
         }
         let Some(pixels) = self.workspace.active_mut().layers.get_mut(active).map(|l| &mut l.pixels) else {
-            self.selection = selection;
+            self.session.selection = selection;
             self.stroke_marks = marks;
             self.soft_brush_coverage = soft_coverage;
             return;
@@ -417,7 +395,7 @@ impl EditorApp {
             to,
             size,
             opacity,
-            hardness: self.brush_hardness,
+            hardness: self.session.brush_hardness,
             erase,
             color,
             selection: selection.as_ref(),
@@ -426,7 +404,7 @@ impl EditorApp {
             stroke_id,
         };
         let dirty = apply_brush(pixels, width, height, &mut stroke);
-        self.selection = selection;
+        self.session.selection = selection;
         self.stroke_marks = marks;
         self.soft_brush_coverage = soft_coverage;
         if let Some(rect) = dirty {

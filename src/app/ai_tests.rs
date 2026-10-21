@@ -4,25 +4,25 @@
     #[test]
     fn invert_selection_complements_mask_and_does_nothing_without_selection() {
         let mut app = EditorApp::default();
-        app.selection_mask_dirty = false;
+        app.session.selection_mask_dirty = false;
         let status = app.status.clone();
         app.invert_selection();
-        assert!(app.selection.is_none());
-        assert!(!app.selection_mask_dirty);
+        assert!(app.session.selection.is_none());
+        assert!(!app.session.selection_mask_dirty);
         assert_eq!(app.status, status);
         app.project_mut().import_rgba(&[1, 2, 3, 255].repeat(6), 3, 2).unwrap();
         let pixels = app.project().layers[0].pixels.clone();
-        app.selection = Some(Selection { width: 3, height: 2, mask: vec![1, 0, 1, 0, 0, 1] });
+        app.session.selection = Some(Selection { width: 3, height: 2, mask: vec![1, 0, 1, 0, 0, 1] });
         app.invert_selection();
-        assert_eq!(app.selection.as_ref().unwrap().mask, [0, 1, 0, 1, 1, 0]);
-        assert!(app.selection_mask_dirty);
+        assert_eq!(app.session.selection.as_ref().unwrap().mask, [0, 1, 0, 1, 1, 0]);
+        assert!(app.session.selection_mask_dirty);
         app.invert_selection();
-        assert_eq!(app.selection.as_ref().unwrap().mask, [1, 0, 1, 0, 0, 1]);
-        app.selection = Some(Selection::all(3, 2));
+        assert_eq!(app.session.selection.as_ref().unwrap().mask, [1, 0, 1, 0, 0, 1]);
+        app.session.selection = Some(Selection::all(3, 2));
         app.invert_selection();
-        assert!(app.selection.as_ref().unwrap().is_empty());
+        assert!(app.session.selection.as_ref().unwrap().is_empty());
         app.invert_selection();
-        assert_eq!(app.selection.as_ref().unwrap().mask, [1; 6]);
+        assert_eq!(app.session.selection.as_ref().unwrap().mask, [1; 6]);
         assert_eq!(app.project().layers[0].pixels, pixels);
     }
 
@@ -98,7 +98,7 @@
         pixels.offset = (-2, 1000);
         app.project_mut().layers[1].pixels = pixels.clone();
         app.project_mut().layers[1].visible = false;
-        app.selection = Some(Selection::all(1, 1));
+        app.session.selection = Some(Selection::all(1, 1));
         app.invert_layer();
         let inverted = app.project().layers[1].pixels.clone();
         assert_eq!(inverted.region(-2, 1000, 3, 1),
@@ -126,7 +126,7 @@
         pixels.offset = (-2, 1000);
         app.project_mut().layers[1].pixels = pixels.clone();
         app.project_mut().layers[1].visible = false;
-        app.selection = Some(Selection::all(1, 1));
+        app.session.selection = Some(Selection::all(1, 1));
         app.fix_alpha();
         let fixed = app.project().layers[1].pixels.clone();
         let mut expected = bytes;
@@ -201,7 +201,7 @@
             app.project_mut().layers[0].pixels = pixels;
             app.ai.mode = AiMode::Inpaint;
             app.ai.layer_padding = 2;
-            app.selection = Some(Selection::all(4, 4));
+            app.session.selection = Some(Selection::all(4, 4));
             let (image, region) = app.ai_input().unwrap();
             assert_eq!(image.dimensions(), (6, 7));
             assert_eq!((region.min_x, region.min_y), (-3, -4));
@@ -242,11 +242,11 @@
         let mut app = EditorApp::default();
         app.project_mut().import_rgba(&[10, 20, 30, 128].repeat(16), 4, 4).unwrap();
         app.refresh_image().unwrap();
-        app.selection = Some(Selection::all(4, 4));
+        app.session.selection = Some(Selection::all(4, 4));
         let asset = app.workspace.import_asset_rgba("preview".into(), &[255, 0, 0, 255].repeat(6), 3, 2).unwrap();
-        app.pan = Vec2::new(12.0, 34.0);
-        app.zoom = 2.0;
-        app.rotation = 37.0;
+        app.session.pan = Vec2::new(12.0, 34.0);
+        app.session.zoom = 2.0;
+        app.session.rotation = 37.0;
         app.show_asset_preview(asset);
         assert_eq!(app.display_size(), Some((3, 2)));
         let view = app.canvas_view().unwrap();
@@ -258,17 +258,17 @@
         assert_eq!(app.workspace.assets[asset].pixels, [255, 0, 0, 255].repeat(6));
         app.switch_document(0);
         assert_eq!(app.display_size(), Some((4, 4)));
-        assert_eq!((app.pan, app.zoom, app.rotation), (Vec2::new(12.0, 34.0), 2.0, 37.0));
-        assert_eq!(app.selection.as_ref().unwrap().mask, vec![1; 16]);
-        assert!(app.layers_reload && app.selection_mask_dirty);
+        assert_eq!((app.session.pan, app.session.zoom, app.session.rotation), (Vec2::new(12.0, 34.0), 2.0, 37.0));
+        assert_eq!(app.session.selection.as_ref().unwrap().mask, vec![1; 16]);
+        assert!(app.layers_reload && app.session.selection_mask_dirty);
     }
 
     #[test]
     fn inpaint_softness_blurs_mask_without_changing_selection_or_alpha() {
         let mut app = EditorApp::default();
         app.project_mut().import_rgba(&[1, 2, 3, 255].repeat(9 * 9), 9, 9).unwrap();
-        app.selection = Some(Selection::from_rect(PixelRect { min_x: 3, min_y: 3, max_x: 6, max_y: 6 }, 9, 9));
-        let original = app.selection.as_ref().unwrap().mask.clone();
+        app.session.selection = Some(Selection::from_rect(PixelRect { min_x: 3, min_y: 3, max_x: 6, max_y: 6 }, 9, 9));
+        let original = app.session.selection.as_ref().unwrap().mask.clone();
         let sharp = app.ai_mask().unwrap();
         assert_eq!(sharp.get_pixel(2, 4).0, [0, 0, 0, 255]);
         app.ai.mask_softness = 1.5;
@@ -276,7 +276,7 @@
         assert!(soft.get_pixel(2, 4)[0] > 0);
         assert!(soft.get_pixel(4, 4)[0] < 255);
         assert!(soft.pixels().all(|p| p[3] == 255 && p[0] == p[1] && p[1] == p[2]));
-        assert_eq!(app.selection.as_ref().unwrap().mask, original);
+        assert_eq!(app.session.selection.as_ref().unwrap().mask, original);
     }
 
     #[test]
@@ -284,9 +284,9 @@
         let mut app = EditorApp::default();
         app.project_mut().import_rgba(&[0, 0, 0, 255].repeat(100), 10, 10).unwrap();
         app.refresh_image().unwrap();
-        app.canvas_rect = Rect::from_min_size(Vec2::ZERO, Vec2::splat(200.0));
-        app.rotation = 45.0;
-        app.zoom = 4.0;
+        app.session.canvas_rect = Rect::from_min_size(Vec2::ZERO, Vec2::splat(200.0));
+        app.session.rotation = 45.0;
+        app.session.zoom = 4.0;
         app.set_tool(Tool::Lasso);
         let view = app.canvas_view().unwrap();
         for (i, point) in [Vec2::new(1.0, 1.0), Vec2::new(5.0, 1.0), Vec2::new(1.0, 5.0)].into_iter().enumerate() {
@@ -299,20 +299,20 @@
         app.input.mouse_down = false;
         app.input.mouse_released = true;
         app.handle_canvas_edit(view);
-        assert!(app.selection.as_ref().unwrap().contains(1, 1));
-        assert!(!app.selection.as_ref().unwrap().contains(4, 4));
+        assert!(app.session.selection.as_ref().unwrap().contains(1, 1));
+        assert!(!app.session.selection.as_ref().unwrap().contains(4, 4));
         app.set_tool(Tool::SelectionBrush);
-        app.brush_size = 1.0;
+        app.session.brush_size = 1.0;
         app.input = FrameInput::default();
         app.input.mouse_pressed = true;
         app.input.mouse_down = true;
         app.input.mouse_pos = view.image_to_screen(Vec2::new(8.5, 8.5));
         app.handle_canvas_edit(view);
-        assert!(app.selection.as_ref().unwrap().contains(1, 1));
-        assert!(app.selection.as_ref().unwrap().contains(8, 8));
-        app.selection_brush_erase = true;
+        assert!(app.session.selection.as_ref().unwrap().contains(1, 1));
+        assert!(app.session.selection.as_ref().unwrap().contains(8, 8));
+        app.session.selection_brush_erase = true;
         app.handle_canvas_edit(view);
-        assert!(!app.selection.as_ref().unwrap().contains(8, 8));
+        assert!(!app.session.selection.as_ref().unwrap().contains(8, 8));
         app.input = FrameInput::default();
         app.input.mouse_released = true;
         app.input.mouse_pos = Vec2::splat(300.0);
@@ -327,11 +327,11 @@
         app.project_mut().import_rgba(&[1, 2, 3, 255].repeat(8), 4, 2).unwrap();
         app.ai.mode = AiMode::Inpaint;
         assert!(app.ai_mask().is_err());
-        app.selection = Some(Selection::from_rect(PixelRect { min_x: 0, min_y: 0, max_x: 0, max_y: 0 }, 4, 2));
+        app.session.selection = Some(Selection::from_rect(PixelRect { min_x: 0, min_y: 0, max_x: 0, max_y: 0 }, 4, 2));
         assert!(app.ai_mask().is_err());
-        app.selection = Some(Selection::all(5, 2));
+        app.session.selection = Some(Selection::all(5, 2));
         assert!(app.ai_mask().is_err());
-        app.selection = Some(Selection::all(4, 2));
+        app.session.selection = Some(Selection::all(4, 2));
         assert!(app.ai_mask().unwrap().pixels().all(|p| p.0 == [255, 255, 255, 255]));
         app.ai.source = AiSource::Selection;
         assert!(app.ai_mask().is_err());
@@ -348,12 +348,12 @@
             app.ai.mode = mode;
             app.ai.source = AiSource::Selection;
             assert!(app.ai_input().is_err());
-            app.selection = Some(Selection::from_rect(PixelRect { min_x: 0, min_y: 0, max_x: 0, max_y: 0 }, 6, 5));
+            app.session.selection = Some(Selection::from_rect(PixelRect { min_x: 0, min_y: 0, max_x: 0, max_y: 0 }, 6, 5));
             assert!(app.ai_input().is_err());
             let bounds = PixelRect { min_x: 1, min_y: 1, max_x: 5, max_y: 4 };
             let mut selection = Selection::from_rect(bounds, 6, 5);
             selection.subtract(&Selection::from_rect(PixelRect { min_x: 2, min_y: 2, max_x: 4, max_y: 3 }, 6, 5));
-            app.selection = Some(selection);
+            app.session.selection = Some(selection);
             app.ai.scale = 2.0;
             let (image, region) = app.ai_input().unwrap();
             assert_eq!(region, bounds.into());
@@ -365,10 +365,10 @@
             }
             assert_eq!(crate::comfyui::scaled_size(image.width(), image.height(), app.ai.scale).unwrap(), (8, 6));
             // A plain rectangle retains the complete cropped image.
-            app.selection = Some(Selection::from_rect(bounds, 6, 5));
+            app.session.selection = Some(Selection::from_rect(bounds, 6, 5));
             let (image, _) = app.ai_input().unwrap();
             assert!(image.pixels().all(|p| p.0 == [20, 40, 60, 128]));
-            app.selection = Some(Selection::all(7, 5));
+            app.session.selection = Some(Selection::all(7, 5));
             assert!(app.ai_input().is_err());
         }
     }
@@ -490,7 +490,7 @@
                 let mut selection = Selection::from_rect(PixelRect { min_x: 16, min_y: 24, max_x: 112, max_y: 104 }, 128, 128);
                 selection.subtract(&Selection::from_rect(PixelRect { min_x: 48, min_y: 48, max_x: 80, max_y: 72 }, 128, 128));
                 app.ai.selection_bounds = selection.bounds();
-                app.selection = Some(selection);
+                app.session.selection = Some(selection);
             }
             app.ai.scale = 0.5;
             app.ai.denoise = 0.5;
@@ -516,7 +516,7 @@
             assert_eq!(&app.project().layers[1].pixels.to_rgba(app.project().width, app.project().height)[..4], &[200, 100, 50, 255]);
             assert_eq!(app.ai.input_region.unwrap().max_x, if source == AiSource::Selection { 112 } else { 128 });
             // Accept must retain the submitted region even if selection changes afterwards.
-            app.selection = Some(Selection::all(128, 128));
+            app.session.selection = Some(Selection::all(128, 128));
             // Render the Redraw modal with its source, denoise and cached selectors.
             EditorApp::init(&mut ui);
             let viewport = Vec2::new(1280.0, 800.0);

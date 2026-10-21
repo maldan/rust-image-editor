@@ -13,6 +13,7 @@ use glam::Vec2;
 use mega_ui::{DockNode, DockState, Ui};
 
 use crate::app::EditorApp;
+use assets_panel::LibraryAction;
 
 pub fn default_dock() -> DockState {
     DockState::new(DockNode::split_h(
@@ -55,9 +56,21 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
             let size = ui.available_size().max(Vec2::splat(1.0));
             let axes = if tab == "Library" { mega_ui::ScrollAxes::Vertical } else { mega_ui::ScrollAxes::Both };
             ui.scroll_area(&format!("dock_scroll_{tab}"), size, axes, |ui| match tab {
-                "Tools" => tools_panel::draw(ui, app),
-                "Tool Options" => tool_options::draw(ui, app),
-                "Library" => assets_panel::draw(ui, app),
+                "Tools" => {
+                    if let Some(tool) = tools_panel::draw(ui, &mut app.session) {
+                        app.set_tool(tool);
+                    }
+                }
+                "Tool Options" => {
+                    let image_ready = app.image_size.is_some();
+                    if let Some(horizontal) = tool_options::draw(ui, &mut app.session, image_ready) {
+                        app.flip_transform(horizontal);
+                    }
+                }
+                "Library" => {
+                    let action = assets_panel::draw(ui, &mut app.workspace, &app.input, app.session.canvas_rect);
+                    apply_library(ui, app, action);
+                }
                 "Layers" => project_panel::draw(ui, app),
                 _ => {}
             });
@@ -72,4 +85,41 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     });
     ai_dialog::draw(ui, app);
     hsv_dialog::draw(ui, app);
+}
+
+fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
+    if action.import {
+        app.import_image(ui);
+    }
+    if action.new_document {
+        app.cancel_transform();
+        let idx = app.workspace.create_document(&format!(
+            "Document {}",
+            app.workspace.documents.len() + 1
+        ));
+        app.switch_document(idx);
+    }
+    if let Some(index) = action.switch_doc {
+        app.switch_document(index);
+    }
+    if let Some(index) = action.preview_asset {
+        app.show_asset_preview(index);
+    }
+    if let Some(index) = action.delete_doc {
+        app.cancel_transform();
+        app.workspace.delete_document(index);
+        app.clear_history();
+        let _ = app.refresh_image();
+        app.dirty = true;
+    }
+    if let Some(index) = action.place_asset {
+        app.place_asset(index, ui);
+    }
+    if let Some(index) = action.delete_asset {
+        if app.session.preview_asset.as_ref() == app.workspace.assets.get(index).map(|a| &a.id) {
+            app.close_asset_preview();
+        }
+        app.workspace.delete_asset(index);
+        app.dirty = true;
+    }
 }

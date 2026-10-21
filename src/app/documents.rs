@@ -13,9 +13,9 @@ impl EditorApp {
         self.canvas_cleared = true;
         self.history.clear();
         self.clear_selection();
-        self.pan = Vec2::ZERO;
-        self.zoom = 1.0;
-        self.rotation = 0.0;
+        self.session.pan = Vec2::ZERO;
+        self.session.zoom = 1.0;
+        self.session.rotation = 0.0;
         self.dirty = true;
         self.status = "New project created".into();
         ui.notify_success("New project created");
@@ -62,7 +62,7 @@ impl EditorApp {
         let was_empty = self.image_size.is_none();
         self.history.insert_layer(self.workspace.active_mut(), copied.layer, copied.canvas_size);
         self.sync_layer_structure();
-        if was_empty { self.fit_image = true; }
+        if was_empty { self.session.fit_image = true; }
         self.status = "Layer pasted with position and properties".into();
     }
 

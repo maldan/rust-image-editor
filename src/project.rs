@@ -1,60 +1,8 @@
 use std::fs;
 use crate::raster::SparsePixels;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use image::{DynamicImage, ImageFormat, RgbaImage};
-use mega_file::{MegaFile, WriteFile};
-use serde::{Deserialize, Serialize};
-
-const MANIFEST_PATH: &str = "/manifest.json";
-const IMAGE_PATH: &str = "/assets/main/image.png";
-const MANIFEST_KIND: &str = "mega-image-editor/manifest+json";
-const IMAGE_KIND: &str = "image/png";
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Manifest {
-    pub format: String,
-    pub version: u32,
-    pub document_type: String,
-    #[serde(default)]
-    pub asset_path: Option<String>,
-    #[serde(default)]
-    pub width: u32,
-    #[serde(default)]
-    pub height: u32,
-    #[serde(default)]
-    pub active_layer: usize,
-    #[serde(default)]
-    pub layers: Vec<LayerMeta>,
-}
-
-impl Default for Manifest {
-    fn default() -> Self {
-        Self {
-            format: "mega-image-editor".into(),
-            version: 4,
-            document_type: "image".into(),
-            asset_path: None,
-            width: 0,
-            height: 0,
-            active_layer: 0,
-            layers: Vec::new(),
-        }
-    }
-}
-
-fn default_opacity() -> f32 {
-    1.0
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LayerMeta {
-    pub name: String,
-    pub visible: bool,
-    #[serde(default = "default_opacity")]
-    pub opacity: f32,
-    pub path: String,
-}
 
 #[derive(Debug, Clone)]
 pub struct Layer {
@@ -66,12 +14,10 @@ pub struct Layer {
 
 #[derive(Debug, Clone, Default)]
 pub struct Project {
-    pub manifest: Manifest,
     pub width: u32,
     pub height: u32,
     pub layers: Vec<Layer>,
     pub active_layer: usize,
-    pub path: Option<PathBuf>,
 }
 
 impl Project {
@@ -100,7 +46,6 @@ impl Project {
             pixels: SparsePixels::from_rgba(rgba.as_raw(), width, height),
         }];
         self.active_layer = 0;
-        self.sync_manifest();
         Ok(())
     }
 
@@ -116,7 +61,6 @@ impl Project {
             pixels: SparsePixels::default(),
         });
         self.active_layer = self.layers.len() - 1;
-        self.sync_manifest();
     }
 
     /// Insert into the existing canvas. Fit uses the original input bounds;
@@ -141,7 +85,6 @@ impl Project {
         *target = SparsePixels::from_rgba(image.as_raw(), w, h);
         target.offset = (region.min_x, region.min_y);
         self.layers[self.active_layer].name = name;
-        self.sync_manifest();
         Ok(())
     }
 
@@ -159,12 +102,10 @@ impl Project {
                 pixels: SparsePixels::default(),
             });
             self.active_layer = 0;
-            self.sync_manifest();
             return Ok(());
         }
         self.width = width;
         self.height = height;
-        self.sync_manifest();
         Ok(())
     }
 
@@ -198,7 +139,6 @@ impl Project {
         } else {
             self.active_layer = self.active_layer.min(self.layers.len() - 1);
         }
-        self.sync_manifest();
         Some(layer)
     }
 
@@ -216,7 +156,6 @@ impl Project {
         } else if from > self.active_layer && to <= self.active_layer {
             self.active_layer += 1;
         }
-        self.sync_manifest();
     }
 
     pub fn active_pixels(&self) -> Option<&SparsePixels> {
@@ -229,33 +168,6 @@ impl Project {
             .map(|layer| &mut layer.pixels)
     }
 
-    pub fn sync_manifest_pub(&mut self) {
-        self.sync_manifest();
-    }
-
-    fn sync_manifest(&mut self) {
-        self.manifest.version = 4;
-        self.manifest.width = self.width;
-        self.manifest.height = self.height;
-        self.manifest.active_layer = self.active_layer;
-        self.manifest.layers = self
-            .layers
-            .iter()
-            .enumerate()
-            .map(|(index, layer)| LayerMeta {
-                name: layer.name.clone(),
-                visible: layer.visible,
-                opacity: layer.opacity.clamp(0.0, 1.0),
-                path: format!("/layers/{index}.tiles"),
-            })
-            .collect();
-        self.manifest.asset_path = if self.layers.is_empty() {
-            None
-        } else {
-            Some(IMAGE_PATH.into())
-        };
-    }
-
     pub fn decoded_rgba(&self) -> Result<Option<(Vec<u8>, u32, u32)>, String> {
         if self.layers.is_empty() || self.width == 0 || self.height == 0 {
             return Ok(None);
@@ -265,61 +177,6 @@ impl Project {
             self.width,
             self.height,
         )))
-    }
-
-    pub fn save(&mut self, path: &Path) -> Result<(), String> {
-        self.sync_manifest();
-        let manifest = serde_json::to_vec_pretty(&self.manifest)
-            .map_err(|e| format!("Cannot encode manifest: {e}"))?;
-        let mut files = vec![WriteFile::new(MANIFEST_PATH, MANIFEST_KIND, manifest)];
-        if let Some((pixels, width, height)) = self.decoded_rgba()? {
-            files.push(WriteFile::new(
-                IMAGE_PATH,
-                IMAGE_KIND,
-                encode_png_rgba(&pixels, width, height)?,
-            ));
-        }
-        for (index, layer) in self.layers.iter().enumerate() {
-            files.push(WriteFile::new(
-                format!("/layers/{index}.tiles"),
-                "application/x-rgba-tiles-64",
-                layer.pixels.encode(),
-            ));
-        }
-        if self.path.as_deref() == Some(path) && path.is_file() {
-            crate::safe_save::append_archive(path, files, None)?;
-        } else {
-            crate::safe_save::save_archive(path, files)?;
-        }
-        self.path = Some(path.to_path_buf());
-        Ok(())
-    }
-
-    pub fn open(path: &Path) -> Result<Self, String> {
-        let archive = MegaFile::open(path).map_err(|e| format!("Cannot open project: {e}"))?;
-        let manifest_bytes = archive
-            .read_all(MANIFEST_PATH)
-            .map_err(|e| format!("Project has no valid manifest: {e}"))?;
-        let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
-            .map_err(|e| format!("Invalid project manifest: {e}"))?;
-        if manifest.format != "mega-image-editor" || manifest.version != 4 {
-            return Err("Unsupported project format or version".into());
-        }
-        let mut layers = Vec::new();
-        for meta in &manifest.layers {
-            let bytes = archive.read_all(&meta.path).map_err(|e| format!("Layer missing: {e}"))?;
-            layers.push(Layer {
-                name: meta.name.clone(), visible: meta.visible, opacity: meta.opacity.clamp(0.0, 1.0),
-                pixels: SparsePixels::decode(&bytes)?,
-            });
-        }
-        let mut project = Self {
-            width: manifest.width, height: manifest.height,
-            active_layer: manifest.active_layer.min(layers.len().saturating_sub(1)),
-            layers, manifest, path: Some(path.to_path_buf()),
-        };
-        project.sync_manifest();
-        Ok(project)
     }
 
     pub fn export_png(&self, path: &Path) -> Result<(), String> {
@@ -430,29 +287,10 @@ mod tests {
     }
 
     #[test]
-    fn project_round_trip_preserves_manifest_and_pixels() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("roundtrip.mgimg");
-        let mut project = Project::default();
-        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(2, 3, Rgba([10, 20, 30, 255])));
-        project.set_image(image).unwrap();
-
-        project.save(&path).unwrap();
-        let loaded = Project::open(&path).unwrap();
-
-        assert_eq!(loaded.width, 2);
-        assert_eq!(loaded.height, 3);
-        assert_eq!(loaded.layers.len(), 1);
-        let (_, width, height) = loaded.decoded_rgba().unwrap().unwrap();
-        assert_eq!((width, height), (2, 3));
-    }
-
-    #[test]
-    fn import_rgba_stores_png_asset() {
+    fn import_rgba_keeps_pixels() {
         let mut project = Project::default();
         let pixels = vec![10, 20, 30, 255, 40, 50, 60, 255];
         project.import_rgba(&pixels, 2, 1).unwrap();
-        assert_eq!(project.manifest.asset_path.as_deref(), Some(IMAGE_PATH));
         let (decoded, width, height) = project.decoded_rgba().unwrap().unwrap();
         assert_eq!((width, height), (2, 1));
         assert_eq!(&decoded[..8], &pixels[..]);

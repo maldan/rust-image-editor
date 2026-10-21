@@ -17,9 +17,46 @@ struct TileSnapshot {
 #[derive(Clone)]
 pub struct HistoryEdit {
     pub layer: usize,
-    offset: (i32, i32),
+    offset_before: (i32, i32),
+    offset_after: (i32, i32),
     before: Vec<TileSnapshot>,
     after: Vec<TileSnapshot>,
+}
+
+impl HistoryEdit {
+    /// Tile copies plus the layer offset. Unchanged tiles are left out, so a full-layer
+    /// filter does not keep a second copy of the sparse buffer.
+    pub fn from_diff(layer: usize, before: &SparsePixels, after: &SparsePixels) -> Option<Self> {
+        let mut keys: Vec<(i32, i32)> = before.tiles.keys().chain(after.tiles.keys()).copied().collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let mut before_tiles = Vec::new();
+        let mut after_tiles = Vec::new();
+        for key in keys {
+            let old = before.tiles.get(&key);
+            let new = after.tiles.get(&key);
+            let same = match (old, new) {
+                (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b) || a == b,
+                (None, None) => true,
+                _ => false,
+            };
+            if same {
+                continue;
+            }
+            before_tiles.push(TileSnapshot { tx: key.0, ty: key.1, data: old.cloned() });
+            after_tiles.push(TileSnapshot { tx: key.0, ty: key.1, data: new.cloned() });
+        }
+        if before_tiles.is_empty() && before.offset == after.offset {
+            return None;
+        }
+        Some(Self {
+            layer,
+            offset_before: before.offset,
+            offset_after: after.offset,
+            before: before_tiles,
+            after: after_tiles,
+        })
+    }
 }
 
 /// Share physical tiles until a touched tile is changed (copy on write).
@@ -46,7 +83,9 @@ impl EditCapture {
         if rect.is_empty() {
             return;
         }
-        self.offset = pixels.offset;
+        if self.touched.is_empty() {
+            self.offset = pixels.offset;
+        }
         let side = TILE_SIZE as i32;
         let x0 = (rect.min_x as i32 - pixels.offset.0).div_euclid(side);
         let y0 = (rect.min_y as i32 - pixels.offset.1).div_euclid(side);
@@ -87,12 +126,13 @@ impl EditCapture {
             });
             before.push(b);
         }
-        if before.is_empty() {
+        if before.is_empty() && self.offset == pixels.offset {
             return None;
         }
         Some(HistoryEdit {
             layer: self.layer,
-            offset: self.offset,
+            offset_before: self.offset,
+            offset_after: pixels.offset,
             before,
             after,
         })
@@ -104,11 +144,6 @@ enum HistoryEntry {
         origin: (i32,i32),
         size_before: (u32,u32),
         size_after: (u32,u32),
-    },
-    Raster {
-        layer: usize,
-        before: SparsePixels,
-        after: SparsePixels,
     },
     Pixels(HistoryEdit),
     MergeDown {
@@ -158,13 +193,9 @@ impl History {
         true
     }
 
-    pub fn push_raster(&mut self, layer: usize, before: SparsePixels, after: SparsePixels) {
-        if before != after {
-            self.push_entry(HistoryEntry::Raster {
-                layer,
-                before,
-                after,
-            });
+    pub fn push_diff(&mut self, layer: usize, before: &SparsePixels, after: &SparsePixels) {
+        if let Some(edit) = HistoryEdit::from_diff(layer, before, after) {
+            self.push(edit);
         }
     }
 
@@ -189,7 +220,6 @@ impl History {
         }
         project.layers.push(layer);
         project.active_layer = index;
-        project.sync_manifest_pub();
         self.push_entry(HistoryEntry::InsertLayer {
             index, inserted: None, active_before, size_before,
             size_after: (project.width, project.height),
@@ -205,7 +235,6 @@ impl History {
         project.layers[index - 1] = merged.clone();
         project.layers.remove(index);
         project.active_layer = index - 1;
-        project.sync_manifest_pub();
         self.push_entry(HistoryEntry::MergeDown { index, lower, upper, merged });
         true
     }
@@ -237,33 +266,18 @@ impl History {
                 project.layers[*index - 1] = lower.clone();
                 project.layers.insert(*index, upper.clone());
                 project.active_layer = *index;
-                project.sync_manifest_pub();
                 HistoryChange::Layers
             }
             HistoryEntry::InsertLayer { index, inserted, active_before, size_before, .. } => {
                 *inserted = Some(project.delete_layer(*index)?);
                 (project.width, project.height) = *size_before;
                 project.active_layer = *active_before;
-                project.sync_manifest_pub();
-                HistoryChange::Layers
-            }
-            HistoryEntry::Raster { layer, before, .. } => {
-                project.layers.get_mut(*layer)?.pixels = before.clone();
                 HistoryChange::Layers
             }
             HistoryEntry::Pixels(edit) => {
                 let pixels = &mut project.layers.get_mut(edit.layer)?.pixels;
-                let rect = apply_tiles(
-                    pixels,
-                    project.width,
-                    project.height,
-                    edit.offset,
-                    &edit.before,
-                )?;
-                HistoryChange::Pixels {
-                    layer: edit.layer,
-                    rect,
-                }
+                let rect = apply_edit(pixels, project.width, project.height, edit, false)?;
+                HistoryChange::Pixels { layer: edit.layer, rect }
             }
             HistoryEntry::DeleteLayer {
                 index,
@@ -280,7 +294,6 @@ impl History {
                 project.width = *width;
                 project.height = *height;
                 project.active_layer = *active_before;
-                project.sync_manifest_pub();
                 HistoryChange::Layers
             }
         };
@@ -299,7 +312,6 @@ impl History {
                 project.layers[*index - 1] = merged.clone();
                 project.layers.remove(*index);
                 project.active_layer = *index - 1;
-                project.sync_manifest_pub();
                 HistoryChange::Layers
             }
             HistoryEntry::InsertLayer { index, inserted, size_after, .. } => {
@@ -307,26 +319,12 @@ impl History {
                 project.layers.insert(*index, inserted.take()?);
                 (project.width, project.height) = *size_after;
                 project.active_layer = *index;
-                project.sync_manifest_pub();
-                HistoryChange::Layers
-            }
-            HistoryEntry::Raster { layer, after, .. } => {
-                project.layers.get_mut(*layer)?.pixels = after.clone();
                 HistoryChange::Layers
             }
             HistoryEntry::Pixels(edit) => {
                 let pixels = &mut project.layers.get_mut(edit.layer)?.pixels;
-                let rect = apply_tiles(
-                    pixels,
-                    project.width,
-                    project.height,
-                    edit.offset,
-                    &edit.after,
-                )?;
-                HistoryChange::Pixels {
-                    layer: edit.layer,
-                    rect,
-                }
+                let rect = apply_edit(pixels, project.width, project.height, edit, true)?;
+                HistoryChange::Pixels { layer: edit.layer, rect }
             }
             HistoryEntry::DeleteLayer {
                 index,
@@ -336,7 +334,6 @@ impl History {
             } => {
                 *removed = Some(project.delete_layer(*index)?);
                 project.active_layer = *active_after;
-                project.sync_manifest_pub();
                 HistoryChange::Layers
             }
         };
@@ -363,23 +360,26 @@ fn shift_canvas(project: &mut Project, delta: (i32,i32), size: (u32,u32)) -> boo
         layer.pixels.offset.1 += delta.1;
     }
     (project.width,project.height) = size;
-    project.sync_manifest_pub();
     true
 }
 
-fn apply_tiles(
+fn apply_edit(
     pixels: &mut SparsePixels,
     width: u32,
     height: u32,
-    offset: (i32, i32),
-    tiles: &[TileSnapshot],
+    edit: &HistoryEdit,
+    redo: bool,
 ) -> Option<PixelRect> {
-    let mut dirty = PixelRect {
-        min_x: width,
-        min_y: height,
-        max_x: 0,
-        max_y: 0,
+    let (expect, target, tiles) = if redo {
+        (edit.offset_before, edit.offset_after, &edit.after)
+    } else {
+        (edit.offset_after, edit.offset_before, &edit.before)
     };
+    let dx = pixels.offset.0.checked_sub(expect.0)?;
+    let dy = pixels.offset.1.checked_sub(expect.1)?;
+    let new_offset = (target.0.checked_add(dx)?, target.1.checked_add(dy)?);
+    let old_offset = pixels.offset;
+    pixels.offset = new_offset;
     for tile in tiles {
         let key = (tile.tx, tile.ty);
         match &tile.data {
@@ -390,18 +390,27 @@ fn apply_tiles(
                 pixels.tiles.remove(&key);
             }
         }
-        let x = tile.tx * TILE_SIZE as i32 + offset.0;
-        let y = tile.ty * TILE_SIZE as i32 + offset.1;
-        dirty.min_x = dirty.min_x.min(x.clamp(0, width as i32) as u32);
-        dirty.min_y = dirty.min_y.min(y.clamp(0, height as i32) as u32);
-        dirty.max_x = dirty
-            .max_x
-            .max((x + TILE_SIZE as i32).clamp(0, width as i32) as u32);
-        dirty.max_y = dirty
-            .max_y
-            .max((y + TILE_SIZE as i32).clamp(0, height as i32) as u32);
+    }
+    let mut dirty = PixelRect { min_x: width, min_y: height, max_x: 0, max_y: 0 };
+    let keys: Vec<(i32, i32)> = if tiles.is_empty() {
+        pixels.tiles.keys().copied().collect()
+    } else {
+        tiles.iter().map(|tile| (tile.tx, tile.ty)).collect()
+    };
+    for (tx, ty) in keys {
+        cover_tile(&mut dirty, tx, ty, old_offset, width, height);
+        cover_tile(&mut dirty, tx, ty, new_offset, width, height);
     }
     Some(dirty)
+}
+
+fn cover_tile(dirty: &mut PixelRect, tx: i32, ty: i32, offset: (i32, i32), width: u32, height: u32) {
+    let x = tx * TILE_SIZE as i32 + offset.0;
+    let y = ty * TILE_SIZE as i32 + offset.1;
+    dirty.min_x = dirty.min_x.min(x.clamp(0, width as i32) as u32);
+    dirty.min_y = dirty.min_y.min(y.clamp(0, height as i32) as u32);
+    dirty.max_x = dirty.max_x.max((x + TILE_SIZE as i32).clamp(0, width as i32) as u32);
+    dirty.max_y = dirty.max_y.max((y + TILE_SIZE as i32).clamp(0, height as i32) as u32);
 }
 
 #[cfg(test)]
@@ -458,11 +467,11 @@ mod tests {
         project.layers[0].pixels.write(0,40,50,[255,0,0,255]);
         let before = project.layers[0].pixels.clone();
         project.layers[0].pixels.write(0,42,51,[0,0,255,255]);
-        history.push_raster(0,before,project.layers[0].pixels.clone());
+        history.push_diff(0,&before,&project.layers[0].pixels);
         assert!(history.trim_canvas(&mut project));
         let before = project.layers[0].pixels.clone();
         project.layers[0].pixels.write(0,0,0,[0,255,0,255]);
-        history.push_raster(0,before,project.layers[0].pixels.clone());
+        history.push_diff(0,&before,&project.layers[0].pixels);
         history.undo(&mut project).unwrap();
         assert_eq!(project.layers[0].pixels.read(0,0,0),[255,0,0,255]);
         history.undo(&mut project).unwrap();
@@ -513,5 +522,35 @@ mod tests {
         assert!(!rect.is_empty());
         history.redo(&mut project).unwrap();
         assert_eq!(project.layers[0].pixels.read(128, 0, 0)[0], 42);
+    }
+
+    #[test]
+    fn full_layer_diff_stores_changed_tiles_and_restores_offset() {
+        let mut before = SparsePixels::default();
+        before.write(64, 0, 0, [1, 2, 3, 255]);
+        before.write(64, 70, 0, [4, 5, 6, 255]);
+        let mut after = before.clone();
+        after.write(64, 0, 0, [9, 9, 9, 255]);
+        after.offset = (3, -4);
+        let edit = HistoryEdit::from_diff(0, &before, &after).unwrap();
+        assert_eq!(edit.before.len(), 1);
+        assert!(std::sync::Arc::ptr_eq(&before.tiles[&(1, 0)], &after.tiles[&(1, 0)]));
+        let mut project = Project {
+            width: 128,
+            height: 64,
+            layers: vec![crate::project::Layer {
+                name: "L".into(), visible: true, opacity: 1.0, pixels: after,
+            }],
+            ..Default::default()
+        };
+        let mut history = History::default();
+        history.push(edit);
+        history.undo(&mut project).unwrap();
+        assert_eq!(project.layers[0].pixels.offset, (0, 0));
+        assert_eq!(project.layers[0].pixels.read(64, 0, 0), [1, 2, 3, 255]);
+        assert_eq!(project.layers[0].pixels.read(64, 70, 0), [4, 5, 6, 255]);
+        history.redo(&mut project).unwrap();
+        assert_eq!(project.layers[0].pixels.offset, (3, -4));
+        assert_eq!(project.layers[0].pixels.read(64, 3, -4), [9, 9, 9, 255]);
     }
 }

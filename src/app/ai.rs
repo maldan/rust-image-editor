@@ -44,7 +44,7 @@ impl EditorApp {
     pub(in crate::app) fn open_ai_mode(&mut self, mode: AiMode) {
         if (mode.needs_input() && self.image_size.is_none()) || self.ai.job.is_some() { return; }
         self.commit_transform();
-        self.ai.selection_bounds = self.selection.as_ref().and_then(Selection::bounds);
+        self.ai.selection_bounds = self.session.selection.as_ref().and_then(Selection::bounds);
         self.ai.layer_bounds = self.project().active_pixels().and_then(|pixels| pixels.bounds());
         self.workspace.clear_asset_drag();
         self.layer_drag = None;
@@ -161,7 +161,7 @@ impl EditorApp {
     pub(in crate::app) fn ai_mask(&self) -> Result<image::RgbaImage, String> {
         if self.ai.source == AiSource::Selection { return Err("Inpaint source must be a layer or the whole document".into()); }
         let p = self.project();
-        let selection = self.selection.as_ref().ok_or("Select an area to use as the inpaint mask")?;
+        let selection = self.session.selection.as_ref().ok_or("Select an area to use as the inpaint mask")?;
         if selection.width != p.width || selection.height != p.height {
             return Err("Selection does not match the current canvas".into());
         }
@@ -187,7 +187,7 @@ impl EditorApp {
     pub(in crate::app) fn ai_source_region(&self) -> Result<crate::raster::RasterRect, String> {
         let p = self.project();
         if self.ai.source == AiSource::Selection {
-            let selection = self.selection.as_ref().ok_or("Select an area on the canvas first")?;
+            let selection = self.session.selection.as_ref().ok_or("Select an area on the canvas first")?;
             if selection.width != p.width || selection.height != p.height {
                 return Err("Selection does not match the current canvas".into());
             }
@@ -211,7 +211,7 @@ impl EditorApp {
             AiSource::Document | AiSource::Selection => crate::editing::composite_layers(&p.layers, p.width, p.height),
         };
         let image = if self.ai.source == AiSource::Selection {
-            let selection = self.selection.as_ref().unwrap();
+            let selection = self.session.selection.as_ref().unwrap();
             let mut cropped = image::RgbaImage::new(width, height);
             for y in region.min_y as u32..region.max_y as u32 {
                 for x in region.min_x as u32..region.max_x as u32 {
@@ -267,7 +267,6 @@ impl EditorApp {
         let insertion = if !self.ai.mode.needs_input() && (project.width == 0 || project.height == 0) {
             project.import_rgba(image.as_raw(), image.width(), image.height()).map(|()| {
                 project.layers[0].name = name;
-                project.sync_manifest_pub();
             })
         } else {
             project.add_raster_layer(image, name, region, self.ai.fit_image)
@@ -278,7 +277,7 @@ impl EditorApp {
                 self.history.clear();
                 self.sync_layer_structure();
                 self.ai.layer_bounds = self.project().active_pixels().and_then(|pixels| pixels.bounds());
-                if needs_fit { self.fit_image = true; }
+                if needs_fit { self.session.fit_image = true; }
                 self.status = format!("{action} added: {} × {} px", size.0, size.1);
                 self.ai.preview = self.ai.result.take();
                 self.ai.message = format!("{} — regenerate for another result", self.status);

@@ -9,7 +9,8 @@ impl EditorApp {
         let Some(layer) = self.workspace.active_mut().layers.get_mut(index) else { return; };
         let before = layer.pixels.clone();
         if !layer.pixels.invert_colors() { return; }
-        self.history.push_raster(index, before, layer.pixels.clone());
+        let edit = crate::history::HistoryEdit::from_diff(index, &before, &layer.pixels);
+        if let Some(edit) = edit { self.history.push(edit); }
         self.layers_reload = true;
         self.dirty = true;
         self.workspace.mark_active_thumb_dirty();
@@ -22,11 +23,12 @@ impl EditorApp {
         let Some(pixels) = self.workspace.active_mut().layers.get_mut(layer).map(|layer| &mut layer.pixels) else { return; };
         let before = pixels.clone();
         let changed = pixels.fix_alpha();
+        let edit = crate::history::HistoryEdit::from_diff(layer, &before, pixels);
         if changed == 0 {
             self.status = "Fix Alpha: no pixels below alpha 5".into();
             return;
         }
-        self.history.push_raster(layer, before, pixels.clone());
+        if let Some(edit) = edit { self.history.push(edit); }
         self.layers_reload = true;
         self.dirty = true;
         self.workspace.mark_active_thumb_dirty();
@@ -107,7 +109,7 @@ impl EditorApp {
         if let Some(layer) = self.workspace.active_mut().layers.get_mut(index) {
             layer.opacity = opacity.clamp(0.0, 1.0);
             self.dirty = true;
-            if let Some(floating) = self.floating.as_mut()
+            if let Some(floating) = self.session.floating.as_mut()
                 && floating.layer == index
             {
                 floating.opacity = layer.opacity;
@@ -140,7 +142,7 @@ impl EditorApp {
             return;
         }
         self.sync_layer_structure();
-        self.fit_image = true;
+        self.session.fit_image = true;
         let (width,height) = self.image_size.unwrap();
         self.status = format!("Canvas trimmed to {width} × {height}");
         ui.notify_success("Canvas trimmed");

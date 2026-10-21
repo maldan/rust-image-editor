@@ -47,7 +47,7 @@ impl EditorApp {
                 self.layers_reload = true;
                 self.floating_reload = false;
                 self.canvas_cleared = false;
-                self.fit_image = true;
+                self.session.fit_image = true;
                 self.clear_selection();
             }
             None => {
@@ -64,7 +64,7 @@ impl EditorApp {
 
     pub(in crate::app) fn mark_dirty_rect(&mut self, rect: PixelRect) {
         let layer = self
-            .floating
+            .session.floating
             .as_ref()
             .map(|f| f.layer)
             .unwrap_or(self.workspace.active().active_layer);
