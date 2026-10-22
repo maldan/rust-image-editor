@@ -3,16 +3,18 @@ use std::collections::{HashMap, HashSet};
 use crate::raster::SparsePixels;
 use std::path::{Path, PathBuf};
 
-use image::{DynamicImage, ImageFormat, RgbaImage};
+use image::{DynamicImage, RgbaImage};
 use mega_file::{MegaFile, WriteFile};
 use serde::{Deserialize, Serialize};
 
-use crate::project::{Layer, Project, encode_png_rgba};
+use crate::project::{Layer, Project, encode_webp_rgba};
 
 const MANIFEST_PATH: &str = "/manifest.json";
 const MANIFEST_KIND: &str = "mega-image-editor/manifest+json";
-const IMAGE_KIND: &str = "image/png";
+const IMAGE_KIND: &str = "image/webp";
+const FORMAT_VERSION: u32 = 6;
 pub const THUMB_SIZE: u32 = 84;
+const THUMB_ATLAS_COLS: u32 = 16;
 /// On-screen library thumb size (logical px before UI scale).
 pub const THUMB_VIEW: f32 = 73.0;
 
@@ -23,6 +25,8 @@ pub struct ImageAsset {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
+    /// Source file length. Clipboard imports keep the decoded buffer length.
+    pub byte_size: u64,
     /// Packed RGBA thumb `THUMB_SIZE x THUMB_SIZE`.
     pub thumb: Vec<u8>,
 }
@@ -107,6 +111,11 @@ impl Document {
         };
         self.thumb_dirty = false;
     }
+
+    /// Pixel tiles currently resident for this document.
+    pub fn memory_bytes(&self) -> u64 {
+        self.project.layers.iter().map(|layer| layer.pixels.memory_bytes()).sum()
+    }
 }
 
 fn empty_thumb() -> Vec<u8> {
@@ -127,6 +136,12 @@ pub struct Workspace {
     pub asset_dragging: bool,
     /// Rebuild active document thumb after this instant (1s debounce).
     pub thumb_rebuild_at: Option<std::time::Instant>,
+    /// Bumped when a thumbnail or the library layout changes.
+    thumb_revision: u64,
+    thumb_packed_revision: u64,
+    thumb_uploaded_revision: u64,
+    pub thumb_atlas: Vec<u8>,
+    pub thumb_atlas_size: (u32, u32),
     next_id: u64,
     saved: Option<SavedResources>,
 }
@@ -151,6 +166,11 @@ impl Default for Workspace {
             asset_drag_origin: None,
             asset_dragging: false,
             thumb_rebuild_at: None,
+            thumb_revision: 0,
+            thumb_packed_revision: 0,
+            thumb_uploaded_revision: 0,
+            thumb_atlas: Vec::new(),
+            thumb_atlas_size: (0, 0),
             next_id: 1,
             saved: None,
         };
@@ -183,7 +203,26 @@ impl Workspace {
         self.documents
             .push(Document::new(id, name.into(), Project::default()));
         self.active_document = self.documents.len() - 1;
+        self.select_active_document();
+        self.invalidate_thumb_atlas();
         self.active_document
+    }
+
+    pub fn select_active_document(&mut self) {
+        if let Some(doc) = self.documents.get(self.active_document) {
+            self.tree_selected = Some(format!("doc_{}", doc.id));
+        }
+    }
+
+    /// Insert a copy after `index` and return the new index. The copy is not activated.
+    pub fn duplicate_document(&mut self, index: usize) -> Option<usize> {
+        let mut doc = self.documents.get(index)?.clone();
+        doc.id = self.alloc_id("doc");
+        doc.name = format!("{} copy", doc.name);
+        let insert_at = index + 1;
+        self.documents.insert(insert_at, doc);
+        self.invalidate_thumb_atlas();
+        Some(insert_at)
     }
 
     pub fn mark_active_thumb_dirty(&mut self) {
@@ -196,8 +235,12 @@ impl Workspace {
     }
 
     pub fn rebuild_active_thumb_now(&mut self) {
-        if let Some(doc) = self.documents.get_mut(self.active_document) {
+        let rebuilt = self.documents.get_mut(self.active_document).is_some_and(|doc| {
             doc.rebuild_thumb();
+            true
+        });
+        if rebuilt {
+            self.invalidate_thumb_atlas();
         }
         self.thumb_rebuild_at = None;
     }
@@ -210,13 +253,72 @@ impl Workspace {
         if std::time::Instant::now() < at {
             return true; // still waiting — keep redrawing so timer can fire
         }
-        if let Some(doc) = self.documents.get_mut(self.active_document) {
-            if doc.thumb_dirty {
-                doc.rebuild_thumb();
+        let rebuilt = self.documents.get_mut(self.active_document).is_some_and(|doc| {
+            if !doc.thumb_dirty {
+                return false;
             }
+            doc.rebuild_thumb();
+            true
+        });
+        if rebuilt {
+            self.invalidate_thumb_atlas();
         }
         self.thumb_rebuild_at = None;
         false
+    }
+
+    pub(crate) fn invalidate_thumb_atlas(&mut self) {
+        self.thumb_revision = self.thumb_revision.wrapping_add(1);
+    }
+
+    /// Pack library thumbnails into one atlas. One quad per thumb, not one rect per pixel.
+    pub fn prepare_thumb_atlas(&mut self) {
+        if self.thumb_packed_revision == self.thumb_revision {
+            return;
+        }
+        let cols = THUMB_ATLAS_COLS;
+        let count = (self.assets.len() + self.documents.len()) as u32;
+        let rows = count.div_ceil(cols).max(1);
+        let width = cols * THUMB_SIZE;
+        let height = rows * THUMB_SIZE;
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        for (cell, thumb) in self.assets.iter().map(|asset| &asset.thumb)
+            .chain(self.documents.iter().map(|doc| &doc.thumb))
+            .enumerate()
+        {
+            let col = (cell as u32) % cols;
+            let row = (cell as u32) / cols;
+            let row_bytes = (THUMB_SIZE * 4) as usize;
+            for y in 0..THUMB_SIZE {
+                let src = (y * THUMB_SIZE * 4) as usize;
+                let dst = ((row * THUMB_SIZE + y) * width + col * THUMB_SIZE) as usize * 4;
+                if src + row_bytes <= thumb.len() {
+                    pixels[dst..dst + row_bytes].copy_from_slice(&thumb[src..src + row_bytes]);
+                }
+            }
+        }
+        self.thumb_atlas = pixels;
+        self.thumb_atlas_size = (width, height);
+        self.thumb_packed_revision = self.thumb_revision;
+    }
+
+    pub fn thumb_uv(&self, cell: usize) -> ([f32; 2], [f32; 2]) {
+        let (width, height) = self.thumb_atlas_size;
+        let col = (cell as u32) % THUMB_ATLAS_COLS;
+        let row = (cell as u32) / THUMB_ATLAS_COLS;
+        let u = |column: u32| column as f32 * THUMB_SIZE as f32 / width.max(1) as f32;
+        let v = |row: u32| row as f32 * THUMB_SIZE as f32 / height.max(1) as f32;
+        ([u(col), v(row)], [u(col + 1), v(row + 1)])
+    }
+
+    pub fn thumb_needs_upload(&self) -> bool {
+        self.thumb_packed_revision == self.thumb_revision
+            && self.thumb_uploaded_revision != self.thumb_packed_revision
+            && self.thumb_atlas_size.0 > 0
+    }
+
+    pub fn mark_thumb_atlas_uploaded(&mut self) {
+        self.thumb_uploaded_revision = self.thumb_packed_revision;
     }
 
     pub fn begin_asset_drag(&mut self, index: usize, origin: glam::Vec2) {
@@ -231,26 +333,32 @@ impl Workspace {
         self.asset_dragging = false;
     }
 
-    pub fn delete_document(&mut self, index: usize) {
+    /// Remove a document and keep it for undo. The last document stays.
+    pub fn take_document(&mut self, index: usize) -> Option<Document> {
         if self.documents.len() <= 1 || index >= self.documents.len() {
-            return;
+            return None;
         }
-        self.documents.remove(index);
+        let doc = self.documents.remove(index);
         if self.active_document >= self.documents.len() {
             self.active_document = self.documents.len() - 1;
         } else if index < self.active_document {
             self.active_document -= 1;
         }
+        self.select_active_document();
+        self.invalidate_thumb_atlas();
+        Some(doc)
     }
 
     pub fn set_active_document(&mut self, index: usize) {
         if index < self.documents.len() {
             self.active_document = index;
+            self.select_active_document();
         }
     }
 
     pub fn import_asset_image(&mut self, path: &Path) -> Result<usize, String> {
         let bytes = fs::read(path).map_err(|e| format!("Cannot read image: {e}"))?;
+        let byte_size = bytes.len() as u64;
         let decoded = image::load_from_memory(&bytes)
             .map_err(|e| format!("Invalid image: {e}"))?;
         let name = path
@@ -258,7 +366,7 @@ impl Workspace {
             .and_then(|s| s.to_str())
             .unwrap_or("Asset")
             .to_string();
-        self.add_asset_image(name, decoded)
+        self.add_asset_image(name, decoded, byte_size)
     }
 
     pub fn import_asset_rgba(
@@ -268,12 +376,13 @@ impl Workspace {
         width: u32,
         height: u32,
     ) -> Result<usize, String> {
+        let byte_size = pixels.len() as u64;
         let image = RgbaImage::from_raw(width, height, pixels.to_vec())
             .ok_or_else(|| "Invalid image size".to_string())?;
-        self.add_asset_image(name, DynamicImage::ImageRgba8(image))
+        self.add_asset_image(name, DynamicImage::ImageRgba8(image), byte_size)
     }
 
-    fn add_asset_image(&mut self, name: String, image: DynamicImage) -> Result<usize, String> {
+    fn add_asset_image(&mut self, name: String, image: DynamicImage, byte_size: u64) -> Result<usize, String> {
         let rgba = image.to_rgba8();
         let (width, height) = rgba.dimensions();
         if width == 0 || height == 0 {
@@ -288,14 +397,17 @@ impl Workspace {
             width,
             height,
             pixels,
+            byte_size,
             thumb,
         });
+        self.invalidate_thumb_atlas();
         Ok(self.assets.len() - 1)
     }
 
     pub fn delete_asset(&mut self, index: usize) {
         if index < self.assets.len() {
             self.assets.remove(index);
+            self.invalidate_thumb_atlas();
         }
     }
 
@@ -329,12 +441,12 @@ impl Workspace {
         let mut files = Vec::new();
         let mut asset_metas = Vec::new();
         for asset in &self.assets {
-            let asset_path = format!("/assets/{}.png", asset.id);
+            let asset_path = format!("/assets/{}.webp", asset.id);
             let signature = (asset.width, asset.height, crate::safe_save::fingerprint(&asset.pixels));
             if previous.and_then(|saved| saved.assets.get(&asset_path)) != Some(&signature) {
                 files.push(WriteFile::new(
                     asset_path.clone(), IMAGE_KIND,
-                    encode_png_rgba(&asset.pixels, asset.width, asset.height)?,
+                    encode_webp_rgba(&asset.pixels, asset.width, asset.height)?,
                 ));
             }
             next.assets.insert(asset_path.clone(), signature);
@@ -378,7 +490,7 @@ impl Workspace {
         }
         let manifest = WorkspaceManifest {
             format: "mega-image-editor".into(),
-            version: 5,
+            version: FORMAT_VERSION,
             active_document: self.active_document.min(self.documents.len().saturating_sub(1)),
             assets: asset_metas,
             documents: doc_metas,
@@ -407,8 +519,8 @@ impl Workspace {
             let archive = MegaFile::open(path).map_err(|e| format!("Cannot open project: {e}"))?;
             let manifest_bytes = archive.read_all(MANIFEST_PATH).map_err(|e| format!("Cannot read saved manifest: {e}"))?;
             let manifest: WorkspaceManifest = serde_json::from_slice(&manifest_bytes).map_err(|e| format!("Invalid saved manifest: {e}"))?;
-            if manifest.format != "mega-image-editor" || manifest.version != 5 {
-                return Err("Unsupported project format or version".into());
+            if let Err(error) = check_manifest(&manifest) {
+                return Err(error);
             }
             let mut paths = HashSet::from([MANIFEST_PATH.to_string()]);
             for asset in manifest.assets { paths.insert(asset.path); }
@@ -443,19 +555,19 @@ impl Workspace {
             .map_err(|e| format!("Invalid project manifest: {e}"))?;
         let manifest: WorkspaceManifest = serde_json::from_value(value)
             .map_err(|e| format!("Invalid project manifest: {e}"))?;
-        if manifest.format != "mega-image-editor" || manifest.version != 5 {
-            return Err("Unsupported project format or version".into());
-        }
+        check_manifest(&manifest)?;
         let mut next_id = 1u64;
         let mut assets = Vec::new();
+        let mut asset_paths = Vec::new();
         for meta in &manifest.assets {
             let bytes = archive
                 .read_all(&meta.path)
                 .map_err(|e| format!("Asset '{}' missing: {e}", meta.name))?;
-            let rgba = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
+            let rgba = image::load_from_memory(&bytes)
                 .map_err(|e| format!("Cannot decode asset '{}': {e}", meta.name))?
                 .to_rgba8();
             let (width, height) = rgba.dimensions();
+            let byte_size = bytes.len() as u64;
             let pixels = rgba.into_raw();
             let thumb = make_thumb(&pixels, width, height);
             bump_id(&meta.id, &mut next_id);
@@ -465,8 +577,10 @@ impl Workspace {
                 width,
                 height,
                 pixels,
+                byte_size,
                 thumb,
             });
+            asset_paths.push(meta.path.clone());
         }
         let mut documents = Vec::new();
         for meta in &manifest.documents {
@@ -503,22 +617,29 @@ impl Workspace {
                 Project::default(),
             ));
         }
+        let active_document = manifest.active_document.min(documents.len() - 1);
+        let tree_selected = documents.get(active_document).map(|doc| format!("doc_{}", doc.id));
         let mut workspace = Self {
             assets,
-            active_document: manifest.active_document.min(documents.len() - 1),
+            active_document,
             documents,
             path: Some(path.to_path_buf()),
-            tree_selected: None,
+            tree_selected,
             asset_drag: None,
             asset_drag_origin: None,
             asset_dragging: false,
             thumb_rebuild_at: None,
+            thumb_revision: 1,
+            thumb_packed_revision: 0,
+            thumb_uploaded_revision: 0,
+            thumb_atlas: Vec::new(),
+            thumb_atlas_size: (0, 0),
             next_id: next_id.max(1),
             saved: None,
         };
         let mut saved = SavedResources { manifest: manifest_bytes, ..Default::default() };
-        for asset in &workspace.assets {
-            saved.assets.insert(format!("/assets/{}.png", asset.id),
+        for (asset, path) in workspace.assets.iter().zip(asset_paths) {
+            saved.assets.insert(path,
                 (asset.width, asset.height, crate::safe_save::fingerprint(&asset.pixels)));
         }
         for document in &workspace.documents {
@@ -531,6 +652,14 @@ impl Workspace {
         }
         workspace.saved = Some(saved);
         Ok(workspace)
+    }
+}
+
+fn check_manifest(manifest: &WorkspaceManifest) -> Result<(), String> {
+    if manifest.format == "mega-image-editor" && matches!(manifest.version, 5 | 6) {
+        Ok(())
+    } else {
+        Err("Unsupported project format or version".into())
     }
 }
 
@@ -696,6 +825,25 @@ mod tests {
     }
 
     #[test]
+    fn asset_byte_size_is_the_file_length_and_documents_report_tile_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dot.png");
+        RgbaImage::from_raw(1, 1, vec![9, 8, 7, 255]).unwrap().save(&path).unwrap();
+        let len = fs::metadata(&path).unwrap().len();
+        let mut ws = Workspace::default();
+        ws.import_asset_image(&path).unwrap();
+        assert_eq!(ws.assets[0].byte_size, len);
+        assert_eq!(ws.active_doc().memory_bytes(), 0);
+        ws.place_asset_on_active(0).unwrap();
+        assert!(ws.active_doc().memory_bytes() >= crate::raster::TILE_BYTES as u64);
+        let copied = ws.duplicate_document(0).unwrap();
+        assert_eq!(copied, 1);
+        assert_ne!(ws.documents[0].id, ws.documents[1].id);
+        assert!(ws.take_document(0).is_some());
+        assert!(ws.take_document(0).is_none(), "the last document stays");
+    }
+
+    #[test]
     fn import_asset_does_not_touch_document() {
         let mut ws = Workspace::default();
         assert!(ws.active().layers.is_empty());
@@ -721,5 +869,45 @@ mod tests {
         assert_eq!(loaded.documents.len(), 2);
         assert_eq!(loaded.assets[0].name, "tex");
         assert_eq!(loaded.documents[0].project.layers.len(), 1);
+    }
+
+    #[test]
+    fn assets_save_as_lossless_webp_and_older_png_assets_still_open() {
+        let pixels = vec![1, 2, 3, 4, 5, 6, 7, 128, 9, 10, 11, 0, 12, 13, 14, 255];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("webp.mgimg");
+        let mut workspace = Workspace::default();
+        workspace.import_asset_rgba("tex".into(), &pixels, 2, 2).unwrap();
+        workspace.save(&path).unwrap();
+        let archive = MegaFile::open(&path).unwrap();
+        let stored = archive.read_all("/assets/img_2.webp").unwrap();
+        assert_eq!(&stored[..4], b"RIFF");
+        assert_eq!(&stored[8..12], b"WEBP");
+        drop(archive);
+        assert_eq!(Workspace::open(&path).unwrap().assets[0].pixels, pixels);
+
+        let legacy = dir.path().join("legacy.mgimg");
+        let manifest = br#"{
+            "format": "mega-image-editor",
+            "version": 5,
+            "active_document": 0,
+            "assets": [{"id": "img_9", "name": "old", "width": 2, "height": 2, "path": "/assets/img_9.png"}],
+            "documents": [{"id": "doc_1", "name": "Document 1", "width": 0, "height": 0, "active_layer": 0, "layers": []}]
+        }"#;
+        {
+            let archive = MegaFile::create(&legacy).unwrap();
+            archive.write_files(vec![
+                WriteFile::new("/manifest.json", MANIFEST_KIND, manifest.to_vec()),
+                WriteFile::new("/assets/img_9.png", "image/png", crate::project::encode_png_rgba(&pixels, 2, 2).unwrap()),
+            ]).unwrap();
+        }
+        let mut opened = Workspace::open(&legacy).unwrap();
+        assert_eq!(opened.assets[0].pixels, pixels);
+        opened.save(&legacy).unwrap();
+        let archive = MegaFile::open(&legacy).unwrap();
+        let migrated = archive.read_all("/assets/img_9.webp").unwrap();
+        assert_eq!(&migrated[8..12], b"WEBP");
+        drop(archive);
+        assert_eq!(Workspace::open(&legacy).unwrap().assets[0].pixels, pixels);
     }
 }

@@ -4,6 +4,7 @@ use crate::editing::PixelRect;
 use crate::project::{Layer, Project};
 use crate::raster::{SparsePixels, Tile};
 use crate::tiles::TILE_SIZE;
+use crate::workspace::Document;
 
 const MAX_ENTRIES: usize = 64;
 
@@ -168,11 +169,22 @@ enum HistoryEntry {
         width: u32,
         height: u32,
     },
+    /// The document itself moves between the workspace and this entry.
+    DeleteDocument {
+        index: usize,
+        id: String,
+        document: Option<Document>,
+        /// Document that stayed open after the deletion.
+        fallback_id: String,
+        /// The deleted document was the one on screen.
+        switched: bool,
+    },
 }
 
 pub enum HistoryChange {
     Pixels { layer: usize, rect: PixelRect },
     Layers,
+    Document { active_changed: bool },
 }
 
 #[derive(Default)]
@@ -201,6 +213,90 @@ impl History {
 
     pub fn push(&mut self, edit: HistoryEdit) {
         self.push_entry(HistoryEntry::Pixels(edit));
+    }
+
+    pub fn push_delete_document(&mut self, index: usize, document: Document, fallback_id: String, switched: bool) {
+        let id = document.id.clone();
+        self.push_entry(HistoryEntry::DeleteDocument {
+            index,
+            id,
+            document: Some(document),
+            fallback_id,
+            switched,
+        });
+    }
+
+    pub fn document_undo_pending(&self) -> bool {
+        matches!(self.undo.last(), Some(HistoryEntry::DeleteDocument { .. }))
+    }
+
+    pub fn document_redo_pending(&self) -> bool {
+        matches!(self.redo.last(), Some(HistoryEntry::DeleteDocument { .. }))
+    }
+
+    /// Drop pixel and layer edits. A deleted document can still be restored.
+    pub fn discard_project_edits(&mut self) {
+        self.undo.retain(|entry| matches!(entry, HistoryEntry::DeleteDocument { .. }));
+        self.redo.clear();
+    }
+
+    pub fn undo_document(&mut self, workspace: &mut crate::workspace::Workspace) -> Option<HistoryChange> {
+        let before = workspace.documents.get(workspace.active_document)?.id.clone();
+        let active_changed = match self.undo.last_mut()? {
+            HistoryEntry::DeleteDocument { index, document, switched, .. } => {
+                let doc = document.take()?;
+                let index = (*index).min(workspace.documents.len());
+                let active = workspace.active_document;
+                let switched = *switched;
+                workspace.documents.insert(index, doc);
+                if switched {
+                    workspace.active_document = index;
+                } else if index <= active {
+                    workspace.active_document = active + 1;
+                }
+                if workspace.active_document >= workspace.documents.len() {
+                    workspace.active_document = workspace.documents.len() - 1;
+                }
+                workspace.invalidate_thumb_atlas();
+                workspace.documents.get(workspace.active_document).map(|doc| doc.id.clone()).as_deref() != Some(before.as_str())
+            }
+            _ => return None,
+        };
+        self.redo.push(self.undo.pop()?);
+        Some(HistoryChange::Document { active_changed })
+    }
+
+    pub fn redo_document(&mut self, workspace: &mut crate::workspace::Workspace) -> Option<HistoryChange> {
+        let before = workspace.documents.get(workspace.active_document)?.id.clone();
+        let active_changed = match self.redo.last_mut()? {
+            HistoryEntry::DeleteDocument { id, document, fallback_id, switched, .. } => {
+                if workspace.documents.len() <= 1 {
+                    return None;
+                }
+                let Some(pos) = workspace.documents.iter().position(|doc| &doc.id == id) else {
+                    return None;
+                };
+                let removed = workspace.documents.remove(pos);
+                let switched = *switched;
+                let fallback = fallback_id.clone();
+                if switched {
+                    if let Some(found) = workspace.documents.iter().position(|doc| doc.id == fallback) {
+                        workspace.active_document = found;
+                    }
+                } else if pos < workspace.active_document {
+                    workspace.active_document -= 1;
+                }
+                if workspace.active_document >= workspace.documents.len() {
+                    workspace.active_document = workspace.documents.len() - 1;
+                }
+                *document = Some(removed);
+                workspace.invalidate_thumb_atlas();
+                workspace.documents.get(workspace.active_document).map(|doc| doc.id.clone()).as_deref() != Some(before.as_str())
+            }
+            _ => return None,
+        };
+        self.undo.push(self.redo.pop()?);
+        Some(HistoryChange::Document { active_changed })
     }
 
     fn push_entry(&mut self, entry: HistoryEntry) {
@@ -279,6 +375,7 @@ impl History {
                 let rect = apply_edit(pixels, project.width, project.height, edit, false)?;
                 HistoryChange::Pixels { layer: edit.layer, rect }
             }
+            HistoryEntry::DeleteDocument { .. } => return None,
             HistoryEntry::DeleteLayer {
                 index,
                 removed,
@@ -326,6 +423,7 @@ impl History {
                 let rect = apply_edit(pixels, project.width, project.height, edit, true)?;
                 HistoryChange::Pixels { layer: edit.layer, rect }
             }
+            HistoryEntry::DeleteDocument { .. } => return None,
             HistoryEntry::DeleteLayer {
                 index,
                 removed,

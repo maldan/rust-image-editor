@@ -147,3 +147,79 @@
         app.redo();
         assert_eq!(app.project().layers.len(), 3);
     }
+
+    #[test]
+    fn deleting_a_document_restores_its_pixels_and_keeps_later_edits_above_it() {
+        let mut app = app_with_layers(1);
+        let original = app.project().layers[0].pixels.clone();
+        app.workspace.active_mut().layers[0].name = "Kept".into();
+        app.new_document();
+        app.project_mut().import_rgba(&[4, 5, 6, 255].repeat(4), 2, 2).unwrap();
+        let survivor = app.workspace.active_doc().id.clone();
+        app.delete_document(0);
+        paint_pixel(&mut app, 0, 90);
+        assert_eq!(app.workspace.documents.len(), 1);
+        assert_eq!(app.workspace.active_doc().id, survivor);
+        app.undo();
+        assert_eq!(app.project().layers[0].pixels.read(2, 0, 0)[0], 4, "paint undo happens before the document returns");
+        assert_eq!(app.workspace.documents.len(), 1);
+        app.undo();
+        assert_eq!(app.workspace.documents.len(), 2);
+        assert_eq!(app.workspace.documents[0].name, "Document 1");
+        assert_eq!(app.workspace.documents[0].project.layers[0].name, "Kept");
+        assert_eq!(app.workspace.documents[0].project.layers[0].pixels, original);
+        assert_eq!(app.workspace.active_doc().id, survivor);
+        app.redo();
+        assert_eq!(app.workspace.documents.len(), 1);
+        app.undo();
+        assert_eq!(app.workspace.documents[0].project.layers[0].pixels, original);
+    }
+
+    #[test]
+    fn deleting_the_open_document_comes_back_on_screen() {
+        let mut app = app_with_layers(1);
+        app.workspace.active_mut().layers[0].name = "Open".into();
+        let id = app.workspace.active_doc().id.clone();
+        app.new_document();
+        app.switch_document(0);
+        app.delete_document(0);
+        assert_eq!(app.workspace.documents.len(), 1);
+        assert_ne!(app.workspace.active_doc().id, id);
+        app.undo();
+        assert_eq!(app.workspace.active_doc().id, id);
+        assert_eq!(app.workspace.active_doc().project.layers[0].name, "Open");
+        assert_eq!(app.image_size, Some((4, 2)));
+        app.redo();
+        assert_eq!(app.workspace.documents.len(), 1);
+        assert_ne!(app.workspace.active_doc().id, id);
+    }
+
+    #[test]
+    fn switching_documents_still_undoes_a_deletion() {
+        let mut app = app_with_layers(1);
+        app.new_document();
+        app.new_document();
+        assert_eq!(app.workspace.documents.len(), 3);
+        app.delete_document(1);
+        app.switch_document(0);
+        app.undo();
+        assert_eq!(app.workspace.documents.len(), 3);
+        assert_eq!(app.workspace.documents[1].name, "Document 2");
+    }
+
+    #[test]
+    fn last_document_cannot_be_deleted_and_duplicate_copies_pixels() {
+        let mut app = app_with_layers(1);
+        app.delete_document(0);
+        assert_eq!(app.workspace.documents.len(), 1);
+        app.undo();
+        assert_eq!(app.workspace.documents.len(), 1);
+        let pixels = app.project().layers[0].pixels.clone();
+        app.duplicate_document(0);
+        assert_eq!(app.workspace.documents.len(), 2);
+        assert_ne!(app.workspace.documents[0].id, app.workspace.documents[1].id);
+        assert_eq!(app.workspace.documents[1].project.layers[0].pixels, pixels);
+        assert_eq!(app.workspace.active_document, 1);
+        assert!(app.workspace.active_doc().name.ends_with("copy"));
+        assert!(app.workspace.active_doc().memory_bytes() > 0);
+    }

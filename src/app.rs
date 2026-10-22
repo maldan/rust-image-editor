@@ -50,6 +50,8 @@ pub struct EditorApp {
     pub session: DocumentSession,
     pub dirty: bool,
     pub status: String,
+    /// Smoothed redraw rate. Idle gaps between frames are not included.
+    pub fps: f32,
     pub dock: DockState,
     brush_last: Option<(f32, f32)>,
     brush_dirty: bool,
@@ -79,6 +81,7 @@ impl Default for EditorApp {
             session: DocumentSession::default(),
             dirty: false,
             status: "Import assets, place them on a document, or resize canvas".into(),
+            fps: 0.0,
             dock: ui::default_dock(),
             brush_last: None,
             brush_dirty: false,
@@ -135,10 +138,6 @@ impl EditorApp {
     pub fn brush_last_active(&self) -> bool {
         self.brush_last.is_some() || self.session.transform_drag.is_some()
             || !self.session.lasso_points.is_empty() || self.session.selection_brush_last.is_some()
-    }
-
-    pub fn has_floating_transform(&self) -> bool {
-        self.session.floating.is_some()
     }
 
     pub fn display_size(&self) -> Option<(u32, u32)> {
@@ -206,6 +205,16 @@ impl EditorApp {
             let cursor_from_image_center = self.input.mouse_pos - center - self.session.pan;
             self.session.pan -= cursor_from_image_center * (self.session.zoom / old_zoom - 1.0);
         }
+    }
+
+    pub(in crate::app) fn note_frame(&mut self, dt: f32) {
+        // A gap means the window was idle, not that the next frame was slow.
+        if !dt.is_finite() || !(1.0 / 1000.0..0.1).contains(&dt) {
+            self.fps = 0.0;
+            return;
+        }
+        let sample = 1.0 / dt;
+        self.fps = if self.fps == 0.0 { sample } else { self.fps * 0.85 + sample * 0.15 };
     }
 
     pub fn fit_to_canvas(&mut self) {

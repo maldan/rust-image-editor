@@ -18,6 +18,8 @@ use crate::editing::TransformCursor;
 pub const CANVAS_TEXTURE: u32 = 1;
 /// Slot 2 is `mega_ui::TEX_SLOT_COLOR_SV` (the color-picker square).
 pub const AI_PREVIEW_TEXTURE: u32 = 3;
+/// Library thumbnails packed into one atlas. Slot 2 is the color picker.
+pub const THUMB_ATLAS: u32 = 4;
 
 /// Small outlined circular arrow for rotation (there is no native Rotate cursor).
 /// Generate once at startup; the native cursor follows the mouse without redraws.
@@ -123,6 +125,8 @@ pub struct FrameInput {
     pub key_redo: bool,
     pub key_ctrl: bool,
     pub key_shift: bool,
+    /// Seconds since the previous presented frame. Large values are idle gaps.
+    pub dt: f32,
     modifiers: ModifiersState,
 }
 
@@ -409,7 +413,9 @@ impl<S: Scene> Host<S> {
         self.last_frame = now;
         self.elapsed += dt;
         let viewport = Vec2::new(size.width as f32, size.height as f32);
-        self.scene.begin_frame(&self.input.for_scene(self.keyboard_captured));
+        let mut frame_input = self.input.for_scene(self.keyboard_captured);
+        frame_input.dt = dt;
+        self.scene.begin_frame(&frame_input);
         let mut ui_input = self.input.to_ui(viewport, dt);
         if ui_input.key_paste {
             ui_input.clipboard = arboard::Clipboard::new().and_then(|mut c| c.get_text()).unwrap_or_default();

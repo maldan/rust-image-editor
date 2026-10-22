@@ -1,13 +1,14 @@
 use super::*;
 
 impl EditorApp {
-    pub fn clear_history(&mut self) {
-        self.history.clear();
-    }
-
     pub fn undo(&mut self) {
         self.cancel_transform();
-        if let Some(change) = self.history.undo(self.workspace.active_mut()) {
+        let change = if self.history.document_undo_pending() {
+            self.history.undo_document(&mut self.workspace)
+        } else {
+            self.history.undo(self.workspace.active_mut())
+        };
+        if let Some(change) = change {
             self.apply_history_change(change);
             self.status = "Undo".into();
         }
@@ -15,7 +16,12 @@ impl EditorApp {
 
     pub fn redo(&mut self) {
         self.cancel_transform();
-        if let Some(change) = self.history.redo(self.workspace.active_mut()) {
+        let change = if self.history.document_redo_pending() {
+            self.history.redo_document(&mut self.workspace)
+        } else {
+            self.history.redo(self.workspace.active_mut())
+        };
+        if let Some(change) = change {
             self.apply_history_change(change);
             self.status = "Redo".into();
         }
@@ -29,13 +35,24 @@ impl EditorApp {
                 self.workspace.mark_active_thumb_dirty();
             }
             HistoryChange::Layers => self.sync_layer_structure(),
+            HistoryChange::Document { active_changed } => {
+                self.workspace.select_active_document();
+                self.dirty = true;
+                if active_changed {
+                    let _ = self.reload_active_view();
+                }
+            }
         }
     }
 
     pub fn refresh_image(&mut self) -> Result<(), String> {
+        self.history.clear();
+        self.reload_active_view()
+    }
+
+    pub(in crate::app) fn reload_active_view(&mut self) -> Result<(), String> {
         self.close_asset_preview();
         self.cancel_transform();
-        self.history.clear();
         match self.workspace.active_mut().decoded_rgba()? {
             Some((_, width, height)) => {
                 self.image_size = Some((width, height));

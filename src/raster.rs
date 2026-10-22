@@ -81,6 +81,11 @@ pub struct SparsePixels {
 }
 
 impl SparsePixels {
+    /// Bytes held by allocated tiles. Shared tile buffers are counted once per owner.
+    pub fn memory_bytes(&self) -> u64 {
+        self.tiles.len() as u64 * TILE_BYTES as u64
+    }
+
     pub fn from_rgba(pixels: &[u8], width: u32, height: u32) -> Self {
         let mut result = Self::default();
         for ty in 0..height.div_ceil(TILE_SIZE) {

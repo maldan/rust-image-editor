@@ -21,6 +21,7 @@ impl Scene for EditorApp {
         self.input = if self.ai.open || self.hsv.open {
             let mut blocked = FrameInput::default();
             blocked.key_escape = input.key_escape;
+            blocked.dt = input.dt;
             if self.hsv.open { blocked.key_enter = input.key_enter; }
             blocked
         } else { input.clone() };
@@ -28,6 +29,7 @@ impl Scene for EditorApp {
 
     fn build(&mut self, ui: &mut Ui, viewport: Vec2, _stats: DrawStats) -> bool {
         self.session.viewport_size = viewport;
+        self.note_frame(self.input.dt);
         self.poll_ai(ui);
         if self.input.key_undo {
             self.undo();
@@ -50,17 +52,24 @@ impl Scene for EditorApp {
         else if copy { self.copy_shortcut(ui); }
         else if paste { self.paste_clipboard(ui); }
         else if self.input.key_delete { self.delete_selection(); }
+        // Static tools follow the pointer via mouse events. Only animated
+        // overlays and unfinished uploads need another frame on their own.
         self.ai.open || self.hsv.open
             || self.session.selection.is_some()
-            || self.session.selection_anchor.is_some()
-            || self.session.floating.is_some()
-            || self.workspace.asset_drag.is_some()
             || thumb_waiting
-            || (matches!(self.session.tool, Tool::Brush | Tool::SelectionBrush) && self.session.canvas_rect.contains(self.input.mouse_pos))
             || !self.dirty_tiles.is_empty()
     }
 
     fn sync_ui_textures(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut mega_ui::wgpu::UiRenderer) {
+        self.workspace.prepare_thumb_atlas();
+        if self.workspace.thumb_needs_upload() {
+            let (width, height) = self.workspace.thumb_atlas_size;
+            renderer.set_texture_rgba_nearest(
+                device, queue, crate::host::THUMB_ATLAS,
+                &self.workspace.thumb_atlas, width, height, "library thumbs",
+            );
+            self.workspace.mark_thumb_atlas_uploaded();
+        }
         if self.ai.preview_dirty {
             if let Some(preview) = self.ai.result.as_ref().or(self.ai.preview.as_ref()) {
                 let limit = device.limits().max_texture_dimension_2d;

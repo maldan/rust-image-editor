@@ -124,11 +124,11 @@ impl EditorApp {
         self.cancel_transform();
         match self.workspace.active_mut().resize_canvas(w, h) {
             Ok(()) => {
-                self.history.clear();
+                self.history.discard_project_edits();
                 self.dirty = true;
                 self.status = format!("Canvas resized to {w} × {h}");
                 ui.notify_success("Canvas resized");
-                let _ = self.refresh_image();
+                let _ = self.reload_active_view();
             }
             Err(error) => self.show_error(ui, error),
         }

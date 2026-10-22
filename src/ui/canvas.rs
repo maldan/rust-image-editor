@@ -2,7 +2,6 @@ use glam::Vec2;
 use mega_ui::Ui;
 
 use crate::app::{EditorApp, rect_size};
-use crate::editing::Tool;
 
 pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     let size = ui.available_size().max(Vec2::splat(1.0));
@@ -39,12 +38,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         if app.session.preview_asset.is_none() {
             app.draw_lasso_path(ui, view);
         }
-        if app.session.selection.is_some() || app.session.selection_anchor.is_some() {
-            ui.request_repaint();
-        }
-        if (matches!(app.session.tool, Tool::Brush | Tool::SelectionBrush) || app.has_floating_transform())
-            && app.session.canvas_rect.contains(app.input.mouse_pos)
-        {
+        // Marching ants advance with frame time. The brush ring does not.
+        if app.session.selection.is_some() {
             ui.request_repaint();
         }
     } else {

@@ -199,6 +199,20 @@ pub fn encode_png_rgba(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>
     encode_png(&DynamicImage::ImageRgba8(image))
 }
 
+/// VP8L lossless WebP. Partial alpha is preserved; this is not the lossy encoder.
+pub fn encode_webp_rgba(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let expected = (width as usize).checked_mul(height as usize).and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| "Invalid image size".to_string())?;
+    if pixels.len() != expected || width == 0 || height == 0 {
+        return Err("Invalid image size".into());
+    }
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    image::codecs::webp::WebPEncoder::new_lossless(&mut cursor)
+        .encode(pixels, width, height, image::ExtendedColorType::Rgba8)
+        .map_err(|e| format!("Cannot encode WebP: {e}"))?;
+    Ok(cursor.into_inner())
+}
+
 fn encode_png(image: &DynamicImage) -> Result<Vec<u8>, String> {
     let mut cursor = std::io::Cursor::new(Vec::new());
     image

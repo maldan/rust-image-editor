@@ -81,6 +81,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
             ui.label(&app.status.clone());
             ui.spacer();
             ui.label("Middle drag: pan · Wheel: zoom · Ctrl+Z/Y: undo/redo · Ctrl+X/C/V: cut/copy/paste · Delete: erase selection");
+            let fps = if app.fps > 0.0 { format!("{:.0} FPS", app.fps) } else { "— FPS".into() };
+            ui.label(&fps);
         });
     });
     ai_dialog::draw(ui, app);
@@ -92,12 +94,7 @@ fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
         app.import_image(ui);
     }
     if action.new_document {
-        app.cancel_transform();
-        let idx = app.workspace.create_document(&format!(
-            "Document {}",
-            app.workspace.documents.len() + 1
-        ));
-        app.switch_document(idx);
+        app.new_document();
     }
     if let Some(index) = action.switch_doc {
         app.switch_document(index);
@@ -106,11 +103,10 @@ fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
         app.show_asset_preview(index);
     }
     if let Some(index) = action.delete_doc {
-        app.cancel_transform();
-        app.workspace.delete_document(index);
-        app.clear_history();
-        let _ = app.refresh_image();
-        app.dirty = true;
+        app.delete_document(index);
+    }
+    if let Some(index) = action.clone_doc {
+        app.duplicate_document(index);
     }
     if let Some(index) = action.place_asset {
         app.place_asset(index, ui);

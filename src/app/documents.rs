@@ -275,10 +275,45 @@ impl EditorApp {
         }
         self.cancel_transform();
         self.workspace.set_active_document(index);
-        self.history.clear();
-        let _ = self.refresh_image();
+        self.history.discard_project_edits();
+        let _ = self.reload_active_view();
         self.dirty = true;
         self.status = format!("Document: {}", self.workspace.active_doc().name);
+    }
+
+    pub fn new_document(&mut self) {
+        self.cancel_transform();
+        self.close_asset_preview();
+        let name = format!("Document {}", self.workspace.documents.len() + 1);
+        self.workspace.create_document(&name);
+        self.history.discard_project_edits();
+        let _ = self.reload_active_view();
+        self.dirty = true;
+        self.status = format!("Document: {}", self.workspace.active_doc().name);
+    }
+
+    pub fn duplicate_document(&mut self, index: usize) {
+        let Some(index) = self.workspace.duplicate_document(index) else { return; };
+        self.switch_document(index);
+        self.status = format!("Duplicated {}", self.workspace.active_doc().name);
+    }
+
+    pub fn delete_document(&mut self, index: usize) {
+        if index >= self.workspace.documents.len() {
+            return;
+        }
+        let active_id = self.workspace.documents[self.workspace.active_document].id.clone();
+        self.cancel_transform();
+        self.close_asset_preview();
+        let Some(document) = self.workspace.take_document(index) else { return; };
+        let switched = document.id == active_id;
+        let fallback_id = self.workspace.documents[self.workspace.active_document].id.clone();
+        self.history.push_delete_document(index, document, fallback_id, switched);
+        if switched {
+            let _ = self.reload_active_view();
+        }
+        self.dirty = true;
+        self.status = "Document deleted".into();
     }
 
     pub fn place_asset(&mut self, asset_index: usize, ui: &mut Ui) {
@@ -287,7 +322,8 @@ impl EditorApp {
         match self.workspace.place_asset_on_active(asset_index) {
             Ok(()) => {
                 self.dirty = true;
-                let _ = self.refresh_image();
+                self.history.discard_project_edits();
+                let _ = self.reload_active_view();
                 self.status = "Asset placed on document".into();
                 ui.notify_success("Asset placed as layer");
             }
