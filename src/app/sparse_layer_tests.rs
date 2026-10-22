@@ -141,7 +141,8 @@
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("offcanvas.mgimg");
         app.workspace.save(&path).unwrap();
-        let loaded = Workspace::open(&path).unwrap();
+        let mut loaded = Workspace::open(&path).unwrap();
+        loaded.ensure_document_loaded(loaded.active_document).unwrap();
         assert_eq!(loaded.active().layers[0].pixels,app.project().layers[0].pixels);
         app.project_mut().resize_canvas(1,1).unwrap();
         app.project_mut().resize_canvas(100,100).unwrap();

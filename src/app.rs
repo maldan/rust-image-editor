@@ -34,6 +34,8 @@ mod ai_tests;
 #[cfg(test)]
 mod layer_history_tests;
 #[cfg(test)]
+mod loading_tests;
+#[cfg(test)]
 mod sparse_layer_tests;
 #[cfg(test)]
 mod transform_interaction_tests;
@@ -148,6 +150,10 @@ impl EditorApp {
     }
 
     pub fn show_asset_preview(&mut self, index: usize) {
+        if let Err(error) = self.workspace.ensure_asset_loaded(index) {
+            self.status = error;
+            return;
+        }
         let Some(asset) = self.workspace.assets.get(index) else { return; };
         let id = asset.id.clone();
         if self.session.preview_asset.as_ref() == Some(&id) { return; }

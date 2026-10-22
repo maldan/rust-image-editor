@@ -51,10 +51,14 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn reload_active_view(&mut self) -> Result<(), String> {
+        self.workspace.ensure_document_loaded(self.workspace.active_document)?;
         self.close_asset_preview();
         self.cancel_transform();
-        match self.workspace.active_mut().decoded_rgba()? {
-            Some((_, width, height)) => {
+        let project = self.workspace.active();
+        let size = (!project.layers.is_empty() && project.width > 0 && project.height > 0)
+            .then_some((project.width, project.height));
+        match size {
+            Some((width, height)) => {
                 self.image_size = Some((width, height));
                 self.resize_w = width;
                 self.resize_h = height;

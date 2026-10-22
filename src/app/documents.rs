@@ -252,7 +252,11 @@ impl EditorApp {
             return;
         };
         match Workspace::open(&path) {
-            Ok(workspace) => {
+            Ok(mut workspace) => {
+                if let Err(error) = workspace.ensure_document_loaded(workspace.active_document) {
+                    self.show_error(ui, error);
+                    return;
+                }
                 self.cancel_transform();
                 self.workspace = workspace;
                 match self.refresh_image() {
@@ -269,6 +273,10 @@ impl EditorApp {
     }
 
     pub fn switch_document(&mut self, index: usize) {
+        if let Err(error) = self.workspace.ensure_document_loaded(index) {
+            self.status = error;
+            return;
+        }
         self.close_asset_preview();
         if index == self.workspace.active_document {
             return;
@@ -276,7 +284,7 @@ impl EditorApp {
         self.cancel_transform();
         self.workspace.set_active_document(index);
         self.history.discard_project_edits();
-        let _ = self.reload_active_view();
+        if let Err(error) = self.reload_active_view() { self.status = error; return; }
         self.dirty = true;
         self.status = format!("Document: {}", self.workspace.active_doc().name);
     }
@@ -301,6 +309,13 @@ impl EditorApp {
     pub fn delete_document(&mut self, index: usize) {
         if index >= self.workspace.documents.len() {
             return;
+        }
+        if index == self.workspace.active_document && self.workspace.documents.len() > 1 {
+            let fallback = if index + 1 < self.workspace.documents.len() { index + 1 } else { index - 1 };
+            if let Err(error) = self.workspace.ensure_document_loaded(fallback) {
+                self.status = error;
+                return;
+            }
         }
         let active_id = self.workspace.documents[self.workspace.active_document].id.clone();
         self.cancel_transform();

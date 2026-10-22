@@ -92,6 +92,7 @@ impl EditorApp {
         // History addresses layers by index; an unrecorded reorder invalidates those indices.
         self.history.clear();
         self.workspace.active_mut().move_layer_to(from, to);
+        self.workspace.mark_active_thumb_dirty();
         self.dirty = true;
         self.layers_reload = true;
     }
@@ -125,6 +126,7 @@ impl EditorApp {
         match self.workspace.active_mut().resize_canvas(w, h) {
             Ok(()) => {
                 self.history.discard_project_edits();
+                self.workspace.mark_active_thumb_dirty();
                 self.dirty = true;
                 self.status = format!("Canvas resized to {w} × {h}");
                 ui.notify_success("Canvas resized");

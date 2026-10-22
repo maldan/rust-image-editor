@@ -2,6 +2,7 @@ use std::fs;
 use std::collections::{HashMap, HashSet};
 use crate::raster::SparsePixels;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use image::{DynamicImage, RgbaImage};
 use mega_file::{MegaFile, WriteFile};
@@ -29,6 +30,30 @@ pub struct ImageAsset {
     pub byte_size: u64,
     /// Packed RGBA thumb `THUMB_SIZE x THUMB_SIZE`.
     pub thumb: Vec<u8>,
+    deferred: Option<DeferredAsset>,
+}
+
+/// An immutable archive table and file handle keep deferred entries readable
+/// across append saves, compaction, document deletion/undo, and Save As.
+#[derive(Clone)]
+struct ArchiveSource(Arc<MegaFile<mega_file::FileBackend>>);
+
+impl std::fmt::Debug for ArchiveSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ArchiveSource")
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DeferredAsset {
+    source: ArchiveSource,
+    path: String,
+}
+
+#[derive(Debug, Clone)]
+struct DeferredDocument {
+    source: ArchiveSource,
+    layers: Vec<LayerMeta>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +63,8 @@ struct AssetMeta {
     width: u32,
     height: u32,
     path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preview: Option<String>,
 }
 
 fn default_opacity() -> f32 { 1.0 }
@@ -49,6 +76,48 @@ struct LayerMeta {
     #[serde(default = "default_opacity")]
     opacity: f32,
     path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compression: Option<String>,
+}
+
+/// Compression wraps the existing tile stream; codec names keep their meaning
+/// permanently so future writers can change without losing older readers.
+fn encode_layer(pixels: &SparsePixels) -> Result<Vec<u8>, String> {
+    zstd::stream::encode_all(pixels.encode().as_slice(), 3)
+        .map_err(|e| format!("Cannot compress layer with zstd: {e}"))
+}
+
+fn decode_layer(bytes: &[u8], compression: Option<&str>) -> Result<SparsePixels, String> {
+    match compression.unwrap_or("none") {
+        "none" => SparsePixels::decode(bytes),
+        "zstd" => {
+            let raw = zstd::stream::decode_all(bytes)
+                .map_err(|e| format!("Cannot decompress layer with zstd: {e}"))?;
+            SparsePixels::decode(&raw)
+        }
+        codec => Err(format!("Unsupported layer compression: {codec}")),
+    }
+}
+
+fn read_preview(source: &ArchiveSource, path: Option<&str>) -> Result<Option<Vec<u8>>, String> {
+    let Some(path) = path else { return Ok(None); };
+    let bytes = source.0.read_all(path).map_err(|e| format!("Cannot read preview {path}: {e}"))?;
+    let rgba = image::load_from_memory(&bytes)
+        .map_err(|e| format!("Cannot decode preview {path}: {e}"))?.to_rgba8();
+    if rgba.dimensions() != (THUMB_SIZE, THUMB_SIZE) {
+        return Err(format!("Invalid preview size: {path}"));
+    }
+    Ok(Some(rgba.into_raw()))
+}
+
+fn save_preview(path: &str, pixels: &[u8], previous: Option<&SavedResources>,
+    next: &mut SavedResources, files: &mut Vec<WriteFile>) -> Result<(), String> {
+    let hash = crate::safe_save::fingerprint(pixels);
+    if previous.and_then(|saved| saved.previews.get(path)) != Some(&hash) {
+        files.push(WriteFile::new(path, IMAGE_KIND, encode_webp_rgba(pixels, THUMB_SIZE, THUMB_SIZE)?));
+    }
+    next.previews.insert(path.to_string(), hash);
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +128,8 @@ struct DocumentMeta {
     height: u32,
     active_layer: usize,
     layers: Vec<LayerMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preview: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +152,7 @@ pub struct Document {
     /// Cached library preview; rebuilt only when `thumb_dirty`.
     pub thumb: Vec<u8>,
     pub thumb_dirty: bool,
+    deferred: Option<DeferredDocument>,
 }
 
 impl Document {
@@ -91,6 +163,7 @@ impl Document {
             project,
             thumb: empty_thumb(),
             thumb_dirty: true,
+            deferred: None,
         };
         doc.rebuild_thumb();
         doc
@@ -102,6 +175,7 @@ impl Document {
 
     /// Full composite preview — call from debounced tick, not every frame.
     pub fn rebuild_thumb(&mut self) {
+        if self.deferred.is_some() { return; }
         let p = &self.project;
         self.thumb = if p.layers.is_empty() || p.width == 0 || p.height == 0 {
             empty_thumb()
@@ -149,8 +223,9 @@ pub struct Workspace {
 /// Last successful disk state. Layers are identified by a content hash, not a second pixel buffer.
 #[derive(Debug, Clone, Default)]
 struct SavedResources {
-    assets: HashMap<String, (u32, u32, u64)>,
-    layers: HashMap<String, u64>,
+    assets: HashMap<String, (u32, u32, Option<u64>)>,
+    layers: HashMap<String, (Option<u64>, Option<String>)>,
+    previews: HashMap<String, u64>,
     manifest: Vec<u8>,
 }
 
@@ -180,6 +255,45 @@ impl Default for Workspace {
 }
 
 impl Workspace {
+    pub fn ensure_document_loaded(&mut self, index: usize) -> Result<(), String> {
+        let doc = self.documents.get_mut(index).ok_or("Document not found")?;
+        let Some(deferred) = &doc.deferred else { return Ok(()); };
+        // Decode into a temporary vector: a failure must not leave a half-loaded document.
+        let pixels = deferred.layers.iter().map(|meta| {
+            let bytes = deferred.source.0.read_all(&meta.path)
+                .map_err(|e| format!("Cannot read layer '{}': {e}", meta.name))?;
+            decode_layer(&bytes, meta.compression.as_deref())
+                .map_err(|e| format!("Layer '{}': {e}", meta.name))
+        }).collect::<Result<Vec<_>, String>>()?;
+        for (index, (layer, pixels)) in doc.project.layers.iter_mut().zip(pixels).enumerate() {
+            if let Some(saved) = self.saved.as_mut().and_then(|saved| saved.layers.get_mut(
+                &format!("/documents/{}/layers/{index}.tiles", doc.id))) {
+                saved.0 = Some(pixels.fingerprint());
+            }
+            layer.pixels = pixels;
+        }
+        doc.deferred = None;
+        Ok(())
+    }
+
+    pub fn ensure_asset_loaded(&mut self, index: usize) -> Result<(), String> {
+        let asset = self.assets.get_mut(index).ok_or("Asset not found")?;
+        let Some(deferred) = &asset.deferred else { return Ok(()); };
+        let bytes = deferred.source.0.read_all(&deferred.path)
+            .map_err(|e| format!("Cannot read asset '{}': {e}", asset.name))?;
+        let rgba = image::load_from_memory(&bytes)
+            .map_err(|e| format!("Cannot decode asset '{}': {e}", asset.name))?.to_rgba8();
+        if rgba.dimensions() != (asset.width, asset.height) {
+            return Err(format!("Asset '{}' dimensions do not match manifest", asset.name));
+        }
+        if let Some(saved) = self.saved.as_mut().and_then(|saved| saved.assets.get_mut(&deferred.path)) {
+            saved.2 = Some(crate::safe_save::fingerprint(rgba.as_raw()));
+        }
+        asset.pixels = rgba.into_raw();
+        asset.deferred = None;
+        Ok(())
+    }
+
     fn alloc_id(&mut self, prefix: &str) -> String {
         let id = format!("{prefix}_{}", self.next_id);
         self.next_id += 1;
@@ -399,6 +513,7 @@ impl Workspace {
             pixels,
             byte_size,
             thumb,
+            deferred: None,
         });
         self.invalidate_thumb_atlas();
         Ok(self.assets.len() - 1)
@@ -413,6 +528,8 @@ impl Workspace {
 
     /// Place asset pixels as a new layer on the active document (or create canvas).
     pub fn place_asset_on_active(&mut self, asset_index: usize) -> Result<(), String> {
+        self.ensure_asset_loaded(asset_index)?;
+        self.ensure_document_loaded(self.active_document)?;
         let asset = self
             .assets
             .get(asset_index)
@@ -435,27 +552,47 @@ impl Workspace {
     }
 
     pub fn save(&mut self, path: &Path) -> Result<(), String> {
+        let mut rebuilt = false;
+        for doc in &mut self.documents {
+            if doc.thumb_dirty && doc.deferred.is_none() {
+                doc.rebuild_thumb();
+                rebuilt = true;
+            }
+        }
+        if rebuilt { self.invalidate_thumb_atlas(); }
         let incremental = self.path.as_deref() == Some(path) && path.is_file();
         let previous = if incremental { self.saved.as_ref() } else { None };
         let mut next = SavedResources::default();
         let mut files = Vec::new();
         let mut asset_metas = Vec::new();
         for asset in &self.assets {
-            let asset_path = format!("/assets/{}.webp", asset.id);
-            let signature = (asset.width, asset.height, crate::safe_save::fingerprint(&asset.pixels));
-            if previous.and_then(|saved| saved.assets.get(&asset_path)) != Some(&signature) {
+            let asset_path = asset.deferred.as_ref().map(|source| source.path.clone())
+                .unwrap_or_else(|| format!("/assets/{}.webp", asset.id));
+            let signature = (asset.width, asset.height, asset.deferred.is_none()
+                .then(|| crate::safe_save::fingerprint(&asset.pixels)));
+            if let Some(deferred) = &asset.deferred {
+                if !incremental || previous.is_none_or(|saved| !saved.assets.contains_key(&asset_path)) {
+                    let bytes = deferred.source.0.read_all(&deferred.path)
+                        .map_err(|e| format!("Cannot copy asset '{}': {e}", asset.name))?;
+                    let kind = deferred.source.0.meta(&deferred.path).map_err(|e| e.to_string())?.kind;
+                    files.push(WriteFile::new(asset_path.clone(), kind, bytes));
+                }
+            } else if previous.and_then(|saved| saved.assets.get(&asset_path)) != Some(&signature) {
                 files.push(WriteFile::new(
                     asset_path.clone(), IMAGE_KIND,
                     encode_webp_rgba(&asset.pixels, asset.width, asset.height)?,
                 ));
             }
             next.assets.insert(asset_path.clone(), signature);
+            let preview = format!("/previews/assets/{}.webp", asset.id);
+            save_preview(&preview, &asset.thumb, previous, &mut next, &mut files)?;
             asset_metas.push(AssetMeta {
                 id: asset.id.clone(),
                 name: asset.name.clone(),
                 width: asset.width,
                 height: asset.height,
                 path: asset_path,
+                preview: Some(preview),
             });
         }
         let mut doc_metas = Vec::new();
@@ -463,22 +600,37 @@ impl Workspace {
             let mut layers = Vec::new();
             for (i, layer) in doc.project.layers.iter().enumerate() {
                 let layer_path = format!("/documents/{}/layers/{i}.tiles", doc.id);
-                let fingerprint = layer.pixels.fingerprint();
-                if previous.and_then(|saved| saved.layers.get(&layer_path)).copied() != Some(fingerprint) {
+                let fingerprint = doc.deferred.is_none().then(|| layer.pixels.fingerprint());
+                let saved_layer = previous.and_then(|saved| saved.layers.get(&layer_path));
+                let compression = if let Some(deferred) = &doc.deferred {
+                    let meta = &deferred.layers[i];
+                    if !incremental || saved_layer.is_none() {
+                        let bytes = deferred.source.0.read_all(&meta.path)
+                            .map_err(|e| format!("Cannot copy layer '{}': {e}", layer.name))?;
+                        files.push(WriteFile::new(layer_path.clone(), "application/x-rgba-tiles-64", bytes));
+                    }
+                    meta.compression.clone()
+                } else if let Some((_, compression)) = saved_layer.filter(|(hash, _)| *hash == fingerprint) {
+                    compression.clone()
+                } else {
                     files.push(WriteFile::new(
                         layer_path.clone(),
                         "application/x-rgba-tiles-64",
-                        layer.pixels.encode(),
+                        encode_layer(&layer.pixels)?,
                     ));
-                }
-                next.layers.insert(layer_path.clone(), fingerprint);
+                    Some("zstd".to_string())
+                };
+                next.layers.insert(layer_path.clone(), (fingerprint, compression.clone()));
                 layers.push(LayerMeta {
                     name: layer.name.clone(),
                     visible: layer.visible,
                     opacity: layer.opacity,
                     path: layer_path,
+                    compression,
                 });
             }
+            let preview = format!("/previews/documents/{}.webp", doc.id);
+            save_preview(&preview, &doc.thumb, previous, &mut next, &mut files)?;
             doc_metas.push(DocumentMeta {
                 id: doc.id.clone(),
                 name: doc.name.clone(),
@@ -486,6 +638,7 @@ impl Workspace {
                 height: doc.project.height,
                 active_layer: doc.project.active_layer,
                 layers,
+                preview: Some(preview),
             });
         }
         let manifest = WorkspaceManifest {
@@ -512,37 +665,108 @@ impl Workspace {
     }
 
     /// Compact only the saved revision. Unsaved in-memory edits are not committed.
-    pub fn optimize(&self) -> Result<(u64, u64), String> {
+    pub fn optimize(&mut self) -> Result<(u64, u64), String> {
         let path = self.path.as_deref().ok_or("Save or open a project before optimizing")?;
         let before = fs::metadata(path).map_err(|e| format!("Cannot inspect project: {e}"))?.len();
-        let files = {
+        // Read previews from the saved revision, never from unsaved memory edits.
+        let saved_previews = Self::open(path)?;
+        let (files, original_manifest, updated_manifest) = {
             let archive = MegaFile::open(path).map_err(|e| format!("Cannot open project: {e}"))?;
             let manifest_bytes = archive.read_all(MANIFEST_PATH).map_err(|e| format!("Cannot read saved manifest: {e}"))?;
-            let manifest: WorkspaceManifest = serde_json::from_slice(&manifest_bytes).map_err(|e| format!("Invalid saved manifest: {e}"))?;
+            let mut manifest: WorkspaceManifest = serde_json::from_slice(&manifest_bytes).map_err(|e| format!("Invalid saved manifest: {e}"))?;
             if let Err(error) = check_manifest(&manifest) {
                 return Err(error);
             }
             let mut paths = HashSet::from([MANIFEST_PATH.to_string()]);
-            for asset in manifest.assets { paths.insert(asset.path); }
-            for document in manifest.documents {
-                for layer in document.layers { paths.insert(layer.path); }
+            let mut replacements = HashMap::new();
+            for (asset, preview) in manifest.assets.iter_mut().zip(&saved_previews.assets) {
+                paths.insert(asset.path.clone());
+                if asset.preview.is_none() {
+                    let path = format!("/previews/assets/{}.webp", asset.id);
+                    replacements.insert(path.clone(), encode_webp_rgba(&preview.thumb, THUMB_SIZE, THUMB_SIZE)?);
+                    asset.preview = Some(path);
+                }
+                paths.insert(asset.preview.clone().unwrap());
             }
+            for (document, preview) in manifest.documents.iter_mut().zip(&saved_previews.documents) {
+                if document.preview.is_none() {
+                    let path = format!("/previews/documents/{}.webp", document.id);
+                    replacements.insert(path.clone(), encode_webp_rgba(&preview.thumb, THUMB_SIZE, THUMB_SIZE)?);
+                    document.preview = Some(path);
+                }
+                paths.insert(document.preview.clone().unwrap());
+                for layer in &mut document.layers {
+                    paths.insert(layer.path.clone());
+                    match layer.compression.as_deref().unwrap_or("none") {
+                        "zstd" => {},
+                        "none" => {
+                            let raw = archive.read_all(&layer.path)
+                                .map_err(|e| format!("Cannot read saved layer '{}': {e}", layer.name))?;
+                            let pixels = decode_layer(&raw, layer.compression.as_deref())?;
+                            replacements.insert(layer.path.clone(), encode_layer(&pixels)?);
+                            layer.compression = Some("zstd".into());
+                        },
+                        codec => return Err(format!("Unsupported layer compression: {codec}")),
+                    }
+                }
+            }
+            let updated_manifest = if replacements.is_empty() {
+                manifest_bytes.clone()
+            } else {
+                serde_json::to_vec_pretty(&manifest).map_err(|e| format!("Cannot encode manifest: {e}"))?
+            };
+            replacements.insert(MANIFEST_PATH.to_string(), updated_manifest.clone());
             let mut paths: Vec<_> = paths.into_iter().collect();
             paths.sort();
             let mut files = Vec::new();
             for path in paths {
-                let metadata = archive.meta(&path).map_err(|e| format!("Missing saved resource {path}: {e}"))?;
-                let bytes = archive.read_all(&path).map_err(|e| format!("Cannot read saved resource {path}: {e}"))?;
-                let mut file = WriteFile::new(path, metadata.kind, bytes);
-                file.created_at = Some(metadata.created_at);
-                file.updated_at = Some(metadata.updated_at);
-                file.flags = metadata.flags;
+                let metadata = archive.meta(&path).ok();
+                let bytes = match replacements.remove(&path) {
+                    Some(bytes) => bytes,
+                    None => archive.read_all(&path).map_err(|e| format!("Cannot read saved resource {path}: {e}"))?,
+                };
+                let mut file = WriteFile::new(path, metadata.as_ref().map(|meta| meta.kind.as_str()).unwrap_or(IMAGE_KIND), bytes);
+                if let Some(metadata) = metadata {
+                    file.created_at = Some(metadata.created_at);
+                    file.updated_at = Some(metadata.updated_at);
+                    file.flags = metadata.flags;
+                }
                 files.push(file);
             }
-            files
+            (files, manifest_bytes, updated_manifest)
         };
         crate::safe_save::save_archive(path, files)?;
         let after = fs::metadata(path).map_err(|e| format!("Cannot inspect optimized project: {e}"))?.len();
+        // Update only the disk snapshot, never fingerprints of unsaved memory edits.
+        let same_revision = self.saved.as_ref().is_some_and(|saved| saved.manifest == original_manifest);
+        if let Some(saved) = self.saved.as_mut().filter(|saved| saved.manifest == original_manifest) {
+            saved.manifest = updated_manifest.clone();
+            for (_, codec) in saved.layers.values_mut() {
+                *codec = Some("zstd".into());
+            }
+            for asset in &saved_previews.assets {
+                saved.previews.insert(format!("/previews/assets/{}.webp", asset.id), crate::safe_save::fingerprint(&asset.thumb));
+            }
+            for doc in &saved_previews.documents {
+                saved.previews.insert(format!("/previews/documents/{}.webp", doc.id), crate::safe_save::fingerprint(&doc.thumb));
+            }
+        } else {
+            self.saved = None;
+        }
+        if same_revision {
+            let manifest: WorkspaceManifest = serde_json::from_slice(&updated_manifest).map_err(|e| e.to_string())?;
+            let source = ArchiveSource(Arc::new(MegaFile::open(path).map_err(|e| e.to_string())?));
+            for doc in &mut self.documents {
+                if doc.deferred.is_some() && let Some(meta) = manifest.documents.iter().find(|meta| meta.id == doc.id) {
+                    doc.deferred = Some(DeferredDocument { source: source.clone(), layers: meta.layers.clone() });
+                }
+            }
+            for asset in &mut self.assets {
+                if asset.deferred.is_some() && let Some(meta) = manifest.assets.iter().find(|meta| meta.id == asset.id) {
+                    asset.deferred = Some(DeferredAsset { source: source.clone(), path: meta.path.clone() });
+                }
+            }
+        }
         Ok((before, after))
     }
 
@@ -556,31 +780,33 @@ impl Workspace {
         let manifest: WorkspaceManifest = serde_json::from_value(value)
             .map_err(|e| format!("Invalid project manifest: {e}"))?;
         check_manifest(&manifest)?;
+        let source = ArchiveSource(Arc::new(archive));
         let mut next_id = 1u64;
         let mut assets = Vec::new();
-        let mut asset_paths = Vec::new();
         for meta in &manifest.assets {
-            let bytes = archive
-                .read_all(&meta.path)
+            let byte_size = source.0.meta(&meta.path)
                 .map_err(|e| format!("Asset '{}' missing: {e}", meta.name))?;
-            let rgba = image::load_from_memory(&bytes)
-                .map_err(|e| format!("Cannot decode asset '{}': {e}", meta.name))?
-                .to_rgba8();
-            let (width, height) = rgba.dimensions();
-            let byte_size = bytes.len() as u64;
-            let pixels = rgba.into_raw();
-            let thumb = make_thumb(&pixels, width, height);
+            let thumb = match read_preview(&source, meta.preview.as_deref())? {
+                Some(thumb) => thumb,
+                None => {
+                    // Legacy projects have no stored preview. Generate it once,
+                    // retaining only the small thumbnail, not the decoded asset.
+                    let bytes = source.0.read_all(&meta.path).map_err(|e| e.to_string())?;
+                    let rgba = image::load_from_memory(&bytes).map_err(|e| e.to_string())?.to_rgba8();
+                    make_thumb(rgba.as_raw(), rgba.width(), rgba.height())
+                }
+            };
             bump_id(&meta.id, &mut next_id);
             assets.push(ImageAsset {
                 id: meta.id.clone(),
                 name: meta.name.clone(),
-                width,
-                height,
-                pixels,
-                byte_size,
+                width: meta.width,
+                height: meta.height,
+                pixels: Vec::new(),
+                byte_size: byte_size.size,
                 thumb,
+                deferred: Some(DeferredAsset { source: source.clone(), path: meta.path.clone() }),
             });
-            asset_paths.push(meta.path.clone());
         }
         let mut documents = Vec::new();
         for meta in &manifest.documents {
@@ -589,14 +815,11 @@ impl Workspace {
             let width = meta.width;
             let height = meta.height;
             for layer_meta in &meta.layers {
-                let bytes = archive
-                    .read_all(&layer_meta.path)
-                    .map_err(|e| format!("Layer '{}' missing: {e}", layer_meta.name))?;
                 layers.push(Layer {
                     name: layer_meta.name.clone(),
                     visible: layer_meta.visible,
                     opacity: layer_meta.opacity.clamp(0.0, 1.0),
-                    pixels: SparsePixels::decode(&bytes)?,
+                    pixels: SparsePixels::default(),
                 });
             }
             let mut project = Project {
@@ -608,7 +831,22 @@ impl Workspace {
             if !project.layers.is_empty() {
                 project.active_layer = project.active_layer.min(project.layers.len() - 1);
             }
-            documents.push(Document::new(meta.id.clone(), meta.name.clone(), project));
+            let thumb = match read_preview(&source, meta.preview.as_deref())? {
+                Some(thumb) => thumb,
+                None => {
+                    let mut legacy = project.clone();
+                    for (layer, layer_meta) in legacy.layers.iter_mut().zip(&meta.layers) {
+                        let bytes = source.0.read_all(&layer_meta.path).map_err(|e| e.to_string())?;
+                        layer.pixels = decode_layer(&bytes, layer_meta.compression.as_deref())?;
+                    }
+                    let doc = Document::new(meta.id.clone(), meta.name.clone(), legacy);
+                    doc.thumb
+                }
+            };
+            documents.push(Document {
+                id: meta.id.clone(), name: meta.name.clone(), project, thumb, thumb_dirty: false,
+                deferred: Some(DeferredDocument { source: source.clone(), layers: meta.layers.clone() }),
+            });
         }
         if documents.is_empty() {
             documents.push(Document::new(
@@ -638,16 +876,21 @@ impl Workspace {
             saved: None,
         };
         let mut saved = SavedResources { manifest: manifest_bytes, ..Default::default() };
-        for (asset, path) in workspace.assets.iter().zip(asset_paths) {
-            saved.assets.insert(path,
-                (asset.width, asset.height, crate::safe_save::fingerprint(&asset.pixels)));
+        for (asset, meta) in workspace.assets.iter().zip(&manifest.assets) {
+            saved.assets.insert(meta.path.clone(), (asset.width, asset.height, None));
+            if let Some(preview) = &meta.preview {
+                saved.previews.insert(preview.clone(), crate::safe_save::fingerprint(&asset.thumb));
+            }
         }
-        for document in &workspace.documents {
-            for (index, layer) in document.project.layers.iter().enumerate() {
+        for (document, meta) in workspace.documents.iter().zip(&manifest.documents) {
+            for index in 0..document.project.layers.len() {
                 saved.layers.insert(
                     format!("/documents/{}/layers/{index}.tiles", document.id),
-                    layer.pixels.fingerprint(),
+                    (None, meta.layers[index].compression.clone()),
                 );
+            }
+            if let Some(preview) = &meta.preview {
+                saved.previews.insert(preview.clone(), crate::safe_save::fingerprint(&document.thumb));
             }
         }
         workspace.saved = Some(saved);
@@ -698,6 +941,257 @@ mod tests {
     use super::*;
     use crate::raster::Raster;
 
+    // Existing raster round-trip tests explicitly request the content they inspect.
+    fn open_loaded(path: &Path) -> Result<Workspace, String> {
+        let mut workspace = Workspace::open(path)?;
+        for index in 0..workspace.documents.len() { workspace.ensure_document_loaded(index)?; }
+        for index in 0..workspace.assets.len() { workspace.ensure_asset_loaded(index)?; }
+        Ok(workspace)
+    }
+
+    fn lazy_fixture(path: &Path) -> Workspace {
+        let mut workspace = saved_workspace(path);
+        workspace.import_asset_rgba("second".into(), &[90, 80, 70, 128].repeat(64), 8, 8).unwrap();
+        workspace.create_document("Second");
+        workspace.place_asset_on_active(1).unwrap();
+        workspace.save(path).unwrap();
+        workspace
+    }
+
+    #[test]
+    fn open_reads_lossless_previews_and_only_requested_content_is_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lazy.mgimg");
+        let original = lazy_fixture(&path);
+        let mut workspace = Workspace::open(&path).unwrap();
+        for (a, b) in workspace.assets.iter().zip(&original.assets) {
+            assert_eq!(a.thumb, b.thumb);
+            assert!(a.pixels.is_empty());
+            assert!(a.deferred.is_some());
+        }
+        for (a, b) in workspace.documents.iter().zip(&original.documents) {
+            assert_eq!(a.thumb, b.thumb);
+            assert_eq!(a.memory_bytes(), 0);
+            assert!(a.deferred.is_some());
+        }
+        let archive = MegaFile::open(&path).unwrap();
+        let manifest: WorkspaceManifest = serde_json::from_slice(&archive.read_all(MANIFEST_PATH).unwrap()).unwrap();
+        for preview in manifest.assets.iter().filter_map(|a| a.preview.as_ref())
+            .chain(manifest.documents.iter().filter_map(|d| d.preview.as_ref())) {
+            let bytes = archive.read_all(preview).unwrap();
+            assert_eq!(&bytes[8..12], b"WEBP");
+            assert_eq!(&bytes[12..16], b"VP8L");
+        }
+        drop(archive);
+        let saved_bytes = fs::read(&path).unwrap();
+        workspace.save(&path).unwrap();
+        assert!(fs::read(&path).unwrap() == saved_bytes);
+        workspace.ensure_document_loaded(1).unwrap();
+        assert_eq!(workspace.documents[1].project.layers[0].pixels, original.documents[1].project.layers[0].pixels);
+        assert!(workspace.documents[0].deferred.is_some());
+        assert!(workspace.assets.iter().all(|a| a.deferred.is_some()));
+        workspace.ensure_asset_loaded(0).unwrap();
+        assert_eq!(workspace.assets[0].pixels, original.assets[0].pixels);
+        assert!(workspace.assets[1].deferred.is_some());
+        // Loading by itself must not make any data dirty.
+        workspace.save(&path).unwrap();
+        assert!(fs::read(&path).unwrap() == saved_bytes);
+    }
+
+    #[test]
+    fn deferred_content_survives_save_copy_compaction_and_deleted_document_undo() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lazy.mgimg");
+        let copy = dir.path().join("copy.mgimg");
+        let original = lazy_fixture(&path);
+        let mut workspace = Workspace::open(&path).unwrap();
+        let duplicated = workspace.duplicate_document(0).unwrap();
+        let removed = workspace.take_document(duplicated).unwrap();
+        workspace.save(&path).unwrap();
+        workspace.optimize().unwrap();
+        assert!(workspace.documents.iter().all(|d| d.deferred.is_some()));
+        assert!(workspace.assets.iter().all(|a| a.deferred.is_some()));
+        workspace.save(&copy).unwrap();
+        workspace.optimize().unwrap();
+        workspace.documents.insert(1, removed);
+        workspace.ensure_document_loaded(1).unwrap();
+        assert_eq!(workspace.documents[1].project.layers[0].pixels, original.documents[0].project.layers[0].pixels);
+        workspace.ensure_document_loaded(0).unwrap();
+        workspace.active_document = 0;
+        workspace.active_mut().layers[0].pixels.write(0, -20, 10, [4, 3, 2, 255]);
+        workspace.mark_active_thumb_dirty();
+        workspace.save(&copy).unwrap();
+        let loaded = open_loaded(&copy).unwrap();
+        assert_eq!(loaded.documents[0].project.layers[0].pixels.read(0, -20, 10), [4, 3, 2, 255]);
+        assert_eq!(loaded.documents[2].project.layers[0].pixels, original.documents[1].project.layers[0].pixels);
+        assert_eq!(loaded.assets[1].pixels, original.assets[1].pixels);
+        assert!(workspace.documents[2].deferred.is_some());
+        assert!(workspace.assets[1].deferred.is_some());
+    }
+
+    #[test]
+    fn invalid_content_is_not_decoded_until_requested_and_failed_load_is_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.mgimg");
+        lazy_fixture(&path);
+        let archive = MegaFile::open(&path).unwrap();
+        let manifest: WorkspaceManifest = serde_json::from_slice(&archive.read_all(MANIFEST_PATH).unwrap()).unwrap();
+        archive.write_files(vec![
+            WriteFile::new(&manifest.documents[1].layers[0].path, "application/x-rgba-tiles-64", b"invalid zstd".to_vec()).overwrite(true),
+            WriteFile::new(&manifest.assets[1].path, IMAGE_KIND, b"invalid webp".to_vec()).overwrite(true),
+        ]).unwrap();
+        drop(archive);
+        let mut workspace = Workspace::open(&path).unwrap();
+        workspace.ensure_document_loaded(0).unwrap();
+        assert!(workspace.ensure_document_loaded(1).is_err());
+        assert!(workspace.documents[1].deferred.is_some());
+        assert_eq!(workspace.documents[1].memory_bytes(), 0);
+        assert!(workspace.ensure_asset_loaded(1).is_err());
+        assert!(workspace.assets[1].deferred.is_some());
+        assert!(workspace.assets[1].pixels.is_empty());
+    }
+
+    #[test]
+    fn save_preserves_unchanged_raw_layers_and_optimize_compresses_them() {
+        let dir = tempfile::tempdir().unwrap();
+        for version in [5, 6] {
+            let path = dir.path().join(format!("legacy-{version}.mgimg"));
+            let mut pixels = SparsePixels::default();
+            pixels.offset = (-10, 20);
+            pixels.write(0, -15, 200, [1, 2, 3, 255]);
+            let raw = pixels.encode();
+            let manifest = serde_json::json!({
+                "format": "mega-image-editor", "version": version,
+                "documents": [{"id": "doc_1", "name": "Legacy", "width": 16,
+                    "height": 16, "active_layer": 0, "layers": [
+                        {"name": "implicit raw", "visible": true, "opacity": 0.5,
+                         "path": "/documents/doc_1/layers/0.tiles"},
+                        {"name": "explicit raw", "visible": true, "compression": "none",
+                         "path": "/documents/doc_1/layers/1.tiles"}
+                    ]}]
+            });
+            crate::safe_save::save_archive(&path, vec![
+                WriteFile::new(MANIFEST_PATH, MANIFEST_KIND, serde_json::to_vec(&manifest).unwrap()),
+                WriteFile::new("/documents/doc_1/layers/0.tiles", "application/x-rgba-tiles-64", raw.clone()),
+                WriteFile::new("/documents/doc_1/layers/1.tiles", "application/x-rgba-tiles-64", raw.clone()),
+            ]).unwrap();
+            let optimize_path = dir.path().join(format!("optimize-legacy-{version}.mgimg"));
+            fs::copy(&path, &optimize_path).unwrap();
+            let mut optimized = open_loaded(&optimize_path).unwrap();
+            optimized.active_mut().layers[0].pixels.write(0, 1, 1, [7, 6, 5, 255]);
+            let (before, after) = optimized.optimize().unwrap();
+            assert!(after < before, "Optimize must compress existing raw layers");
+            assert_eq!(open_loaded(&optimize_path).unwrap().active().layers[0].pixels, pixels);
+            assert_eq!(optimized.active().layers[0].pixels.read(0, 1, 1), [7, 6, 5, 255]);
+            let archive = MegaFile::open(&optimize_path).unwrap();
+            let stored: WorkspaceManifest = serde_json::from_slice(&archive.read_all(MANIFEST_PATH).unwrap()).unwrap();
+            assert!(stored.documents[0].layers.iter().all(|layer| layer.compression.as_deref() == Some("zstd")));
+            drop(archive);
+            optimized.save(&optimize_path).unwrap();
+            let reopened = open_loaded(&optimize_path).unwrap();
+            assert_eq!(reopened.active().layers[0].pixels.read(0, 1, 1), [7, 6, 5, 255]);
+            assert_eq!(reopened.active().layers[1].pixels, pixels);
+            let saved_bytes = fs::read(&optimize_path).unwrap();
+            optimized.save(&optimize_path).unwrap();
+            assert_eq!(fs::read(&optimize_path).unwrap(), saved_bytes);
+
+            let mut workspace = open_loaded(&path).unwrap();
+            assert_eq!(workspace.active().layers[0].pixels, pixels);
+            assert_eq!(workspace.active().layers[0].opacity, 0.5);
+            // The legacy manifest may be normalized/upgraded on the first save,
+            // but neither unchanged raster payload should be rewritten.
+            let original = MegaFile::open(&path).unwrap();
+            let raw_meta = original.meta("/documents/doc_1/layers/0.tiles").unwrap();
+            drop(original);
+            workspace.save(&path).unwrap();
+            let archive = MegaFile::open(&path).unwrap();
+            assert_eq!(archive.meta("/documents/doc_1/layers/0.tiles").unwrap().updated_at, raw_meta.updated_at);
+            assert_eq!(archive.read_all("/documents/doc_1/layers/0.tiles").unwrap(), raw);
+            drop(archive);
+            let saved_bytes = fs::read(&path).unwrap();
+            workspace.save(&path).unwrap();
+            assert!(fs::read(&path).unwrap() == saved_bytes);
+            workspace.active_mut().layers[0].name = "renamed".into();
+            workspace.save(&path).unwrap();
+            let archive = MegaFile::open(&path).unwrap();
+            assert_eq!(archive.read_all("/documents/doc_1/layers/0.tiles").unwrap(), raw);
+            let stored: WorkspaceManifest = serde_json::from_slice(&archive.read_all(MANIFEST_PATH).unwrap()).unwrap();
+            assert_eq!(stored.documents[0].layers[0].compression, None);
+            assert_eq!(stored.documents[0].layers[1].compression.as_deref(), Some("none"));
+            drop(archive);
+
+            workspace.active_mut().layers[1].pixels.write(0, 0, 0, [9, 8, 7, 128]);
+            workspace.save(&path).unwrap();
+            let mut mixed = open_loaded(&path).unwrap();
+            assert_eq!(mixed.active().layers[0].pixels, pixels);
+            assert_eq!(mixed.active().layers[1].pixels.read(0, 0, 0), [9, 8, 7, 128]);
+            let archive = MegaFile::open(&path).unwrap();
+            let stored: WorkspaceManifest = serde_json::from_slice(&archive.read_all(MANIFEST_PATH).unwrap()).unwrap();
+            assert_eq!(stored.documents[0].layers[0].compression, None);
+            assert_eq!(stored.documents[0].layers[1].compression.as_deref(), Some("zstd"));
+            drop(archive);
+            mixed.optimize().unwrap();
+            let optimized = open_loaded(&path).unwrap();
+            for (a, b) in optimized.active().layers.iter().zip(&mixed.active().layers) {
+                assert_eq!(a.pixels, b.pixels);
+            }
+            let compacted = fs::read(&path).unwrap();
+            mixed.save(&path).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), compacted);
+
+            let copy = dir.path().join(format!("copy-{version}.mgimg"));
+            mixed.save(&copy).unwrap();
+            let loaded = open_loaded(&copy).unwrap();
+            for (a, b) in loaded.active().layers.iter().zip(&mixed.active().layers) {
+                assert_eq!(a.pixels, b.pixels);
+            }
+            let archive = MegaFile::open(&copy).unwrap();
+            let stored: WorkspaceManifest = serde_json::from_slice(&archive.read_all(MANIFEST_PATH).unwrap()).unwrap();
+            assert!(stored.documents[0].layers.iter().all(|layer| layer.compression.as_deref() == Some("zstd")));
+        }
+    }
+
+    #[test]
+    fn layer_compression_round_trip_and_sizes() {
+        let mut noise_seed = 42u32;
+        for kind in ["solid", "gradient", "noise"] {
+            let mut rgba = Vec::with_capacity(512 * 512 * 4);
+            for y in 0..512 {
+                for x in 0..512 {
+                    let pixel = match kind {
+                        "solid" => [40, 80, 120, 255],
+                        "gradient" => [(x / 2) as u8, (y / 2) as u8, ((x + y) / 4) as u8, 255],
+                        _ => {
+                            noise_seed ^= noise_seed << 13;
+                            noise_seed ^= noise_seed >> 17;
+                            noise_seed ^= noise_seed << 5;
+                            noise_seed.to_le_bytes()
+                        }
+                    };
+                    rgba.extend_from_slice(&pixel);
+                }
+            }
+            let pixels = SparsePixels::from_rgba(&rgba, 512, 512);
+            let raw = pixels.encode();
+            let compressed = encode_layer(&pixels).unwrap();
+            assert_eq!(decode_layer(&compressed, Some("zstd")).unwrap(), pixels);
+            println!("{kind}: raw={} zstd={} savings={:.2}%", raw.len(), compressed.len(),
+                100.0 * (1.0 - compressed.len() as f64 / raw.len() as f64));
+        }
+        let empty = SparsePixels::default();
+        assert_eq!(decode_layer(&encode_layer(&empty).unwrap(), Some("zstd")).unwrap(), empty);
+    }
+
+    #[test]
+    fn invalid_layer_compression_is_an_error() {
+        assert!(decode_layer(&[], Some("future-codec")).unwrap_err().contains("future-codec"));
+        assert!(decode_layer(b"not zstd", Some("zstd")).is_err());
+        let compressed = encode_layer(&SparsePixels::default()).unwrap();
+        assert!(decode_layer(&compressed[..compressed.len() - 1], Some("zstd")).is_err());
+        let invalid_tiles = zstd::stream::encode_all(&b"invalid tiles"[..], 3).unwrap();
+        assert!(decode_layer(&invalid_tiles, Some("zstd")).is_err());
+    }
+
     fn saved_workspace(path: &Path) -> Workspace {
         let mut workspace = Workspace::default();
         workspace.import_asset_rgba("reference".into(), &[10, 20, 30, 255].repeat(16), 4, 4).unwrap();
@@ -714,7 +1208,7 @@ mod tests {
         let original = fs::read(&path).unwrap();
         workspace.save(&path).unwrap();
         assert_eq!(fs::read(&path).unwrap(), original);
-        let mut reopened = Workspace::open(&path).unwrap();
+        let mut reopened = open_loaded(&path).unwrap();
         reopened.save(&path).unwrap();
         assert_eq!(fs::read(&path).unwrap(), original);
 
@@ -723,13 +1217,13 @@ mod tests {
         let renamed = fs::read(&path).unwrap();
         assert!(renamed.starts_with(&original));
         assert!(renamed.len() - original.len() < crate::raster::TILE_BYTES);
-        assert_eq!(Workspace::open(&path).unwrap().active().layers[0].name, "renamed");
+        assert_eq!(open_loaded(&path).unwrap().active().layers[0].name, "renamed");
 
         reopened.active_mut().layers[0].pixels.write(0, 2, 1, [100, 120, 140, 128]);
         reopened.save(&path).unwrap();
         let edited = fs::read(&path).unwrap();
         assert!(edited.starts_with(&renamed));
-        assert_eq!(Workspace::open(&path).unwrap().active().layers[0].pixels.read(0, 2, 1), [100, 120, 140, 128]);
+        assert_eq!(open_loaded(&path).unwrap().active().layers[0].pixels.read(0, 2, 1), [100, 120, 140, 128]);
     }
 
     #[test]
@@ -742,13 +1236,13 @@ mod tests {
         workspace.save(&path).unwrap();
         workspace.active_mut().move_layer_to(1, 0);
         workspace.save(&path).unwrap();
-        let loaded = Workspace::open(&path).unwrap();
+        let loaded = open_loaded(&path).unwrap();
         assert_eq!(loaded.active().layers[0].pixels.read(0, -20, 30), [80, 90, 100, 255]);
         assert_eq!(loaded.active().layers[1].pixels.read(0, 0, 0), [10, 20, 30, 255]);
         workspace.active_mut().delete_layer(0);
         workspace.delete_asset(0);
         workspace.save(&path).unwrap();
-        let loaded = Workspace::open(&path).unwrap();
+        let loaded = open_loaded(&path).unwrap();
         assert_eq!(loaded.assets.len(), 0);
         assert_eq!(loaded.active().layers.len(), 1);
         assert_eq!(loaded.active().layers[0].pixels.read(0, 0, 0), [10, 20, 30, 255]);
@@ -768,7 +1262,7 @@ mod tests {
         for cut in [original.len(), original.len() + 1, committed.len() - 1] {
             let interrupted = dir.path().join(format!("interrupted-{cut}.mgimg"));
             fs::write(&interrupted, &committed[..cut]).unwrap();
-            let loaded = Workspace::open(&interrupted).unwrap();
+            let loaded = open_loaded(&interrupted).unwrap();
             assert_eq!(loaded.active().layers[0].pixels.read(0, 0, 0), [10, 20, 30, 255]);
             assert_ne!(loaded.active().layers[0].name, "changed");
         }
@@ -791,13 +1285,13 @@ mod tests {
         assert!(after < before);
         assert_eq!(workspace.active().layers[0].pixels.read(0, 0, 0), [200, 201, 202, 255]);
         assert_eq!(workspace.saved.as_ref().unwrap().manifest, saved_manifest);
-        let loaded = Workspace::open(&path).unwrap();
+        let loaded = open_loaded(&path).unwrap();
         assert_eq!(loaded.active().layers[0].pixels.read(0, 0, 0), [10, 20, 30, 255]);
         let archive = MegaFile::open(&path).unwrap();
-        assert_eq!(archive.list_all().unwrap().len(), 2); // Manifest + one live layer.
+        assert_eq!(archive.list_all().unwrap().len(), 3); // Manifest, one live layer, document preview.
         drop(archive);
         workspace.save(&path).unwrap();
-        assert_eq!(Workspace::open(&path).unwrap().active().layers[0].pixels.read(0, 0, 0), [200, 201, 202, 255]);
+        assert_eq!(open_loaded(&path).unwrap().active().layers[0].pixels.read(0, 0, 0), [200, 201, 202, 255]);
         let optimized = fs::read(&path).unwrap();
         workspace.save(&path).unwrap();
         assert_eq!(fs::read(&path).unwrap(), optimized);
@@ -818,10 +1312,10 @@ mod tests {
         assert!(workspace.optimize().is_err());
         drop(lock);
         assert_eq!(fs::read(&path).unwrap(), original);
-        let saved_fp = *workspace.saved.as_ref().unwrap().layers.values().next().unwrap();
-        assert_ne!(saved_fp, workspace.active().layers[0].pixels.fingerprint());
+        let saved_fp = workspace.saved.as_ref().unwrap().layers.values().next().unwrap().0;
+        assert_ne!(saved_fp, Some(workspace.active().layers[0].pixels.fingerprint()));
         workspace.save(&path).unwrap();
-        assert_eq!(Workspace::open(&path).unwrap().active().layers[0].pixels.read(0, 0, 0), [200, 201, 202, 255]);
+        assert_eq!(open_loaded(&path).unwrap().active().layers[0].pixels.read(0, 0, 0), [200, 201, 202, 255]);
     }
 
     #[test]
@@ -864,7 +1358,7 @@ mod tests {
         ws.create_document("Doc B");
         ws.save(&path).unwrap();
 
-        let loaded = Workspace::open(&path).unwrap();
+        let loaded = open_loaded(&path).unwrap();
         assert_eq!(loaded.assets.len(), 1);
         assert_eq!(loaded.documents.len(), 2);
         assert_eq!(loaded.assets[0].name, "tex");
@@ -884,7 +1378,7 @@ mod tests {
         assert_eq!(&stored[..4], b"RIFF");
         assert_eq!(&stored[8..12], b"WEBP");
         drop(archive);
-        assert_eq!(Workspace::open(&path).unwrap().assets[0].pixels, pixels);
+        assert_eq!(open_loaded(&path).unwrap().assets[0].pixels, pixels);
 
         let legacy = dir.path().join("legacy.mgimg");
         let manifest = br#"{
@@ -901,13 +1395,13 @@ mod tests {
                 WriteFile::new("/assets/img_9.png", "image/png", crate::project::encode_png_rgba(&pixels, 2, 2).unwrap()),
             ]).unwrap();
         }
-        let mut opened = Workspace::open(&legacy).unwrap();
+        let mut opened = open_loaded(&legacy).unwrap();
         assert_eq!(opened.assets[0].pixels, pixels);
         opened.save(&legacy).unwrap();
         let archive = MegaFile::open(&legacy).unwrap();
         let migrated = archive.read_all("/assets/img_9.webp").unwrap();
         assert_eq!(&migrated[8..12], b"WEBP");
         drop(archive);
-        assert_eq!(Workspace::open(&legacy).unwrap().assets[0].pixels, pixels);
+        assert_eq!(open_loaded(&legacy).unwrap().assets[0].pixels, pixels);
     }
 }

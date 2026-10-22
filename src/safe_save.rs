@@ -7,6 +7,42 @@ use std::{
 
 use mega_file::{MegaFile, WriteFile};
 
+/// ReplaceFile preserves readers of the previous revision on Windows, unlike
+/// MoveFileEx (used by TempPath::persist) when the destination is still open.
+#[cfg(windows)]
+fn replace_open_file(temporary: &Path, path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn ReplaceFileW(replaced: *const u16, replacement: *const u16, backup: *const u16,
+            flags: u32, exclude: *mut std::ffi::c_void, reserved: *mut std::ffi::c_void) -> i32;
+    }
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let backup = tempfile::Builder::new().prefix(".mgimg-backup-").suffix(".tmp")
+        .tempfile_in(parent).map_err(|e| e.to_string())?.into_temp_path();
+    std::fs::remove_file(&backup).map_err(|e| e.to_string())?;
+    let wide = |path: &Path| path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+    let replaced = wide(path);
+    let replacement = wide(temporary);
+    let backup_name = wide(&backup);
+    // SAFETY: all paths are NUL-terminated UTF-16 and remain alive for the call;
+    // the reserved pointers are null, as required by ReplaceFileW.
+    let ok = unsafe { ReplaceFileW(replaced.as_ptr(), replacement.as_ptr(), backup_name.as_ptr(),
+        0, std::ptr::null_mut(), std::ptr::null_mut()) };
+    if ok == 0 {
+        let error = std::io::Error::last_os_error();
+        if backup.exists() {
+            if !path.exists() && std::fs::rename(&backup, path).is_ok() {
+                return Err(format!("Cannot replace project; previous file was restored: {error}"));
+            }
+            let recovery = backup.keep().map_err(|e| e.to_string())?;
+            return Err(format!("Cannot replace project: {error}; previous file retained at {}", recovery.display()));
+        }
+        return Err(format!("Cannot replace project; previous file was kept: {error}"));
+    }
+    Ok(())
+}
+
 /// Prepare and verify a sibling file before atomically replacing the destination.
 /// Never remove or truncate the destination, including when replacement fails.
 fn replace_file(path: &Path, prepare: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
@@ -17,6 +53,10 @@ fn replace_file(path: &Path, prepare: impl FnOnce(&Path) -> Result<(), String>) 
     prepare(&temporary)?;
     OpenOptions::new().write(true).open(&temporary)
         .and_then(|file| file.sync_all()).map_err(|e| format!("Cannot sync temporary project: {e}"))?;
+    #[cfg(windows)]
+    if path.exists() {
+        return replace_open_file(&temporary, path);
+    }
     temporary.persist(path).map_err(|e| format!("Cannot replace project; previous file was kept: {e}"))?;
     Ok(())
 }
