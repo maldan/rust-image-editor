@@ -90,6 +90,20 @@ impl EditorApp {
         self.status = "Selection cut".into();
     }
 
+    pub fn delete_selection(&mut self) {
+        if self.session.floating.is_some() {
+            self.status = "Apply or cancel the transform before deleting".into();
+            return;
+        }
+        if self.session.selection.as_ref().is_none_or(|selection| selection.is_empty()) {
+            return;
+        }
+        match self.erase_active_selection() {
+            Ok(()) => self.status = "Selection erased".into(),
+            Err(error) => self.status = error,
+        }
+    }
+
     pub(in crate::app) fn selection_clipboard_text(&mut self) -> Result<String, String> {
         let layer = self.capture_selection_layer()?;
         let (width, height) = self.image_size.ok_or("No image")?;

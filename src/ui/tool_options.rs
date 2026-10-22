@@ -64,6 +64,8 @@ pub fn draw(ui: &mut Ui, session: &mut DocumentSession, image_ready: bool) -> Op
             ui.space(12.0);
             ui.label(&format!("Threshold: {:.0}", session.fill_threshold));
             ui.slider_stepped("fill_threshold", &mut session.fill_threshold, 0.0..=255.0, 1.0);
+            ui.space(8.0);
+            ui.label("Ctrl — eyedropper");
         }
         Tool::Transform => {
             ui.add_enabled(image_ready && session.preview_asset.is_none(), |ui| {

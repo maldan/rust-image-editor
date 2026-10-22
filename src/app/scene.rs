@@ -49,6 +49,7 @@ impl Scene for EditorApp {
         if cut { self.cut_selection(ui); }
         else if copy { self.copy_shortcut(ui); }
         else if paste { self.paste_clipboard(ui); }
+        else if self.input.key_delete { self.delete_selection(); }
         self.ai.open || self.hsv.open
             || self.session.selection.is_some()
             || self.session.selection_anchor.is_some()

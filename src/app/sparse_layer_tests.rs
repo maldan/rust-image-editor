@@ -86,6 +86,16 @@
         app.input.mouse_pressed = false;
         app.input.key_ctrl = true;
         assert!(!app.eyedropper_armed());
+        app.set_tool(Tool::Fill);
+        app.input.mouse_pos = view.image_to_screen(Vec2::new(2.5, 3.5));
+        app.input.mouse_pressed = true;
+        app.session.brush_color = [1.0, 1.0, 1.0, 1.0];
+        let filled = app.project().layers.clone();
+        let picked = composite_pixel(&app.project().layers, 2, 3);
+        app.handle_canvas_edit(view);
+        assert_eq!(app.session.brush_color, picked.map(|c| c as f32 / 255.0));
+        assert_eq!(app.project().layers[0].pixels, filled[0].pixels);
+        assert_eq!(app.project().layers[1].pixels, filled[1].pixels);
     }
 
     fn document() -> EditorApp {

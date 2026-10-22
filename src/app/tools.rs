@@ -221,6 +221,12 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn handle_fill(&mut self, view: CanvasView) {
+        if self.eyedropper_armed() {
+            if self.input.mouse_pressed {
+                self.pick_composite_color(view);
+            }
+            return;
+        }
         if !self.input.mouse_pressed {
             return;
         }
@@ -284,9 +290,9 @@ impl EditorApp {
         }
     }
 
-    /// Brush tool with Ctrl held samples the composited image instead of painting.
+    /// Brush and fill sample the composited image while Ctrl is held.
     pub fn eyedropper_armed(&self) -> bool {
-        self.session.tool == Tool::Brush
+        matches!(self.session.tool, Tool::Brush | Tool::Fill)
             && self.input.key_ctrl
             && self.brush_last.is_none()
             && self.session.preview_asset.is_none()

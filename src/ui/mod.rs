@@ -80,7 +80,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
         ui.status_bar(|ui| {
             ui.label(&app.status.clone());
             ui.spacer();
-            ui.label("Middle drag: pan · Wheel: zoom · Ctrl+Z/Y: undo/redo · Ctrl+X/C/V: cut/copy/paste");
+            ui.label("Middle drag: pan · Wheel: zoom · Ctrl+Z/Y: undo/redo · Ctrl+X/C/V: cut/copy/paste · Delete: erase selection");
         });
     });
     ai_dialog::draw(ui, app);

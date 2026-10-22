@@ -104,7 +104,8 @@
         assert_eq!(copied.layer.pixels.read(4, 0, 0), [0; 4]);
         assert_eq!(app.project().layers[0].pixels, original);
 
-        app.erase_active_selection().unwrap();
+        app.delete_selection();
+        assert!(app.session.selection.is_some());
         assert_eq!(app.project().layers[0].pixels.read(4, 1, 0), [0; 4]);
         assert_eq!(app.project().layers[0].pixels.read(4, 0, 0), [0, 1, 2, 255]);
         app.undo();
