@@ -83,6 +83,7 @@ fn draw_controls(ui: &mut Ui, app: &mut EditorApp, running: bool, run: &mut bool
                             }
                             app.ai.anim_start = start as u32 - 1;
                             app.ai.anim_end = end as u32 - 1;
+                            app.ai.anim_apply = (app.ai.anim_start, app.ai.anim_end);
                         }
                         ui.label("The first and last frames are the video's start and end. A single frame uses image-to-video.");
                         ui.horizontal(|ui| {

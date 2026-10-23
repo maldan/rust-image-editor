@@ -6,6 +6,7 @@ mod asset_properties;
 mod assets_panel;
 mod canvas;
 mod canvas_panel;
+mod camera_panel;
 pub mod hsv_dialog;
 mod menu_bar;
 mod project_panel;
@@ -57,6 +58,34 @@ fn context_panel(node: &mut DockNode, preview: bool) {
     }
 }
 
+fn camera_dock(node: &mut DockNode, enabled: bool) {
+    fn contains(node: &DockNode) -> bool {
+        match node {
+            DockNode::Leaf { tabs, .. } => tabs.iter().any(|t| t == "Camera"),
+            DockNode::Split { first, second, .. } => contains(first) || contains(second),
+        }
+    }
+    fn update(node: &mut DockNode, enabled: bool, add: &mut bool) {
+        match node {
+            DockNode::Leaf { tabs, active } => {
+                if !enabled {
+                    tabs.retain(|t| t != "Camera");
+                    *active = (*active).min(tabs.len().saturating_sub(1));
+                } else if *add && tabs.iter().any(|t| t == "Layers") {
+                    tabs.push("Camera".into());
+                    *add = false;
+                }
+            }
+            DockNode::Split { first, second, .. } => {
+                update(first, enabled, add);
+                update(second, enabled, add);
+            }
+        }
+    }
+    let mut add = enabled && !contains(node);
+    update(node, enabled, &mut add);
+}
+
 pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     let scale = ui.scale();
     let menu_h = 28.0 * scale;
@@ -72,6 +101,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
         let mut dock = std::mem::replace(&mut app.dock, DockState::new(DockNode::leaf(&["tmp"])));
         let preview = app.session.preview_asset.is_some();
         context_panel(&mut dock.root, preview);
+        camera_dock(&mut dock.root, !preview && app.project().animation.is_some());
         ui.dock_space("main", dock_size, &mut dock, |ui, tab| {
             if tab == "Workspace" {
                 canvas::draw(ui, app);
@@ -96,6 +126,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                     let action = assets_panel::draw(ui, &mut app.workspace, &app.input, app.session.canvas_rect);
                     apply_library(ui, app, action);
                 }
+                "Camera" => camera_panel::draw(ui, app),
                 "Canvas" => canvas_panel::draw(ui, app),
                 "Layers" | "Properties" => {
                     if app.session.preview_asset.is_some() { asset_properties::draw(ui, app); }

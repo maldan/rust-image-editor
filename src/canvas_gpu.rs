@@ -12,6 +12,8 @@ mod deform;
 mod pipelines;
 mod render;
 mod transform;
+#[cfg(test)]
+mod camera_tests;
 
 // Larger preview cores keep texture/pass counts low; the fixed halo covers
 // trilinear filtering down to Transform's minimum scale (1/20).
@@ -32,6 +34,11 @@ struct ViewUniforms {
     saturation: f32,
     value: f32,
     _hsv_pad: f32,
+    camera_center: [f32; 2],
+    camera_zoom: f32,
+    camera_fade: f32,
+    camera_enabled: f32,
+    _camera_pad: f32,
 }
 
 #[repr(C)]
@@ -99,6 +106,7 @@ pub struct LayerDraw {
 
 #[derive(Clone, Default)]
 pub struct CanvasOverlay {
+    pub camera: Option<(crate::camera::CameraKey, Vec<f32>)>,
     pub deformation: Option<usize>,
     pub hsv: Option<(usize, crate::hsv::HsvAdjustment)>,
     pub brush_center: Option<Vec2>,

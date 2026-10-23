@@ -2,6 +2,7 @@ use super::*;
 
 impl EditorApp {
     pub(in crate::app) fn begin_transform(&mut self) {
+        if self.camera_visible() { return; }
         if self.session.floating.is_some() {
             return;
         }
@@ -39,6 +40,7 @@ impl EditorApp {
     }
 
     pub fn flip_transform(&mut self, horizontal: bool) {
+        if self.camera_visible() { return; }
         if self.session.tool != Tool::Transform
             || self.ai.open
             || self.hsv.open

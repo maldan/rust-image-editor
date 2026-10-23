@@ -53,6 +53,7 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn open_ai_mode(&mut self, mode: AiMode) {
+        if self.camera_visible() { return; }
         if (!mode.uses_video() && mode.needs_input() && self.image_size.is_none())
             || self.ai.job.is_some()
         {
@@ -513,8 +514,9 @@ impl EditorApp {
         if index == self.workspace.active_document {
             self.history.clear_redo();
             self.sync_layer_structure();
+            self.seek_animation(start);
         }
-        self.status = format!("{name} added: {span} frames");
+        self.status = format!("{name} added: frames {}–{}", start + 1, end + 1);
         self.ai.message = format!("{} — regenerate for another result", self.status);
         true
     }

@@ -98,6 +98,7 @@ pub fn merge_layers(
     }
     pixels.prune();
     crate::project::Layer {
+        z: lower.z,
         drawings: Default::default(),
         name: lower.name.clone(),
         visible: lower.visible || upper.visible,
@@ -136,6 +137,7 @@ pub fn merge_layer_tracks(
         .map(|(_, pixels)| pixels.clone())
         .unwrap_or_default();
     crate::project::Layer {
+        z: lower.z,
         drawings,
         name: lower.name.clone(),
         visible: lower.visible || upper.visible,
@@ -152,6 +154,7 @@ fn track_frame(layer: &crate::project::Layer, frame: u32) -> crate::project::Lay
         .map(|(_, pixels)| pixels.clone())
         .unwrap_or_default();
     crate::project::Layer {
+        z: layer.z,
         drawings: Default::default(),
         name: layer.name.clone(),
         visible: layer.visible,
@@ -169,6 +172,7 @@ mod merge_tests {
     #[test]
     fn composite_pixel_matches_the_full_image_composite() {
         let mut lower = Layer {
+            z: 0.0,
             drawings: Default::default(),
             name: "Lower".into(),
             visible: true,
@@ -177,6 +181,7 @@ mod merge_tests {
         };
         lower.pixels.offset = (1, 2);
         let mut upper = Layer {
+            z: 0.0,
             drawings: Default::default(),
             name: "Upper".into(),
             visible: false,
@@ -199,6 +204,7 @@ mod merge_tests {
         for lower_visible in [false, true] {
             for upper_visible in [false, true] {
                 let mut lower = Layer {
+                    z: 0.0,
                     drawings: Default::default(),
                     name: "Lower".into(),
                     visible: lower_visible,
@@ -207,6 +213,7 @@ mod merge_tests {
                 };
                 lower.pixels.offset = (1, 1);
                 let mut upper = Layer {
+                    z: 0.0,
                     drawings: Default::default(),
                     name: "Upper".into(),
                     visible: upper_visible,
@@ -226,6 +233,7 @@ mod merge_tests {
     #[test]
     fn merge_down_preserves_distant_offcanvas_pixels_without_filling_the_gap() {
         let mut lower = Layer {
+            z: 0.0,
             drawings: Default::default(),
             name: "Lower".into(),
             visible: true,

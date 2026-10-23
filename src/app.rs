@@ -120,6 +120,7 @@ impl Default for EditorApp {
 
 impl EditorApp {
     pub fn open_hsv(&mut self) {
+        if self.camera_visible() { return; }
         if self.ai.open || self.hsv.open || self.project().layers.is_empty() {
             return;
         }

@@ -157,6 +157,8 @@ impl EditCapture {
 }
 
 enum HistoryEntry {
+    Camera { frame: u32, before: crate::camera::CameraTrack, after: crate::camera::CameraTrack },
+    LayerDepth { layer: usize, before: f32, after: f32 },
     Drawing {
         layer: usize,
         frame: u32,
@@ -220,6 +222,13 @@ pub struct History {
 }
 
 impl History {
+    pub fn record_camera(&mut self, frame: u32, before: crate::camera::CameraTrack, after: crate::camera::CameraTrack) {
+        self.push_entry(HistoryEntry::Camera { frame, before, after });
+    }
+    pub fn record_depth(&mut self, layer: usize, before: f32, after: f32) {
+        self.push_entry(HistoryEntry::LayerDepth { layer, before, after });
+    }
+
     /// Bind newly recorded pixel edits before navigation changes the editable drawing.
     /// Both stacks need binding: a seek must preserve a pending Redo as well as Undo.
     pub fn bind_animation_edits(&mut self, project: &Project) {
@@ -258,6 +267,13 @@ impl History {
             before,
             after,
         });
+        true
+    }
+
+    pub fn resize_camera(&mut self, project: &mut Project, longer: bool) -> bool {
+        self.bind_animation_edits(project);
+        let Some(shift) = project.resize_held_camera(longer) else { return false; };
+        self.push_entry(HistoryEntry::TimelineShift(shift));
         true
     }
 
@@ -509,6 +525,15 @@ impl History {
         let entry = self.undo.last_mut()?;
         seek_layer_edit_frame(project, entry)?;
         let change = match entry {
+            HistoryEntry::Camera { frame, before, .. } => {
+                project.animation.as_mut()?.camera.keys = before.keys.clone();
+                project.seek(*frame);
+                HistoryChange::Layers
+            }
+            HistoryEntry::LayerDepth { layer, before, .. } => {
+                project.layers.get_mut(*layer)?.z = *before;
+                HistoryChange::Layers
+            }
             HistoryEntry::Drawing {
                 layer,
                 frame,
@@ -565,6 +590,7 @@ impl History {
                     shift.frame_before,
                     shift.play_before,
                 )?;
+                project.animation.as_mut()?.camera.keys = shift.camera_before.keys.clone();
                 HistoryChange::Layers
             }
             HistoryEntry::DeleteLayer {
@@ -594,6 +620,15 @@ impl History {
         let entry = self.redo.last_mut()?;
         seek_layer_edit_frame(project, entry)?;
         let change = match entry {
+            HistoryEntry::Camera { frame, after, .. } => {
+                project.animation.as_mut()?.camera.keys = after.keys.clone();
+                project.seek(*frame);
+                HistoryChange::Layers
+            }
+            HistoryEntry::LayerDepth { layer, after, .. } => {
+                project.layers.get_mut(*layer)?.z = *after;
+                HistoryChange::Layers
+            }
             HistoryEntry::Drawing {
                 layer,
                 frame,
@@ -645,6 +680,7 @@ impl History {
                     shift.frame_after,
                     shift.play_after,
                 )?;
+                project.animation.as_mut()?.camera.keys = shift.camera_after.keys.clone();
                 HistoryChange::Layers
             }
             HistoryEntry::DeleteLayer {
@@ -928,6 +964,7 @@ mod tests {
         let mut history = History::default();
         history.push(edit);
         let layers = vec![crate::project::Layer {
+            z: 0.0,
             drawings: Default::default(),
             name: "L".into(),
             visible: true,
@@ -968,6 +1005,7 @@ mod tests {
             width: 128,
             height: 64,
             layers: vec![crate::project::Layer {
+                z: 0.0,
                 drawings: Default::default(),
                 name: "L".into(),
                 visible: true,

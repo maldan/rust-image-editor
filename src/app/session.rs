@@ -8,6 +8,7 @@ use crate::editing::{
 /// View, tool, selection, and transform state for the document on screen.
 /// Dock panels edit this session instead of the whole editor.
 pub struct DocumentSession {
+    pub(crate) camera_selected: bool,
     pub(crate) canvas_rect: Rect,
     pub(crate) viewport_size: Vec2,
     pub(crate) pan: Vec2,
@@ -53,6 +54,7 @@ pub struct DocumentSession {
 impl Default for DocumentSession {
     fn default() -> Self {
         Self {
+            camera_selected: false,
             canvas_rect: Rect::from_min_size(Vec2::ZERO, Vec2::ZERO),
             viewport_size: Vec2::ZERO,
             pan: Vec2::ZERO,

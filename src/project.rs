@@ -8,6 +8,7 @@ use image::{DynamicImage, ImageFormat, RgbaImage};
 
 #[derive(Debug, Clone)]
 pub struct Layer {
+    pub z: f32,
     /// Held drawings keyed by their first frame. `pixels` is the editable current drawing.
     pub drawings: BTreeMap<u32, SparsePixels>,
     pub name: String,
@@ -27,6 +28,8 @@ pub struct Project {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Animation {
+    #[serde(default)]
+    pub camera: crate::camera::CameraTrack,
     pub fps: u32,
     pub length: u32,
     pub frame: u32,
@@ -36,6 +39,14 @@ pub struct Animation {
     /// Inclusive playback end. `u32::MAX` follows the last frame until the user sets it.
     #[serde(default = "playback_follows_end", skip_serializing_if = "playback_is_open")]
     pub play_end: u32,
+}
+
+fn shift_keys<T>(keys: &mut BTreeMap<u32, T>, at: u32, delta: i32) {
+    let existing = std::mem::take(keys);
+    *keys = existing.into_iter().map(|(key, value)| {
+        let shifted = if key >= at { (i64::from(key) + i64::from(delta)) as u32 } else { key };
+        (shifted, value)
+    }).collect();
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -50,7 +61,7 @@ fn playback_is_open(value: &u32) -> bool {
     *value == u32::MAX
 }
 
-/// One inserted or removed timeline frame, shared by every layer.
+/// Undo snapshot for a duration change on one timeline track.
 #[derive(Clone)]
 pub(crate) struct TimelineShift {
     pub frame_before: u32,
@@ -59,6 +70,8 @@ pub(crate) struct TimelineShift {
     pub length_after: u32,
     pub play_before: (u32, u32),
     pub play_after: (u32, u32),
+    pub camera_before: crate::camera::CameraTrack,
+    pub camera_after: crate::camera::CameraTrack,
     pub before: Vec<BTreeMap<u32, SparsePixels>>,
     pub after: Vec<BTreeMap<u32, SparsePixels>>,
 }
@@ -66,6 +79,7 @@ pub(crate) struct TimelineShift {
 impl Animation {
     pub fn new(fps: u32, length: u32) -> Self {
         Self {
+            camera: Default::default(),
             fps,
             length,
             frame: 0,
@@ -192,14 +206,31 @@ impl Project {
         Some((start, end))
     }
 
-    /// Grow or shrink the active drawing by one frame. Later keys on every layer move with it.
+    /// Grow or shrink the active drawing; only later keys on this layer move.
     pub(crate) fn resize_held_drawing(&mut self, longer: bool) -> Option<TimelineShift> {
+        let span = self.held_span()?;
+        self.resize_held_span(longer, span, Some(self.active_layer))
+    }
+
+    fn camera_held_span(&self) -> Option<(u32, u32)> {
+        let animation = self.animation.as_ref()?;
+        let start = animation.camera.keys.range(..=animation.frame).next_back().map_or(0, |(&f, _)| f);
+        let end = animation.camera.keys.range((start + 1)..).next().map_or(animation.length, |(&f, _)| f);
+        Some((start, end))
+    }
+
+    pub fn camera_held_length(&self) -> u32 {
+        self.camera_held_span().map_or(1, |(start, end)| end.saturating_sub(start).max(1))
+    }
+
+    pub(crate) fn resize_held_camera(&mut self, longer: bool) -> Option<TimelineShift> {
+        let span = self.camera_held_span()?;
+        self.resize_held_span(longer, span, None)
+    }
+
+    fn resize_held_span(&mut self, longer: bool, (_start, end): (u32, u32), layer: Option<usize>) -> Option<TimelineShift> {
         let animation = self.animation.clone()?;
-        if self.layers.get(self.active_layer).is_none() {
-            return None;
-        }
         self.flush_drawings();
-        let (_start, end) = self.held_span()?;
         let duration = end.saturating_sub(_start);
         if longer {
             if animation.length >= 1200 {
@@ -231,8 +262,17 @@ impl Project {
         let play_before = (animation.play_start, animation.play_end);
         let frame_before = animation.frame;
         let length_before = animation.length;
+        let camera_before = self.animation.as_ref()?.camera.clone();
         let before = self.drawing_maps();
-        self.shift_drawing_keys(at, delta);
+        if let Some(index) = layer {
+            shift_keys(&mut self.layers.get_mut(index)?.drawings, at, delta);
+        } else {
+            shift_keys(&mut self.animation.as_mut()?.camera.keys, at, delta);
+        }
+        // Shortening this track must never truncate an untouched track's last key.
+        let last_key = self.layers.iter().flat_map(|l| l.drawings.keys())
+            .chain(self.animation.as_ref()?.camera.keys.keys()).copied().max().unwrap_or(0);
+        let length_after = length_after.max(last_key + 1);
         let animation = self.animation.as_mut()?;
         animation.length = length_after;
         animation.frame = frame_after;
@@ -240,6 +280,8 @@ impl Project {
         let play_after = (animation.play_start, animation.play_end);
         self.load_drawing_pixels();
         Some(TimelineShift {
+            camera_before,
+            camera_after: self.animation.as_ref()?.camera.clone(),
             frame_before,
             frame_after,
             length_before,
@@ -284,25 +326,6 @@ impl Project {
             .collect()
     }
 
-    fn shift_drawing_keys(&mut self, at: u32, delta: i32) {
-        if delta == 0 {
-            return;
-        }
-        for layer in &mut self.layers {
-            let existing = std::mem::take(&mut layer.drawings);
-            let mut shifted = BTreeMap::new();
-            for (key, pixels) in existing {
-                let key = if key >= at {
-                    u32::try_from(i64::from(key) + i64::from(delta)).unwrap_or(key)
-                } else {
-                    key
-                };
-                shifted.insert(key, pixels);
-            }
-            layer.drawings = shifted;
-        }
-    }
-
     fn load_drawing_pixels(&mut self) {
         let Some(frame) = self.animation.as_ref().map(|animation| animation.frame) else {
             return;
@@ -336,6 +359,7 @@ impl Project {
         self.width = width;
         self.height = height;
         self.layers = vec![Layer {
+            z: 0.0,
             drawings: Default::default(),
             name: "Layer 1".into(),
             visible: true,
@@ -352,6 +376,7 @@ impl Project {
         }
         let index = self.layers.len() + 1;
         self.layers.push(Layer {
+            z: 0.0,
             drawings: Default::default(),
             name: format!("Layer {index}"),
             visible: true,
@@ -458,6 +483,7 @@ impl Project {
             self.width = width;
             self.height = height;
             self.layers.push(Layer {
+                z: 0.0,
                 drawings: Default::default(),
                 name: "Layer 1".into(),
                 visible: true,
@@ -564,9 +590,14 @@ impl Project {
     }
 
     pub fn export_image(&self, path: &Path, format: ImageFormat) -> Result<(), String> {
-        let (pixels, width, height) = self
+        let (mut pixels, width, height) = self
             .decoded_rgba()?
             .ok_or_else(|| "Document is empty".to_string())?;
+        if let Some(animation) = &self.animation {
+            if animation.camera.visible {
+                pixels = crate::camera::render_frame(self, animation.camera.sample(animation.frame));
+            }
+        }
         let image = RgbaImage::from_raw(width, height, pixels).ok_or("Invalid document raster")?;
         DynamicImage::ImageRgba8(image)
             .save_with_format(path, format)

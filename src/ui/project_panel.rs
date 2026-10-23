@@ -6,7 +6,7 @@ use crate::host::FrameInput;
 struct LayerCommand {
     select: Option<usize>,
     visibility: Option<(usize, bool)>,
-    copy: Option<usize>,
+    duplicate: Option<usize>,
     rename: Option<usize>,
     delete: Option<usize>,
     reorder: Option<(usize, usize)>,
@@ -23,7 +23,13 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         .collect();
     let active = app.project().active_layer;
     let command = controls(ui, &rows, active, &app.input, &mut app.layer_drag);
+    if let Some(layer) = app.project().layers.get(active) {
+        let mut z = layer.z;
+        ui.label("Z · positive = farther away");
+        if ui.drag_float("layer_z", &mut z, 0.05).changed() { app.set_layer_depth(z); }
+    }
     if let Some(index) = command.select {
+        app.session.camera_selected = false;
         app.project_mut().active_layer = index;
     }
     if let Some((index, visible)) = command.visibility {
@@ -31,8 +37,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     }
     if let Some(index) = command.rename {
         app.open_layer_rename(index);
-    } else if let Some(index) = command.copy {
-        app.copy_layer_at(index, ui);
+    } else if let Some(index) = command.duplicate {
+        app.duplicate_layer(index);
         app.layer_drag = None;
     } else if let Some(index) = command.delete {
         app.delete_layer(index);
@@ -58,7 +64,7 @@ fn controls(
     let mut command = LayerCommand {
         select: None,
         visibility: None,
-        copy: None,
+        duplicate: None,
         rename: None,
         delete: None,
         reorder: None,
@@ -100,7 +106,7 @@ fn controls(
                         command.rename = Some(index);
                     }
                     if ui.icon_button(&format!("layer_copy_{index}"), "copy", false) {
-                        command.copy = Some(index);
+                        command.duplicate = Some(index);
                     }
                 });
             });
@@ -146,6 +152,7 @@ fn controls(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raster::Raster;
     use glam::Vec2;
 
     #[test]
@@ -270,5 +277,72 @@ mod tests {
         assert_eq!(app.project().active_layer, 0);
         app.redo();
         assert_eq!(app.project().layers.len(), 1);
+    }
+
+    #[test]
+    fn copy_icon_duplicates_its_row() {
+        let mut app = EditorApp::default();
+        app.project_mut()
+            .import_rgba(&[1, 2, 3, 255], 1, 1)
+            .unwrap();
+        app.project_mut().add_layer();
+        app.project_mut().layers[1]
+            .pixels
+            .write(0, 0, 0, [9, 8, 7, 255]);
+        app.project_mut().active_layer = 0;
+        app.refresh_image().unwrap();
+        let mut ui = Ui::new();
+        ui.load_builtin_icons();
+        let mut output = mega_ui::UiOutput::default();
+        for _ in 0..3 {
+            ui.begin_frame(mega_ui::UiInput {
+                viewport: Vec2::new(400.0, 900.0),
+                ..Default::default()
+            });
+            ui.horizontal(|ui| ui.flex_width(360.0, |ui| draw(ui, &mut app)));
+            output = ui.end_frame();
+        }
+        let mut icons: Vec<_> = output
+            .draw_list
+            .iter()
+            .filter(|c| {
+                c.rect.min.x > 180.0
+                    && c.rect.max.y < 200.0
+                    && (c.rect.width() - 16.0).abs() < 0.1
+                    && (c.rect.height() - 16.0).abs() < 0.1
+            })
+            .collect();
+        icons.sort_by(|a, b| a.rect.min.x.total_cmp(&b.rect.min.x));
+        // Trailing widgets pack right-to-left: copy, pencil, delete.
+        let position = (icons[0].rect.min + icons[0].rect.max) * 0.5;
+        for pressed in [true, false] {
+            app.input.mouse_pos = position;
+            app.input.mouse_pressed = pressed;
+            app.input.mouse_down = pressed;
+            app.input.mouse_released = !pressed;
+            ui.begin_frame(mega_ui::UiInput {
+                viewport: Vec2::new(400.0, 900.0),
+                mouse_pos: position,
+                mouse_pressed: pressed,
+                mouse_down: pressed,
+                mouse_released: !pressed,
+                ..Default::default()
+            });
+            ui.horizontal(|ui| ui.flex_width(360.0, |ui| draw(ui, &mut app)));
+            ui.end_frame();
+        }
+        assert_eq!(app.project().layers.len(), 3);
+        assert_eq!(app.project().layers[2].name, "Layer 2 copy");
+        assert_eq!(
+            app.project().layers[2].pixels.read(0, 0, 0),
+            [9, 8, 7, 255]
+        );
+        assert_eq!(
+            app.project().layers[1].pixels.read(0, 0, 0),
+            [9, 8, 7, 255]
+        );
+        assert_eq!(app.project().active_layer, 2);
+        app.undo();
+        assert_eq!(app.project().layers.len(), 2);
     }
 }

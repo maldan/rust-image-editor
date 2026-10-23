@@ -1468,6 +1468,23 @@ fn animation_result_samples_frames_onto_a_new_layer() {
     assert_eq!(repeated.drawings[&1].read(0, 1, 0), [8, 0, 0, 255]);
     assert_eq!(repeated.drawings[&2].read(0, 1, 0), [8, 0, 0, 255]);
     assert_eq!(repeated.drawings[&3].read(0, 1, 0), [9, 0, 0, 255]);
+
+    app.ai.anim_apply = (9, 19);
+    let frames: Vec<_> = (1..=30u8).map(color).collect();
+    app.seek_animation(0);
+    app.place_animation_frames(&frames);
+    let squeezed = app.project().layers.last().unwrap();
+    assert_eq!(squeezed.drawings[&0].memory_bytes(), 0);
+    assert!(!squeezed.drawings.contains_key(&8));
+    assert_eq!(squeezed.drawings[&9].read(0, 1, 0), [1, 0, 0, 255]);
+    assert_eq!(squeezed.drawings[&19].read(0, 1, 0), [30, 0, 0, 255]);
+    assert_eq!(squeezed.drawings[&20].memory_bytes(), 0);
+    assert_eq!(app.project().animation.as_ref().unwrap().frame, 9);
+    app.seek_animation(0);
+    let squeezed = app.project().layers.last().unwrap();
+    assert_eq!(squeezed.drawings[&0].memory_bytes(), 0);
+    assert_eq!(squeezed.pixels.memory_bytes(), 0);
+    assert_eq!(squeezed.drawings[&9].read(0, 1, 0), [1, 0, 0, 255]);
 }
 
 #[test]

@@ -37,7 +37,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     }
     app.update_view();
 
-    if app.animation_playing() { return; }
+    if app.animation_playing() || app.camera_visible() { return; }
 
     if let Some(view) = app.canvas_view() {
         if area.hovered || area.active || app.brush_last_active() {

@@ -176,6 +176,8 @@ fn default_opacity() -> f32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct LayerMeta {
+    #[serde(default)]
+    z: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     timeline: Option<String>,
     name: String,
@@ -991,6 +993,7 @@ impl Workspace {
                     None
                 };
                 layers.push(LayerMeta {
+                    z: layer.z,
                     timeline,
                     name: layer.name.clone(),
                     visible: layer.visible,
@@ -1277,6 +1280,7 @@ impl Workspace {
             let height = meta.height;
             for layer_meta in &meta.layers {
                 layers.push(Layer {
+                    z: layer_meta.z,
                     drawings: Default::default(),
                     name: layer_meta.name.clone(),
                     visible: layer_meta.visible,
@@ -1423,12 +1427,16 @@ impl Workspace {
 fn check_manifest(manifest: &WorkspaceManifest) -> Result<(), String> {
     if manifest.format == "mega-image-editor" && matches!(manifest.version, 5 | 6 | 7 | 8) {
         for doc in &manifest.documents {
+            if doc.layers.iter().any(|l| !l.z.is_finite() || !(-10.0..=10.0).contains(&l.z)) {
+                return Err("Invalid layer depth".into());
+            }
             if (doc.kind == DocumentKind::Animation) != doc.animation.is_some() {
                 return Err("Document type does not match its contents".into());
             }
             if let Some(animation) = &doc.animation {
                 let (play_start, play_end) = animation.playback_range();
                 if !(1..=120).contains(&animation.fps)
+                    || animation.camera.keys.iter().any(|(&f, k)| f >= animation.length || !k.valid())
                     || animation.length == 0
                     || animation.frame >= animation.length
                     || play_start > play_end
@@ -1479,6 +1487,34 @@ pub fn make_thumb(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::raster::Raster;
+
+    #[test]
+    fn camera_and_depth_survive_deferred_save_as_and_old_files_default_to_neutral() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("camera.mgimg");
+        let copy = temp.path().join("copy.mgimg");
+        let mut workspace = Workspace::default();
+        let project = workspace.active_mut();
+        project.resize_canvas(8, 8).unwrap();
+        project.layers[0].z = 2.5;
+        let mut animation = crate::project::Animation::new(12, 24);
+        animation.camera.visible = true;
+        animation.camera.keys.insert(10, crate::camera::CameraKey { pan: [5.0, -3.0], zoom: 2.0, fade: 0.5, ..Default::default() });
+        let expected = animation.camera.clone();
+        project.animation = Some(animation);
+        workspace.save(&path).unwrap();
+        let mut deferred = Workspace::open(&path).unwrap();
+        deferred.save(&copy).unwrap();
+        let mut loaded = Workspace::open(&copy).unwrap();
+        loaded.ensure_document_loaded(0).unwrap();
+        assert_eq!(loaded.active().layers[0].z, 2.5);
+        assert_eq!(loaded.active().animation.as_ref().unwrap().camera, expected);
+        let old: crate::project::Animation = serde_json::from_str(r#"{"fps":12,"length":24,"frame":0}"#).unwrap();
+        assert!(!old.camera.visible);
+        assert_eq!(old.camera.sample(0), crate::camera::CameraKey::default());
+        let old_layer: LayerMeta = serde_json::from_str(r#"{"name":"old","visible":true,"path":"/layer"}"#).unwrap();
+        assert_eq!(old_layer.z, 0.0);
+    }
 
     #[test]
     fn animation_survives_save_deferred_save_as_reorder_and_optimization() {

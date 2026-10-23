@@ -271,7 +271,7 @@ impl Scene for EditorApp {
             ));
         }
         let mut overlay = CanvasOverlay {
-            dim_outside: self.session.dim_outside_selection && self.session.selection.is_some(),
+            dim_outside: !self.camera_visible() && self.session.dim_outside_selection && self.session.selection.is_some(),
             layers: self
                 .workspace
                 .active()
@@ -284,6 +284,11 @@ impl Scene for EditorApp {
                 .collect(),
             ..Default::default()
         };
+        if self.camera_visible() {
+            let animation = self.project().animation.as_ref().unwrap();
+            overlay.camera = Some((animation.camera.sample(animation.frame), self.project().layers.iter().map(|l| l.z).collect()));
+            return Some((self.session.canvas_rect, view, overlay));
+        }
         overlay.deformation = self.deformation.as_ref().map(|d| d.layer);
         if self.hsv.open
             && self.hsv.preview

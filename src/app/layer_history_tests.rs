@@ -129,6 +129,63 @@ fn deletion_restores_each_layers_order_metadata_pixels_and_active_layer() {
     }
 }
 
+#[test]
+fn duplicate_layer_copies_pixels_and_metadata_and_undoes() {
+    let mut app = app_with_layers(2);
+    let source = app.project().layers[0].clone();
+    let active_before = app.project().active_layer;
+    app.duplicate_layer(0);
+    assert_eq!(app.project().layers.len(), 3);
+    assert_eq!(app.project().active_layer, 2);
+    let copy = &app.project().layers[2];
+    assert_eq!(copy.name, "Layer 0 copy");
+    assert_eq!(copy.visible, source.visible);
+    assert_eq!(copy.opacity, source.opacity);
+    assert_eq!(copy.pixels, source.pixels);
+    assert_eq!(app.project().layers[0].pixels, source.pixels);
+    assert_eq!(app.project().layers[1].name, "Layer 1");
+    app.undo();
+    assert_eq!(app.project().layers.len(), 2);
+    assert_eq!(app.project().active_layer, active_before);
+    assert_eq!(app.project().layers[0].pixels, source.pixels);
+    app.redo();
+    assert_eq!(app.project().layers.len(), 3);
+    assert_eq!(app.project().layers[2].pixels, source.pixels);
+    assert_eq!(app.project().layers[2].name, "Layer 0 copy");
+}
+
+#[test]
+fn duplicate_layer_copies_animation_drawings() {
+    let mut app = EditorApp::default();
+    app.new_animation();
+    app.project_mut().resize_canvas(2, 2).unwrap();
+    app.project_mut().layers[0]
+        .pixels
+        .write(0, 0, 0, [1, 0, 0, 255]);
+    app.seek_animation(4);
+    app.animation_drawing(true);
+    app.project_mut().layers[0]
+        .pixels
+        .write(0, 1, 0, [0, 2, 0, 255]);
+    app.duplicate_layer(0);
+    assert_eq!(app.project().layers.len(), 2);
+    let copy = &app.project().layers[1];
+    assert_eq!(copy.drawings[&0].read(0, 0, 0), [1, 0, 0, 255]);
+    assert_eq!(copy.drawings[&4].read(0, 1, 0), [0, 2, 0, 255]);
+    assert_eq!(copy.pixels.read(0, 1, 0), [0, 2, 0, 255]);
+    assert_eq!(
+        app.project().layers[0].pixels.read(0, 1, 0),
+        [0, 2, 0, 255]
+    );
+    app.undo();
+    assert_eq!(app.project().layers.len(), 1);
+    app.redo();
+    assert_eq!(
+        app.project().layers[1].drawings[&4].read(0, 1, 0),
+        [0, 2, 0, 255]
+    );
+}
+
 fn paint_pixel(app: &mut EditorApp, layer: usize, value: u8) {
     let p = app.project_mut();
     let mut capture = EditCapture::new(layer, p.width, p.height);

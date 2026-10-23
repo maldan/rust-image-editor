@@ -81,6 +81,7 @@ impl EditorApp {
     }
 
     pub fn cut_selection(&mut self, ui: &mut Ui) {
+        if self.camera_visible() { return; }
         if self.session.floating.is_some() {
             self.status = "Apply or cancel the transform before cutting".into();
             return;
@@ -109,6 +110,7 @@ impl EditorApp {
     }
 
     pub fn delete_selection(&mut self) {
+        if self.camera_visible() { return; }
         if self.session.floating.is_some() {
             self.status = "Apply or cancel the transform before deleting".into();
             return;
@@ -206,6 +208,7 @@ impl EditorApp {
             return Err("Selection has no pixels".into());
         }
         Ok(crate::project::Layer {
+            z: source.z,
             drawings: Default::default(),
             name: "Selection".into(),
             visible: true,

@@ -69,12 +69,6 @@ impl DeformMesh {
         let radius = radius.max(1.0);
         let mut vertices = Vec::new();
         for (i, &position) in self.positions.iter().enumerate() {
-            let x = i % (self.cols + 1);
-            let y = i / (self.cols + 1);
-            // Move can grab the perimeter too; smoothing needs four interior neighbours.
-            if mode != 0 && (x == 0 || x == self.cols || y == 0 || y == self.rows) {
-                continue;
-            }
             let distance = position.distance(center) / radius;
             if distance >= 1.0 {
                 continue;
@@ -89,11 +83,23 @@ impl DeformMesh {
             vertices
                 .iter()
                 .map(|&(i, _, _)| {
-                    (self.positions[i - 1]
-                        + self.positions[i + 1]
-                        + self.positions[i - stride]
-                        + self.positions[i + stride])
-                        * 0.25
+                    let x = i % stride;
+                    let y = i / stride;
+                    let mut sum = Vec2::ZERO;
+                    let mut count = 0.0;
+                    for neighbour in [
+                        (x > 0).then(|| i - 1),
+                        (x < self.cols).then(|| i + 1),
+                        (y > 0).then(|| i - stride),
+                        (y < self.rows).then(|| i + stride),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        sum += self.positions[neighbour];
+                        count += 1.0;
+                    }
+                    sum / count
                 })
                 .collect()
         } else {
@@ -118,8 +124,8 @@ impl DeformMesh {
             let influence = weight * grab.strength;
             let offset = start - grab.center;
             next[i] = match grab.mode {
-                1 => grab.center + offset * ((amount + 0.08) * influence).exp(),
-                2 => grab.center + offset * (-(amount + 0.08) * influence).exp(),
+                1 => grab.center + offset * (1.0 + (amount + 0.08) * influence),
+                2 => grab.center + offset / (1.0 + (amount + 0.08) * influence),
                 3 => start.lerp(
                     grab.smooth_targets[vertex],
                     ((amount + 0.08) * influence).clamp(0.0, 1.0),
@@ -136,16 +142,12 @@ impl DeformMesh {
                 _ => start + delta * influence,
             };
         }
-        if grab.mode == 0 {
-            // Move is a direct grab: folds, crossings and off-canvas positions are allowed.
-            if next == self.positions {
-                return false;
-            }
-            self.positions = next;
-            true
-        } else {
-            self.accept_positions(next)
+        // All modes operate directly on the captured mesh, including folds and edges.
+        if next == self.positions {
+            return false;
         }
+        self.positions = next;
+        true
     }
 
     #[cfg(test)]
@@ -160,30 +162,6 @@ impl DeformMesh {
     ) -> bool {
         let grab = self.grab(center, radius, strength, softness, mode);
         self.drag(&grab, center + delta)
-    }
-
-    fn accept_positions(&mut self, mut next: Vec<Vec2>) -> bool {
-        // Back off the update until every triangle retains its orientation and area.
-        for _ in 0..12 {
-            let valid = self.triangles().all(|[a, b, c]| {
-                cross(next[b] - next[a], next[c] - next[a])
-                    > cross(
-                        self.original[b] - self.original[a],
-                        self.original[c] - self.original[a],
-                    ) * 0.02
-            });
-            if valid {
-                if next == self.positions {
-                    return false;
-                }
-                self.positions = next;
-                return true;
-            }
-            for (p, old) in next.iter_mut().zip(&self.positions) {
-                *p = (*p + *old) * 0.5;
-            }
-        }
-        false
     }
 
     pub fn render(
@@ -313,7 +291,7 @@ mod tests {
         assert!(dirty.is_none());
     }
     #[test]
-    fn modes_falloff_and_fold_protection() {
+    fn move_inflate_and_pinch_follow_their_expected_directions() {
         for mode in 0..3 {
             let mut mesh = DeformMesh::new(100, 100, 10);
             let center = Vec2::splat(50.0);
@@ -322,15 +300,6 @@ mod tests {
             let dx = mesh.positions[i].x - mesh.original[i].x;
             assert!(if mode == 2 { dx < 0.0 } else { dx > 0.0 });
             assert_eq!(mesh.positions[0], Vec2::ZERO);
-            for _ in 0..50 {
-                mesh.dab(center, Vec2::splat(500.0), 70.0, 1.0, 0.0, mode);
-            }
-            if mode != 0 {
-                assert!(mesh.triangles().all(|[a, b, c]| cross(
-                    mesh.positions[b] - mesh.positions[a],
-                    mesh.positions[c] - mesh.positions[a]
-                ) > 0.0));
-            }
         }
     }
     #[test]
@@ -471,5 +440,90 @@ mod tests {
         mesh.positions.fill(Vec2::splat(16.0));
         let out = mesh.render(&source, None).0;
         assert!(out.to_rgba(32, 32).iter().all(|&v| v == 0));
+    }
+    #[test]
+    fn unrestricted_modes_work_even_when_an_unrelated_part_of_mesh_is_folded() {
+        for mode in 1..5 {
+            let mut mesh = DeformMesh::new(200, 200, 20);
+            let grab = mesh.grab(Vec2::splat(50.0), 30.0, 1.0, 0.0, 0);
+            mesh.drag(&grab, Vec2::new(130.0, 50.0));
+            assert!(mesh.triangles().any(|[a, b, c]| cross(
+                mesh.positions[b] - mesh.positions[a],
+                mesh.positions[c] - mesh.positions[a]
+            ) < 0.0));
+            let center = Vec2::splat(150.0);
+            let probe = 15 * 21 + 16;
+            if mode == 3 {
+                mesh.positions[probe] += Vec2::new(4.0, 0.0);
+            }
+            let before = mesh.positions.clone();
+            let grab = mesh.grab(center, 40.0, 1.0, 0.0, mode);
+            assert!(
+                mesh.drag(&grab, center + Vec2::new(100.0, 0.0)),
+                "mode {mode} blocked by an unrelated fold"
+            );
+            assert_ne!(
+                mesh.positions[probe], before[probe],
+                "mode {mode} did not affect its captured vertex"
+            );
+            for i in 0..before.len() {
+                if !grab.vertices.iter().any(|v| v.0 == i) {
+                    assert_eq!(mesh.positions[i], before[i]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unrestricted_rotation_continues_through_multiple_turns_in_both_directions() {
+        let mut mesh = DeformMesh::new(200, 200, 20);
+        let center = Vec2::splat(100.0);
+        let radius = 40.0;
+        let grab = mesh.grab(center, radius, 1.0, 0.0, 4);
+        let probe = 10 * 21 + 11;
+        for turns in [0.25, 0.5, 1.25, 3.75, -2.25] {
+            let angle = turns * std::f32::consts::TAU;
+            mesh.drag(&grab, center + Vec2::new(angle * radius, 0.0));
+            let expected = center + Vec2::new(angle.cos(), angle.sin()) * 10.0;
+            assert!(
+                mesh.positions[probe].distance(expected) < 0.001,
+                "rotation stopped at {turns} turns"
+            );
+        }
+    }
+
+    #[test]
+    fn unrestricted_modes_capture_boundary_vertices_without_neighbour_index_errors() {
+        for mode in 1..5 {
+            let mut mesh = DeformMesh::new(100, 100, 10);
+            mesh.positions[0] += Vec2::new(2.0, 0.0);
+            let grab = mesh.grab(Vec2::splat(5.0), 30.0, 1.0, 0.0, mode);
+            assert!(
+                grab.vertices.iter().any(|v| v.0 == 0),
+                "mode {mode} cannot capture the corner"
+            );
+            let before = mesh.positions[0];
+            mesh.drag(&grab, Vec2::new(35.0, 5.0));
+            assert_ne!(mesh.positions[0], before);
+            assert!(mesh.positions.iter().all(|p| p.is_finite()));
+        }
+    }
+
+    #[test]
+    fn radial_modes_remain_finite_and_respond_to_long_drags() {
+        for mode in [1, 2] {
+            let mut mesh = DeformMesh::new(200, 200, 20);
+            let center = Vec2::splat(100.0);
+            let grab = mesh.grab(center, 40.0, 1.0, 0.0, mode);
+            let i = 10 * 21 + 11;
+            mesh.drag(&grab, center + Vec2::new(100_000.0, 0.0));
+            assert!(mesh.positions.iter().all(|p| p.is_finite()));
+            let distance = mesh.positions[i].distance(center);
+            assert!(if mode == 1 {
+                distance > 20_000.0
+            } else {
+                distance < 0.01
+            });
+        }
     }
 }

@@ -117,6 +117,11 @@ impl CanvasRenderer {
             saturation: 0.0,
             value: 0.0,
             _hsv_pad: 0.0,
+            camera_center: view.center.into(),
+            camera_zoom: view.zoom,
+            camera_fade: overlay.camera.as_ref().map_or(0.0, |(k, _)| k.fade),
+            camera_enabled: if overlay.camera.is_some() { 1.0 } else { 0.0 },
+            _camera_pad: 0.0,
         };
         queue.write_buffer(&self.view_uniform_buf, 0, bytemuck::bytes_of(&view_u));
 
@@ -256,6 +261,13 @@ impl CanvasRenderer {
                 continue;
             }
             let mut u = view_u;
+            if let Some((key, depths)) = &overlay.camera {
+                let (offset, scale) = key.layer_transform(depths.get(i).copied().unwrap_or(0.0));
+                let (sin, cos) = view.rotation.sin_cos();
+                let offset = offset * view.zoom;
+                u.center = (view.center + Vec2::new(offset.x * cos - offset.y * sin, offset.x * sin + offset.y * cos)).into();
+                u.zoom *= scale;
+            }
             u.opacity = layer.opacity.clamp(0.0, 1.0);
             if let Some((index, adjustment)) = overlay.hsv {
                 if index == i {

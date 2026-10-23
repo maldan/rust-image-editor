@@ -2,6 +2,7 @@ use super::*;
 
 impl EditorApp {
     pub fn invert_layer(&mut self) {
+        if self.camera_visible() { return; }
         if self.ai.open || self.hsv.open || self.project().layers.is_empty() {
             return;
         }
@@ -26,6 +27,7 @@ impl EditorApp {
     }
 
     pub fn fix_alpha(&mut self) {
+        if self.camera_visible() { return; }
         self.commit_transform();
         let layer = self.project().active_layer;
         let Some(pixels) = self
@@ -59,6 +61,7 @@ impl EditorApp {
             return;
         }
         self.workspace.active_mut().add_layer();
+        self.session.camera_selected = false;
         self.history.clear_redo();
         self.dirty = true;
         self.status = "Layer added".into();
@@ -78,6 +81,22 @@ impl EditorApp {
         self.layer_drag = None;
         self.sync_layer_structure();
         self.status = "Layer merged down".into();
+    }
+
+    pub fn duplicate_layer(&mut self, index: usize) {
+        self.commit_transform();
+        let project = self.workspace.active_mut();
+        if project.animation.is_some() {
+            project.flush_drawings();
+        }
+        let Some(mut layer) = project.layers.get(index).cloned() else {
+            return;
+        };
+        layer.name = format!("{} copy", layer.name);
+        let canvas = (project.width, project.height);
+        self.history.insert_layer(project, layer, canvas);
+        self.sync_layer_structure();
+        self.status = "Layer duplicated".into();
     }
 
     pub fn delete_layer(&mut self, index: usize) {

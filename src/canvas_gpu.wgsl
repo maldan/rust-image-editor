@@ -59,6 +59,11 @@ struct ViewUniforms {
     saturation: f32,
     value: f32,
     _hsv_pad: f32,
+    camera_center: vec2<f32>,
+    camera_zoom: f32,
+    camera_fade: f32,
+    camera_enabled: f32,
+    _camera_pad: f32,
 }
 
 @group(0) @binding(0) var<uniform> vu: ViewUniforms;
@@ -92,15 +97,20 @@ fn vs_image(@builtin(vertex_index) idx: u32) -> VsOut {
 
 @fragment
 fn fs_checker(in: VsOut) -> @location(0) vec4<f32> {
+    if vu.camera_enabled > 0.5 { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
     return vec4<f32>(checker(in.screen), 1.0);
 }
 
 @fragment
 fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
+    if vu.camera_enabled > 0.5 {
+        let uv = screen_to_uv(in.screen, vu.camera_center, vu.image_size, vu.camera_zoom, vu.rotation);
+        if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) { discard; }
+    }
     let tex = textureSampleLevel(img, samp_near, in.uv, 0.0);
     let a = tex.a * vu.opacity;
-    if (vu.hue == 0.0 && vu.saturation == 0.0 && vu.value == 0.0) { return vec4<f32>(tex.rgb,a); }
-    return vec4<f32>(adjust_hsv(tex.rgb),a);
+    if (vu.hue == 0.0 && vu.saturation == 0.0 && vu.value == 0.0) { return vec4<f32>(tex.rgb * (1.0-vu.camera_fade),a); }
+    return vec4<f32>(adjust_hsv(tex.rgb) * (1.0-vu.camera_fade),a);
 }
 
 fn hsv_srgb(linear:vec3<f32>) -> vec3<f32> {

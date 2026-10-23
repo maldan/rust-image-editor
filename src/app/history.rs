@@ -66,6 +66,7 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn reload_active_view(&mut self) -> Result<(), String> {
+        self.session.camera_selected = false;
         self.workspace
             .ensure_document_loaded(self.workspace.active_document)?;
         self.close_asset_preview();

@@ -8,6 +8,8 @@ const MAX_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 struct Payload {
+    #[serde(default)]
+    z: f32,
     version: u32,
     canvas_width: u32,
     canvas_height: u32,
@@ -40,6 +42,7 @@ fn encode_kind(layer: &Layer, canvas_size: (u32, u32), fragment: bool) -> Result
         return Err("Layer is too large for the clipboard".into());
     }
     let payload = Payload {
+        z: layer.z,
         version: 1,
         canvas_width: canvas_size.0,
         canvas_height: canvas_size.1,
@@ -68,7 +71,7 @@ pub fn decode(text: &str) -> Result<Option<CopiedLayer>, String> {
         return Err("Unsupported clipboard layer version".into());
     }
     crate::comfyui::scaled_size(payload.canvas_width, payload.canvas_height, 1.0)?;
-    if !payload.opacity.is_finite() || !(0.0..=1.0).contains(&payload.opacity) {
+    if !payload.z.is_finite() || !(-10.0..=10.0).contains(&payload.z) || !payload.opacity.is_finite() || !(0.0..=1.0).contains(&payload.opacity) {
         return Err("Invalid clipboard layer opacity".into());
     }
     let bytes = STANDARD
@@ -90,6 +93,7 @@ pub fn decode(text: &str) -> Result<Option<CopiedLayer>, String> {
     }
     Ok(Some(CopiedLayer {
         layer: Layer {
+            z: payload.z,
             drawings: Default::default(),
             name: payload.name,
             visible: payload.visible,
@@ -129,6 +133,7 @@ mod tests {
         pixels.write(0, -100, -30, [1, 2, 3, 4]);
         pixels.write(0, 20000, 20000, [5, 6, 7, 255]);
         let layer = Layer {
+            z: 0.0,
             drawings: Default::default(),
             name: "Слой 🎨".into(),
             visible: false,
@@ -154,6 +159,7 @@ mod tests {
         assert!(decode("ordinary copied text").unwrap().is_none());
         assert!(decode(&format!("{PREFIX}broken")).is_err());
         let layer = Layer {
+            z: 0.0,
             drawings: Default::default(),
             name: "empty".into(),
             visible: true,
