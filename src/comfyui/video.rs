@@ -27,6 +27,37 @@ impl Default for VideoSettings {
     }
 }
 
+pub const LTX_FPS: i32 = 25;
+pub const MAX_DURATION_SCALE: i32 = 8;
+
+/// Seconds sent to LTX. The frame count is rounded up to a whole second, then multiplied by `scale`.
+pub fn generated_seconds(frame_count: u32, scale: i32) -> Result<i32, String> {
+    if frame_count == 0 {
+        return Err("Choose a frame range".into());
+    }
+    if !(1..=MAX_DURATION_SCALE).contains(&scale) {
+        return Err(format!(
+            "Duration scale must be between 1 and {MAX_DURATION_SCALE}"
+        ));
+    }
+    let seconds = ((frame_count as i32 + LTX_FPS - 1) / LTX_FPS) * scale;
+    if !(1..=120).contains(&seconds) {
+        return Err("Generated duration must be between 1 and 120 seconds".into());
+    }
+    Ok(seconds)
+}
+
+/// Map a timeline slot onto a decoded frame. The first and last frames stay put;
+/// extra frames are skipped and a short clip repeats frames to fill the range.
+pub fn frame_sample(slot: u32, slots: u32, sources: usize) -> usize {
+    if sources <= 1 || slots <= 1 || slot == 0 {
+        return 0;
+    }
+    let slot = slot.min(slots - 1) as u64;
+    let last = sources as u64 - 1;
+    (slot * last / (slots as u64 - 1)) as usize
+}
+
 impl VideoSettings {
     pub fn validate(&self) -> Result<(), String> {
         if self.width < 64 || self.height < 64 || self.width % 64 != 0 || self.height % 64 != 0 {
@@ -235,6 +266,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn animation_duration_rounds_up_and_scale_stretches_it() {
+        assert_eq!(generated_seconds(25, 1).unwrap(), 1);
+        assert_eq!(generated_seconds(25, 3).unwrap(), 3);
+        assert_eq!(generated_seconds(1, 1).unwrap(), 1);
+        assert_eq!(generated_seconds(26, 1).unwrap(), 2);
+        assert_eq!(generated_seconds(50, 2).unwrap(), 4);
+        assert!(generated_seconds(0, 1).is_err());
+        assert!(generated_seconds(25, 0).is_err());
+        assert!(generated_seconds(25, MAX_DURATION_SCALE + 1).is_err());
+        assert_eq!(generated_seconds(25 * 120, 1).unwrap(), 120);
+        assert!(generated_seconds(25 * 120 + 1, 1).is_err());
+    }
+
+    #[test]
+    fn frame_sampling_drops_extras_and_repeats_short_clips() {
+        assert_eq!(
+            (0..25u32)
+                .map(|slot| frame_sample(slot, 25, 25))
+                .collect::<Vec<_>>(),
+            (0..25usize).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            (0..25u32)
+                .map(|slot| frame_sample(slot, 25, 76))
+                .collect::<Vec<_>>(),
+            (0..25u32).map(|slot| (slot * 75 / 24) as usize).collect::<Vec<_>>()
+        );
+        assert_eq!(frame_sample(0, 2, 4), 0);
+        assert_eq!(frame_sample(1, 2, 4), 3);
+        assert_eq!(
+            (0..4)
+                .map(|slot| frame_sample(slot, 4, 2))
+                .collect::<Vec<_>>(),
+            vec![0, 0, 0, 1]
+        );
     }
 
     #[test]

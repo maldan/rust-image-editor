@@ -106,6 +106,60 @@ pub fn merge_layers(
     }
 }
 
+/// Composite both tracks. A key is kept only where the merged image changes.
+pub fn merge_layer_tracks(
+    lower: &crate::project::Layer,
+    upper: &crate::project::Layer,
+    frame: u32,
+) -> crate::project::Layer {
+    let mut keys = std::collections::BTreeSet::new();
+    keys.insert(0);
+    keys.extend(lower.drawings.keys().copied());
+    keys.extend(upper.drawings.keys().copied());
+    let mut drawings = std::collections::BTreeMap::new();
+    let mut previous = None;
+    for key in keys {
+        let merged = merge_layers(
+            &track_frame(lower, key),
+            &track_frame(upper, key),
+        )
+        .pixels;
+        if previous.as_ref() == Some(&merged) {
+            continue;
+        }
+        previous = Some(merged.clone());
+        drawings.insert(key, merged);
+    }
+    let pixels = drawings
+        .range(..=frame)
+        .next_back()
+        .map(|(_, pixels)| pixels.clone())
+        .unwrap_or_default();
+    crate::project::Layer {
+        drawings,
+        name: lower.name.clone(),
+        visible: lower.visible || upper.visible,
+        opacity: 1.0,
+        pixels,
+    }
+}
+
+fn track_frame(layer: &crate::project::Layer, frame: u32) -> crate::project::Layer {
+    let pixels = layer
+        .drawings
+        .range(..=frame)
+        .next_back()
+        .map(|(_, pixels)| pixels.clone())
+        .unwrap_or_default();
+    crate::project::Layer {
+        drawings: Default::default(),
+        name: layer.name.clone(),
+        visible: layer.visible,
+        opacity: layer.opacity,
+        pixels,
+    }
+}
+
 #[cfg(test)]
 mod merge_tests {
     use super::*;

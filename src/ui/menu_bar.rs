@@ -41,7 +41,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         ui.separator();
         ui.menu("layer", "Layer", |ui| {
             let index = app.project().active_layer;
-            let can_merge = app.project().animation.is_none() && index > 0 && index < app.project().layers.len();
+            let can_merge = index > 0 && index < app.project().layers.len();
             if ui
                 .menu_item_enabled("merge_down", "Merge Down", can_merge)
                 .clicked()
@@ -98,6 +98,16 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         ui.menu("video", "Video", |ui| {
             if ui.menu_item("ltx_i2v", "Ltx 2.3 I2V...").clicked() {
                 app.open_ai_video();
+            }
+        });
+        ui.menu("animation", "Animation", |ui| {
+            let enabled =
+                app.project().animation.is_some() && app.session.preview_asset.is_none();
+            if ui
+                .menu_item_enabled("ltx_animation", "Ltx 2.3...", enabled)
+                .clicked()
+            {
+                app.open_ai_animation();
             }
         });
         ui.menu("anime", "Anime", |ui| {

@@ -57,6 +57,7 @@ impl Scene for EditorApp {
         let copy = self.input.key_copy;
         let cut = self.input.key_cut;
         ui::draw(ui, self, viewport);
+        self.tick_animation_preview();
         if cut {
             self.cut_selection(ui);
         } else if copy {
@@ -103,7 +104,13 @@ impl Scene for EditorApp {
             self.workspace.mark_thumb_atlas_uploaded();
         }
         if self.ai.preview_dirty {
-            if let Some(preview) = self.ai.result.as_ref().or(self.ai.preview.as_ref()) {
+            let anim_frame = self
+                .ai
+                .anim_frames
+                .as_ref()
+                .and_then(|frames| frames.get(self.ai.anim_shown));
+            if let Some(preview) = anim_frame.or(self.ai.result.as_ref()).or(self.ai.preview.as_ref())
+            {
                 let limit = device.limits().max_texture_dimension_2d;
                 let resized;
                 let preview = if preview.width() > limit || preview.height() > limit {

@@ -1164,6 +1164,54 @@ fn fit_uses_unscaled_input_bounds_and_can_be_disabled() {
 }
 
 #[test]
+fn accept_without_new_layer_composites_onto_the_active_layer_and_undoes() {
+    use crate::raster::Raster;
+    let mut app = EditorApp::default();
+    app.project_mut()
+        .import_rgba(&vec![1, 2, 3, 255].repeat(8), 4, 2)
+        .unwrap();
+    app.refresh_image().unwrap();
+    app.project_mut().add_layer();
+    app.project_mut().layers[1]
+        .pixels
+        .write(0, 3, 0, [7, 7, 7, 255]);
+    app.project_mut().active_layer = 0;
+    app.ai.document_id = app.workspace.active_doc().id.clone();
+    app.ai.new_layer = false;
+    app.ai.fit_image = false;
+    app.ai.input_region = Some(
+        PixelRect {
+            min_x: 0,
+            min_y: 0,
+            max_x: 4,
+            max_y: 2,
+        }
+        .into(),
+    );
+    app.ai.result = Some(image::RgbaImage::from_fn(2, 1, |x, _| {
+        image::Rgba(if x == 0 { [9, 9, 9, 255] } else { [0, 0, 0, 0] })
+    }));
+    let untouched = app.project().layers[0].pixels.read(0, 1, 0);
+    app.accept_ai();
+    assert_eq!(app.project().layers.len(), 2);
+    assert_eq!(app.project().active_layer, 0);
+    assert_eq!(
+        app.project().layers[0].pixels.read(0, 0, 0),
+        [9, 9, 9, 255]
+    );
+    assert_eq!(app.project().layers[0].pixels.read(0, 1, 0), untouched);
+    assert_eq!(
+        app.project().layers[1].pixels.read(0, 3, 0),
+        [7, 7, 7, 255]
+    );
+    app.undo();
+    assert_eq!(
+        app.project().layers[0].pixels.read(0, 0, 0),
+        [1, 2, 3, 255]
+    );
+}
+
+#[test]
 fn only_latest_result_is_accepted_and_destination_is_checked_again() {
     let mut app = EditorApp::default();
     app.project_mut()
@@ -1320,4 +1368,134 @@ fn video_completion_adds_asset_without_inserting_an_image_layer() {
     assert_eq!(app.project().layers.len(), layers);
     assert!(app.ai.result.is_none());
     assert!(app.ai.job.is_none());
+}
+
+#[test]
+fn animation_ltx_stays_closed_for_image_documents() {
+    let mut app = EditorApp::default();
+    app.project_mut()
+        .import_rgba(&[1, 2, 3, 255], 1, 1)
+        .unwrap();
+    app.open_ai_animation();
+    assert!(!app.ai.open);
+    app.new_animation();
+    app.open_ai_animation();
+    assert!(app.ai.open);
+    assert!(app.ai.mode == AiMode::Animation);
+    assert_eq!(app.ai.anim_scale, 1);
+    assert_eq!(app.ai.anim_start, 0);
+    assert_eq!(app.ai.anim_end, 23);
+    assert!(app.animation_settings().is_err());
+    app.ai.video_settings.prompt = "Walk cycle".into();
+    let settings = app.animation_settings().unwrap();
+    assert_eq!(settings.fps, 25);
+    assert_eq!(settings.seconds, 1);
+    app.ai.anim_scale = 3;
+    assert_eq!(app.animation_settings().unwrap().seconds, 3);
+}
+
+#[test]
+fn animation_input_reads_selected_frames_without_moving_the_playhead() {
+    use crate::raster::Raster;
+    let mut app = EditorApp::default();
+    app.new_animation();
+    app.project_mut().resize_canvas(2, 2).unwrap();
+    app.project_mut().layers[0]
+        .pixels
+        .write(0, 0, 0, [10, 0, 0, 255]);
+    app.seek_animation(4);
+    app.animation_drawing(false);
+    app.project_mut().layers[0]
+        .pixels
+        .write(0, 0, 0, [0, 20, 0, 255]);
+    app.ai.document_id = app.workspace.active_doc().id.clone();
+    let first = app.animation_frame_image(0).unwrap();
+    let held = app.animation_frame_image(2).unwrap();
+    let later = app.animation_frame_image(4).unwrap();
+    assert_eq!(app.project().animation.as_ref().unwrap().frame, 4);
+    assert_eq!(first.get_pixel(0, 0).0, [10, 0, 0, 255]);
+    assert_eq!(held.get_pixel(0, 0).0, [10, 0, 0, 255]);
+    assert_eq!(later.get_pixel(0, 0).0, [0, 20, 0, 255]);
+    assert_eq!(
+        app.project().layers[0].pixels.read(0, 0, 0),
+        [0, 20, 0, 255]
+    );
+}
+
+#[test]
+fn animation_result_samples_frames_onto_a_new_layer() {
+    use crate::raster::Raster;
+    let mut app = EditorApp::default();
+    app.new_animation();
+    app.project_mut().resize_canvas(4, 2).unwrap();
+    app.ai.document_id = app.workspace.active_doc().id.clone();
+    app.ai.anim_apply = (1, 4);
+    let color = |value| image::RgbaImage::from_pixel(2, 2, image::Rgba([value, 0, 0, 255]));
+    app.place_animation_frames(&[color(1), color(2), color(3), color(4)]);
+    let layer = &app.project().layers[1];
+    assert_eq!(layer.name, "Ltx 2.3 2");
+    assert_eq!(layer.drawings[&0].memory_bytes(), 0);
+    assert_eq!(layer.drawings[&1].read(0, 1, 0), [1, 0, 0, 255]);
+    assert_eq!(layer.drawings[&1].read(0, 0, 0), [0, 0, 0, 0]);
+    assert_eq!(layer.drawings[&2].read(0, 1, 0), [2, 0, 0, 255]);
+    assert_eq!(layer.drawings[&3].read(0, 1, 0), [3, 0, 0, 255]);
+    assert_eq!(layer.drawings[&4].read(0, 1, 0), [4, 0, 0, 255]);
+    assert_eq!(layer.drawings[&5].memory_bytes(), 0);
+    assert!(!layer.drawings.contains_key(&6));
+    assert!(app.workspace.videos.is_empty());
+    assert_eq!(app.project().layers.len(), 2);
+
+    app.ai.anim_apply = (0, 1);
+    app.place_animation_frames(&[color(1), color(2), color(3), color(4)]);
+    let dropped = &app.project().layers[2];
+    assert_eq!(dropped.drawings[&0].read(0, 1, 0), [1, 0, 0, 255]);
+    assert_eq!(dropped.drawings[&1].read(0, 1, 0), [4, 0, 0, 255]);
+    assert_eq!(dropped.drawings[&2].memory_bytes(), 0);
+
+    app.ai.anim_apply = (0, 3);
+    app.place_animation_frames(&[color(8), color(9)]);
+    let repeated = &app.project().layers[3];
+    assert_eq!(repeated.drawings[&0].read(0, 1, 0), [8, 0, 0, 255]);
+    assert_eq!(repeated.drawings[&1].read(0, 1, 0), [8, 0, 0, 255]);
+    assert_eq!(repeated.drawings[&2].read(0, 1, 0), [8, 0, 0, 255]);
+    assert_eq!(repeated.drawings[&3].read(0, 1, 0), [9, 0, 0, 255]);
+}
+
+#[test]
+fn animation_completion_decodes_into_layer_frames_instead_of_a_video() {
+    let mut app = EditorApp::default();
+    app.new_animation();
+    app.project_mut().resize_canvas(8, 8).unwrap();
+    app.ai.mode = AiMode::Animation;
+    app.ai.document_id = app.workspace.active_doc().id.clone();
+    app.ai.anim_apply = (0, 2);
+    app.ai.job = Some(crate::comfyui::Job::with_result(
+        crate::comfyui::JobResult::Video(
+            include_bytes!("../../tests/fixtures/video-preview.mp4").to_vec(),
+        ),
+    ));
+    let mut ui = Ui::new();
+    let started = std::time::Instant::now();
+    while app.ai.job.is_some() || app.ai.frame_decode.is_some() {
+        app.poll_ai(&mut ui);
+        if started.elapsed() > std::time::Duration::from_secs(5) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(app.ai.job.is_none());
+    assert!(app.ai.frame_decode.is_none());
+    assert!(app.workspace.videos.is_empty());
+    assert_eq!(app.project().layers.len(), 1);
+    assert!(app.ai.anim_frames.as_ref().is_some_and(|frames| !frames.is_empty()));
+    app.accept_animation();
+    assert!(app.ai.anim_frames.is_none());
+    assert_eq!(app.project().layers.len(), 2);
+    let layer = &app.project().layers[1];
+    assert!(layer.drawings.contains_key(&0));
+    assert!(layer.drawings.contains_key(&1));
+    assert!(layer.drawings.contains_key(&2));
+    assert_eq!(layer.drawings[&3].memory_bytes(), 0);
+    app.accept_animation();
+    assert_eq!(app.project().layers.len(), 2);
 }

@@ -1,4 +1,4 @@
-use crate::raster::SparsePixels;
+use crate::raster::{Raster, SparsePixels};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -184,6 +184,76 @@ impl Project {
         self.layers[self.active_layer].name = name;
         Ok(())
     }
+
+    /// Alpha-composite the result onto the active layer. Transparent source pixels leave the layer unchanged.
+    pub fn composite_onto_active_layer(
+        &mut self,
+        image: &image::RgbaImage,
+        region: impl Into<crate::raster::RasterRect>,
+        fit: bool,
+    ) -> Result<(), String> {
+        let region = region.into();
+        if self.layers.is_empty() {
+            return Err("Choose a layer first".into());
+        }
+        if image.width() == 0 || image.height() == 0 {
+            return Err("Result image is empty".into());
+        }
+        if region.is_empty() {
+            return Err("Result destination is empty".into());
+        }
+        let resized;
+        let image = if fit {
+            let size = region.size();
+            if image.dimensions() != size {
+                resized = image::imageops::resize(
+                    image,
+                    size.0,
+                    size.1,
+                    image::imageops::FilterType::Lanczos3,
+                );
+                &resized
+            } else {
+                image
+            }
+        } else {
+            image
+        };
+        let target = &mut self.layers[self.active_layer].pixels;
+        for (y, row) in image.rows().enumerate() {
+            for (x, pixel) in row.enumerate() {
+                if pixel[3] == 0 {
+                    continue;
+                }
+                let dx = region.min_x + x as i32;
+                let dy = region.min_y + y as i32;
+                let mut dst = target.read(0, dx, dy);
+                Self::composite_over(&mut dst, &pixel.0);
+                target.write(0, dx, dy, dst);
+            }
+        }
+        target.prune();
+        Ok(())
+    }
+
+fn composite_over(dst: &mut [u8; 4], src: &[u8; 4]) {
+    let src_a = src[3] as f32 / 255.0;
+    if src_a <= f32::EPSILON {
+        return;
+    }
+    let dst_a = dst[3] as f32 / 255.0;
+    let out_a = src_a + dst_a * (1.0 - src_a);
+    if out_a <= f32::EPSILON {
+        *dst = [0; 4];
+        return;
+    }
+    for channel in 0..3 {
+        let blended = (src[channel] as f32 * src_a + dst[channel] as f32 * dst_a * (1.0 - src_a))
+            / out_a;
+        dst[channel] = blended.round().clamp(0.0, 255.0) as u8;
+    }
+    dst[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+}
 
     /// Resize the document frame without changing any layer pixels.
     pub fn resize_canvas(&mut self, width: u32, height: u32) -> Result<(), String> {

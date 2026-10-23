@@ -434,9 +434,17 @@ impl History {
         if index == 0 || index >= project.layers.len() {
             return false;
         }
+        let frame = project.animation.as_ref().map(|animation| animation.frame);
+        if frame.is_some() {
+            project.flush_drawings();
+        }
         let lower = project.layers[index - 1].clone();
         let upper = project.layers[index].clone();
-        let merged = crate::editing::merge_layers(&lower, &upper);
+        let merged = if let Some(frame) = frame {
+            crate::editing::merge_layer_tracks(&lower, &upper, frame)
+        } else {
+            crate::editing::merge_layers(&lower, &upper)
+        };
         project.layers[index - 1] = merged.clone();
         project.layers.remove(index);
         project.active_layer = index - 1;

@@ -8,7 +8,9 @@ mod transform;
 #[allow(unused_imports)]
 pub use brush::{BrushStroke, SoftBrushCoverage, apply_brush};
 #[allow(unused_imports)]
-pub use composite::{composite_layers, composite_pixel, composite_region, merge_layers};
+pub use composite::{
+    composite_layers, composite_pixel, composite_region, merge_layer_tracks, merge_layers,
+};
 #[allow(unused_imports)]
 pub use fill::{fill_bucket, flood_mask};
 #[allow(unused_imports)]

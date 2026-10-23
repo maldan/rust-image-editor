@@ -40,6 +40,18 @@ pub struct VideoAsset {
 }
 
 impl VideoAsset {
+    pub(crate) fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            byte_size: bytes.len() as u64,
+            thumb: Vec::new(),
+            poster_attempted: true,
+            bytes: Some(Arc::new(bytes)),
+            deferred: None,
+        }
+    }
+
     /// Seekable access without copying a resident MP4 or loading a saved MP4 in full.
     pub(crate) fn reader(&self) -> VideoReader {
         VideoReader {

@@ -1,6 +1,7 @@
 //! Editor chrome: menus, dock tabs, status bar.
 
 pub mod ai_dialog;
+mod animation_dialog;
 mod asset_properties;
 mod assets_panel;
 mod canvas;

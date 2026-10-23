@@ -33,6 +33,45 @@ fn merge_down_restores_both_layers_and_prior_edits_through_undo_redo() {
 }
 
 #[test]
+fn merge_down_composites_animation_keys_and_restores_them() {
+    use crate::raster::Raster;
+    let mut app = EditorApp::default();
+    app.new_animation();
+    app.project_mut().resize_canvas(2, 2).unwrap();
+    app.project_mut().layers[0]
+        .pixels
+        .write(0, 0, 0, [10, 0, 0, 255]);
+    app.project_mut().add_layer();
+    app.seek_animation(4);
+    app.animation_drawing(false);
+    app.project_mut().layers[1]
+        .pixels
+        .write(0, 0, 0, [0, 20, 0, 255]);
+    app.project_mut().active_layer = 1;
+    app.merge_layer_down();
+    assert_eq!(app.project().layers.len(), 1);
+    assert_eq!(app.project().animation.as_ref().unwrap().frame, 4);
+    let layer = &app.project().layers[0];
+    assert_eq!(layer.drawings[&0].read(0, 0, 0), [10, 0, 0, 255]);
+    assert!(!layer.drawings.contains_key(&1));
+    assert_eq!(layer.drawings[&4].read(0, 0, 0), [0, 20, 0, 255]);
+    assert_eq!(layer.pixels.read(0, 0, 0), [0, 20, 0, 255]);
+    app.undo();
+    assert_eq!(app.project().layers.len(), 2);
+    assert!(app.project().layers[1].drawings.contains_key(&4));
+    assert_eq!(
+        app.project().layers[0].drawings[&0].read(0, 0, 0),
+        [10, 0, 0, 255]
+    );
+    app.redo();
+    assert_eq!(app.project().layers.len(), 1);
+    assert_eq!(
+        app.project().layers[0].drawings[&4].read(0, 0, 0),
+        [0, 20, 0, 255]
+    );
+}
+
+#[test]
 fn merge_down_does_nothing_for_empty_document_or_bottom_layer() {
     let mut app = EditorApp::default();
     app.merge_layer_down();

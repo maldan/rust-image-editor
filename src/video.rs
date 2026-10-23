@@ -680,6 +680,78 @@ impl Drop for Playback {
     }
 }
 
+pub struct FrameDecode {
+    control: Arc<DecoderControl>,
+    receiver: mpsc::Receiver<Result<Vec<RgbaImage>, String>>,
+}
+impl FrameDecode {
+    /// Decode every frame. `width` and `height` of 0 keep the source size; otherwise each frame is scaled to the animation canvas.
+    pub fn start(bytes: Vec<u8>, width: u32, height: u32) -> Self {
+        let control = Arc::new(DecoderControl::default());
+        let worker = control.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = decode_for_timeline(bytes, worker.clone(), width, height);
+            let _ = sender.send(result);
+            worker.finished.store(true, Ordering::Release);
+        });
+        Self { control, receiver }
+    }
+
+    pub fn poll(&self) -> Option<Result<Vec<RgbaImage>, String>> {
+        match self.receiver.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(_) => Some(Err("Frame decoder stopped unexpectedly".into())),
+        }
+    }
+}
+impl Drop for FrameDecode {
+    fn drop(&mut self) {
+        self.control.stop();
+    }
+}
+
+fn decode_for_timeline(
+    bytes: Vec<u8>,
+    control: Arc<DecoderControl>,
+    width: u32,
+    height: u32,
+) -> Result<Vec<RgbaImage>, String> {
+    if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
+        return Err("ComfyUI returned invalid MP4 data".into());
+    }
+    let asset = crate::workspace::VideoAsset::from_bytes(bytes);
+    let mut decoder = VideoDecoder::open(&asset, control, (16384, 16384))?;
+    let mut frames = Vec::new();
+    let mut used = 0usize;
+    while let Some(frame) = decoder.next_frame(None)? {
+        let image = fit_timeline_frame(frame.image, width, height)?;
+        used = used.saturating_add(image.as_raw().len());
+        if frames.len() >= 4096 || used > 1024 * 1024 * 1024 {
+            return Err("Generated video is too large to place on the timeline".into());
+        }
+        frames.push(image);
+    }
+    if frames.is_empty() {
+        return Err("Generated video has no frames".into());
+    }
+    Ok(frames)
+}
+
+fn fit_timeline_frame(image: RgbaImage, width: u32, height: u32) -> Result<RgbaImage, String> {
+    if width == 0 || height == 0 || image.dimensions() == (width, height) {
+        return Ok(image);
+    }
+    crate::comfyui::scaled_size(width, height, 1.0)?;
+    Ok(image::imageops::resize(
+        &image,
+        width,
+        height,
+        image::imageops::FilterType::Lanczos3,
+    ))
+}
+
 pub struct PosterJob {
     pub id: String,
     control: Arc<DecoderControl>,

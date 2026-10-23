@@ -66,10 +66,6 @@ impl EditorApp {
     }
 
     pub fn merge_layer_down(&mut self) {
-        if self.project().animation.is_some() {
-            self.status = "Merge Down is available for image documents".into();
-            return;
-        }
         let index = self.project().active_layer;
         if index == 0 || index >= self.project().layers.len() {
             return;

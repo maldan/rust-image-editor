@@ -20,11 +20,15 @@ pub enum AiMode {
     Inpaint,
     Lineart,
     Video,
+    Animation,
 }
 
 impl AiMode {
     pub fn needs_input(self) -> bool {
         !matches!(self, Self::Draw | Self::AnimeDraw | Self::QwenDraw)
+    }
+    pub fn uses_video(self) -> bool {
+        matches!(self, Self::Video | Self::Animation)
     }
     pub fn is_anime(self) -> bool {
         matches!(self, Self::AnimeDraw | Self::AnimeRedraw)
@@ -38,6 +42,7 @@ impl AiMode {
     pub fn title(self) -> &'static str {
         match self {
             Self::Video => "Ltx 2.3 I2V",
+            Self::Animation => "Ltx 2.3",
             Self::Edit => "Qwen 2.1 Redraw",
             Self::QwenDraw => "Qwen 2.1 Draw",
             Self::Draw => "Draw Image",
@@ -53,6 +58,7 @@ impl AiMode {
     pub fn layer_prefix(self) -> &'static str {
         match self {
             Self::Video => "AI Video",
+            Self::Animation => "Ltx 2.3",
             Self::Edit => "AI Qwen 2.1 Redraw",
             Self::QwenDraw => "AI Qwen 2.1 Draw",
             Self::Draw => "AI Draw",
@@ -92,7 +98,7 @@ impl Default for PreviewView {
 }
 
 impl PreviewView {
-    fn update(&mut self, viewport: Rect, hovered: bool, input: &crate::host::FrameInput) {
+    pub(super) fn update(&mut self, viewport: Rect, hovered: bool, input: &crate::host::FrameInput) {
         if input.mouse_middle_pressed && hovered {
             self.panning = true;
         }
@@ -111,7 +117,7 @@ impl PreviewView {
     }
 
     /// Crop both the rectangle and UVs so a zoomed image stays inside the preview pane.
-    fn visible_image(&self, viewport: Rect, image_size: Vec2) -> Option<(Rect, Vec2, Vec2)> {
+    pub(super) fn visible_image(&self, viewport: Rect, image_size: Vec2) -> Option<(Rect, Vec2, Vec2)> {
         let available = viewport.max - viewport.min;
         let fit = (available.x / image_size.x).min(available.y / image_size.y);
         let size = image_size * fit * self.zoom;
@@ -138,6 +144,17 @@ pub struct AiDialog {
     pub video_layer: Option<usize>,
     pub video_end_document: Option<String>,
     pub video_end_layer: Option<usize>,
+    /// Inclusive 0-based animation frames sent as the first and last conditioning images.
+    pub anim_start: u32,
+    pub anim_end: u32,
+    pub anim_scale: i32,
+    /// Range captured when generation starts. Later slider edits do not move the result.
+    pub anim_apply: (u32, u32),
+    pub frame_decode: Option<crate::video::FrameDecode>,
+    /// Decoded clip waiting for Accept. Playback is 25 fps inside the dialog.
+    pub anim_frames: Option<Vec<image::RgbaImage>>,
+    pub anim_play: f64,
+    pub anim_shown: usize,
     pub denoise: f32,
     pub mask_softness: f32,
     pub lineart_resolution: i32,
@@ -157,6 +174,8 @@ pub struct AiDialog {
     pub selection_bounds: Option<crate::editing::PixelRect>,
     pub scale: f32,
     pub fit_image: bool,
+    /// Accept creates a layer. When off, the result is composited onto the active layer.
+    pub new_layer: bool,
     /// Original input bounds in document coordinates, captured before input scaling.
     pub input_region: Option<crate::raster::RasterRect>,
     pub prompt: String,
@@ -182,6 +201,14 @@ impl Default for AiDialog {
             video_layer: None,
             video_end_document: None,
             video_end_layer: None,
+            anim_start: 0,
+            anim_end: 0,
+            anim_scale: 1,
+            anim_apply: (0, 0),
+            frame_decode: None,
+            anim_frames: None,
+            anim_play: 0.0,
+            anim_shown: 0,
             denoise: 1.0,
             mask_softness: 0.0,
             lineart_resolution: 512,
@@ -198,6 +225,7 @@ impl Default for AiDialog {
             selection_bounds: None,
             scale: 1.0,
             fit_image: true,
+            new_layer: true,
             input_region: None,
             prompt: String::new(),
             config: None,
@@ -274,6 +302,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         super::video_dialog::draw(ui, app);
         return;
     }
+    if app.ai.mode == AiMode::Animation {
+        super::animation_dialog::draw(ui, app);
+        return;
+    }
     let (width, height) = (app.project().width, app.project().height);
     let running = app.ai.job.is_some();
     let cancelling = app.ai.job.as_ref().is_some_and(Job::is_cancelling);
@@ -321,6 +353,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                             }
                         }
                         ui.checkbox("ai_fit_image", "Fit Image", &mut app.ai.fit_image);
+                        ui.checkbox("ai_new_layer", "New Layer", &mut app.ai.new_layer);
                     });
                     ui.space(8.0);
                     if running {
@@ -361,7 +394,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                                     app.ai.draw_settings.validate_redraw(app.ai.denoise).is_ok()
                                         && input_valid(app, width, height)
                                 }
-                                AiMode::Video => false,
+                                AiMode::Video | AiMode::Animation => false,
                                 AiMode::Edit => {
                                     !app.ai.prompt.trim().is_empty()
                                         && input_valid(app, width, height)
