@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::{
     HostConfig,
-    client::{Client, output_from_history},
+    client::Client,
 };
 use image::RgbaImage;
 
@@ -20,12 +20,14 @@ pub struct Progress {
 
 pub enum JobResult {
     Done(RgbaImage),
+    Video(Vec<u8>),
     Failed(String),
     Cancelled,
 }
 
 enum InputWorkflow {
     Edit(String),
+    Video(super::VideoSettings),
     AnimeRedraw { settings: super::DrawSettings, denoise: f32 },
     Lineart(i32),
     DrawCn { settings: super::DrawSettings, control: super::ControlNetSettings },
@@ -106,6 +108,10 @@ impl Job {
                 workflow: InputWorkflow::Edit(prompt),
             },
         )
+    }
+
+    pub fn start_video(config: HostConfig, pixels: RgbaImage, settings: super::VideoSettings) -> Self {
+        Self::start_request(config, Request::Input { pixels, scale: 1.0, workflow: InputWorkflow::Video(settings) })
     }
 
     pub fn start_lineart(config: HostConfig, pixels: RgbaImage, scale: f32, resolution: i32) -> Self {
@@ -234,7 +240,7 @@ impl Job {
                 }
             } else {
                 match result {
-                    Ok(image) => JobResult::Done(image),
+                    Ok(result) => result,
                     Err(error) => JobResult::Failed(error),
                 }
             };
@@ -304,7 +310,7 @@ fn run(
     progress: Arc<Mutex<Progress>>,
     prompt_id: Arc<Mutex<Option<String>>>,
     stop_ws: Arc<AtomicBool>,
-) -> Result<RgbaImage, String> {
+) -> Result<JobResult, String> {
     let client = Client::new(config.clone())?;
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let client_id = format!(
@@ -319,6 +325,7 @@ fn run(
     check_cancel(cancel)?;
     // Fresh randomness for every Run/Regenerate; stay within exact JSON integer range.
     let seed = rand::random::<u64>() & ((1_u64 << 53) - 1);
+    let video = matches!(&request, Request::Input { workflow: InputWorkflow::Video(_), .. });
     let (graph, save_node) = match request {
         Request::QwenDraw(settings) => super::workflow::prepare_qwen_draw(&settings, seed)?,
         Request::AnimeDraw(settings) => super::workflow::prepare_anime(None, &settings, 1.0, seed)?,
@@ -328,6 +335,7 @@ fn run(
             scale,
             workflow,
         } => {
+            if let InputWorkflow::Video(settings) = &workflow { settings.validate()?; }
             if let InputWorkflow::Lineart(resolution) = &workflow {
                 super::workflow::validate_lineart_resolution(*resolution)?;
             }
@@ -385,6 +393,7 @@ fn run(
                         seed,
                     )?
                 }
+                InputWorkflow::Video(settings) => super::video::prepare(&filename, &settings, seed)?,
                 InputWorkflow::Edit(prompt) => super::workflow::prepare(&filename, &prompt, seed)?,
                 InputWorkflow::DrawCn { settings, control } => {
                     super::workflow::prepare_draw_cn(&filename, &settings, control, seed)?
@@ -423,12 +432,12 @@ fn run(
             return Err("ComfyUI generation timed out".into());
         }
         let history = client.history(&id)?;
-        if let Some(output) = output_from_history(&history, &id, &save_node)? {
+        if let Some(output) = super::client::output_from_history_kind(&history, &id, &save_node, video)? {
             check_cancel(cancel)?;
             progress.lock().unwrap().message = "Downloading result…".into();
-            let bytes = client.download(&output)?;
+            let bytes = if video { client.download_video(&output)? } else { client.download(&output)? };
             check_cancel(cancel)?;
-            return super::decode_image(&bytes);
+            return if video { Ok(JobResult::Video(bytes)) } else { super::decode_image(&bytes).map(JobResult::Done) };
         }
         for _ in 0..10 {
             check_cancel(cancel)?;
@@ -440,6 +449,80 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_job_uploads_input_submits_graph_and_downloads_mp4() {
+        use std::{io::{Read, Write}, net::TcpListener};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let config = HostConfig { host: format!("http://{}", listener.local_addr().unwrap()),
+            ws: "ws://127.0.0.1:0".into(), login: String::new(), password: String::new() };
+        let video = b"\0\0\0\x18ftypisomvideo".to_vec();
+        let expected = video.clone();
+        let server = std::thread::spawn(move || {
+            for step in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                let header_end = loop {
+                    let mut buffer = [0; 4096];
+                    let n = stream.read(&mut buffer).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&buffer[..n]);
+                    if let Some(end) = request.windows(4).position(|b| b == b"\r\n\r\n") { break end + 4; }
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]).to_string();
+                let length = headers.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                }).unwrap_or(0);
+                while request.len() < header_end + length {
+                    let mut buffer = [0; 4096];
+                    let n = stream.read(&mut buffer).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&buffer[..n]);
+                }
+                let body = match step {
+                    0 => {
+                        assert!(headers.starts_with("POST /upload/image "));
+                        assert!(request.windows(8).any(|b| b == b"image/pn"));
+                        br#"{"name":"input.png"}"#.to_vec()
+                    }
+                    1 => {
+                        assert!(headers.starts_with("POST /prompt "));
+                        let body: serde_json::Value = serde_json::from_slice(&request[header_end..]).unwrap();
+                        assert_eq!(body["prompt"]["269"]["inputs"]["image"], "input.png");
+                        assert_eq!(body["prompt"]["320:319"]["inputs"]["value"], "Animate clouds");
+                        br#"{"prompt_id":"video-job"}"#.to_vec()
+                    }
+                    2 => {
+                        assert!(headers.starts_with("GET /history/video-job "));
+                        br#"{"video-job":{"outputs":{"270":{"gifs":[{"filename":"result.mp4","subfolder":"ltx","type":"output"}]}},"status":{"completed":true}}}"#.to_vec()
+                    }
+                    _ => {
+                        assert!(headers.starts_with("GET /view?"));
+                        assert!(headers.contains("filename=result.mp4"));
+                        assert!(headers.contains("subfolder=ltx"));
+                        video.clone()
+                    }
+                };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        let job = Job::start_video(config, RgbaImage::new(64, 64),
+            super::super::VideoSettings { prompt: "Animate clouds".into(), ..Default::default() });
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(result) = job.poll() {
+                match result { JobResult::Video(bytes) => assert_eq!(bytes, expected),
+                    JobResult::Failed(error) => panic!("{error}"), _ => panic!("Expected video") }
+                break;
+            }
+            assert!(Instant::now() < deadline, "Video worker timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        server.join().unwrap();
+    }
 
     #[test]
     fn cancelling_a_pending_job_reports_cancelled_without_worker_response() {
@@ -513,6 +596,7 @@ mod tests {
                         assert!(image.width() > 0 && image.height() > 0);
                         return;
                     }
+                    JobResult::Video(_) => panic!("Unexpected video"),
                     JobResult::Failed(e) => panic!("{e}"),
                     JobResult::Cancelled => panic!("Unexpected cancellation"),
                 }
@@ -550,6 +634,7 @@ mod tests {
                         assert!(requested);
                         return;
                     }
+                    JobResult::Video(_) => panic!("Unexpected video"),
                     JobResult::Failed(e) => panic!("{e}"),
                     JobResult::Done(_) => panic!("Cancelled result must not be delivered"),
                 }

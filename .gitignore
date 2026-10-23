@@ -1,3 +1,5 @@
 /target
 /target-smoke
 .env
+/.deps
+/.cargo/config.toml

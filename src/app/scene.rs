@@ -3,6 +3,8 @@ use super::*;
 impl Scene for EditorApp {
     fn request_close(&mut self) -> bool {
         self.cancel_ai();
+        self.close_asset_preview();
+        self.video_poster = None;
         true
     }
 
@@ -31,6 +33,7 @@ impl Scene for EditorApp {
         self.session.viewport_size = viewport;
         self.note_frame(self.input.dt);
         self.poll_ai(ui);
+        self.poll_video();
         if self.input.key_undo {
             self.undo();
         }
@@ -55,7 +58,9 @@ impl Scene for EditorApp {
         // Static tools follow the pointer via mouse events. Only animated
         // overlays and unfinished uploads need another frame on their own.
         self.ai.open || self.hsv.open
-            || self.session.selection.is_some()
+            || self.video_preview.as_ref().is_some_and(crate::video::Playback::needs_repaint)
+            || self.video_poster.is_some()
+            || (self.session.preview_asset.is_none() && self.session.selection.is_some())
             || thumb_waiting
             || !self.dirty_tiles.is_empty()
     }
@@ -91,6 +96,17 @@ impl Scene for EditorApp {
         queue: &wgpu::Queue,
         canvas: &mut CanvasRenderer,
     ) {
+        if let Some(player) = &mut self.video_preview {
+            if let Some(frame) = &player.frame {
+                if player.dirty {
+                    canvas.upload_video_frame(device, queue, frame);
+                    player.dirty = false;
+                }
+            } else { canvas.clear(); }
+            canvas.clear_transform();
+            canvas.set_selection_mask(device, queue, None, 0, 0);
+            return;
+        }
         if let Some(id) = &self.session.preview_asset
             && let Some(asset) = self.workspace.assets.iter().find(|a| &a.id == id)
         {

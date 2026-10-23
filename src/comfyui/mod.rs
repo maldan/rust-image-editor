@@ -1,3 +1,5 @@
+mod video;
+pub use video::VideoSettings;
 mod client;
 mod catalog;
 mod config;

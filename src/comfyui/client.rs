@@ -119,21 +119,29 @@ impl Client {
     }
 
     pub fn download(&self, output: &Value) -> Result<Vec<u8>, String> {
+        self.download_limited(output, 128 * 1024 * 1024, Duration::from_secs(30))
+    }
+
+    pub fn download_video(&self, output: &Value) -> Result<Vec<u8>, String> {
+        self.download_limited(output, 1024 * 1024 * 1024, Duration::from_secs(600))
+    }
+
+    fn download_limited(&self, output: &Value, limit: u64, timeout: Duration) -> Result<Vec<u8>, String> {
         let filename = output["filename"]
             .as_str()
             .ok_or("Output has no filename")?;
-        let request = self.request(reqwest::Method::GET, "/view").query(&[
+        let request = self.request(reqwest::Method::GET, "/view").timeout(timeout).query(&[
             ("filename", filename),
             ("subfolder", output["subfolder"].as_str().unwrap_or("")),
             ("type", output["type"].as_str().unwrap_or("output")),
         ]);
         let mut bytes = Vec::new();
         self.send(request)?
-            .take(128 * 1024 * 1024 + 1)
+            .take(limit + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| "Cannot download output".to_string())?;
-        if bytes.len() > 128 * 1024 * 1024 {
-            return Err("ComfyUI output exceeds 128 MiB".into());
+        if bytes.len() as u64 > limit {
+            return Err(format!("ComfyUI output exceeds {} MiB", limit / 1024 / 1024));
         }
         Ok(bytes)
     }
@@ -206,11 +214,16 @@ mod tests {
     }
 }
 
+#[cfg(test)]
 pub fn output_from_history(
     history: &Value,
     id: &str,
     save_node: &str,
 ) -> Result<Option<Value>, String> {
+    output_from_history_kind(history, id, save_node, false)
+}
+
+pub fn output_from_history_kind(history: &Value, id: &str, save_node: &str, video: bool) -> Result<Option<Value>, String> {
     let Some(item) = history.get(id) else {
         return Ok(None);
     };
@@ -230,12 +243,31 @@ pub fn output_from_history(
             .unwrap_or_else(|| "ComfyUI execution failed or was interrupted".into());
         return Err(error);
     }
-    let output = item["outputs"][save_node]["images"]
-        .as_array()
-        .and_then(|images| images.first())
-        .cloned();
+    let output = if video {
+        ["gifs", "videos", "images"].iter().filter_map(|key| item["outputs"][save_node][key].as_array())
+            .flatten().find(|v| v["filename"].as_str().is_some_and(|s| s.to_ascii_lowercase().ends_with(".mp4"))).cloned()
+    } else {
+        item["outputs"][save_node]["images"].as_array().and_then(|images| images.first()).cloned()
+    };
     if output.is_none() && item["status"]["completed"] == true {
-        return Err("ComfyUI finished without a SaveImage result".into());
+        return Err(format!("ComfyUI finished without a {} result", if video { "MP4 video" } else { "SaveImage" }));
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod video_tests {
+    use super::*;
+    #[test]
+    fn video_history_selects_mp4_from_save_node_and_reports_missing_video() {
+        let history = json!({"job": {"outputs": {
+            "preview": {"gifs": [{"filename": "wrong.mp4"}]},
+            "save": {"gifs": [{"filename": "preview.png"}, {"filename": "right.mp4", "subfolder": "ltx", "type": "output"}]}
+        }, "status": {"completed": true}}});
+        let output = output_from_history_kind(&history, "job", "save", true).unwrap().unwrap();
+        assert_eq!(output["filename"], "right.mp4");
+        assert_eq!(output["subfolder"], "ltx");
+        assert!(output_from_history_kind(&history, "job", "missing", true).unwrap_err().contains("MP4"));
+        assert!(output_from_history_kind(&history, "pending", "save", true).unwrap().is_none());
+    }
 }

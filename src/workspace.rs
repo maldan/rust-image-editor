@@ -13,11 +13,79 @@ use crate::project::{Layer, Project, encode_webp_rgba};
 const MANIFEST_PATH: &str = "/manifest.json";
 const MANIFEST_KIND: &str = "mega-image-editor/manifest+json";
 const IMAGE_KIND: &str = "image/webp";
-const FORMAT_VERSION: u32 = 6;
+const FORMAT_VERSION: u32 = 7;
 pub const THUMB_SIZE: u32 = 84;
 const THUMB_ATLAS_COLS: u32 = 16;
 /// On-screen library thumb size (logical px before UI scale).
 pub const THUMB_VIEW: f32 = 73.0;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VideoMeta {
+    id: String,
+    name: String,
+    path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preview: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VideoAsset {
+    pub id: String,
+    pub name: String,
+    pub byte_size: u64,
+    pub thumb: Vec<u8>,
+    pub poster_attempted: bool,
+    bytes: Option<Arc<Vec<u8>>>,
+    deferred: Option<DeferredAsset>,
+}
+
+impl VideoAsset {
+    /// Seekable access without copying a resident MP4 or loading a saved MP4 in full.
+    pub(crate) fn reader(&self) -> VideoReader {
+        VideoReader { asset: self.clone(), position: 0 }
+    }
+
+    pub fn read(&self) -> Result<Vec<u8>, String> {
+        if let Some(bytes) = &self.bytes { return Ok(bytes.as_ref().clone()); }
+        let source = self.deferred.as_ref().ok_or("Video has no data")?;
+        source.source.0.read_all(&source.path).map_err(|e| format!("Cannot read video: {e}"))
+    }
+}
+
+pub(crate) struct VideoReader {
+    asset: VideoAsset,
+    position: u64,
+}
+
+impl std::io::Read for VideoReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self.asset.byte_size.saturating_sub(self.position);
+        let count = buffer.len().min(remaining.min(64 * 1024) as usize);
+        if count == 0 { return Ok(0); }
+        if let Some(bytes) = &self.asset.bytes {
+            buffer[..count].copy_from_slice(&bytes[self.position as usize..self.position as usize + count]);
+        } else {
+            let source = self.asset.deferred.as_ref().ok_or_else(|| std::io::Error::other("Video has no data"))?;
+            let bytes = source.source.0.read_at(&source.path, self.position, count).map_err(std::io::Error::other)?;
+            buffer[..count].copy_from_slice(&bytes);
+        }
+        self.position += count as u64;
+        Ok(count)
+    }
+}
+
+impl std::io::Seek for VideoReader {
+    fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+        use std::io::SeekFrom;
+        let position = match from {
+            SeekFrom::Start(position) => Some(position),
+            SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
+            SeekFrom::End(offset) => self.asset.byte_size.checked_add_signed(offset),
+        }.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid video seek"))?;
+        self.position = position;
+        Ok(position)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ImageAsset {
@@ -142,6 +210,8 @@ struct WorkspaceManifest {
     assets: Vec<AssetMeta>,
     #[serde(default)]
     documents: Vec<DocumentMeta>,
+    #[serde(default)]
+    videos: Vec<VideoMeta>,
 }
 
 #[derive(Debug, Clone)]
@@ -199,6 +269,7 @@ fn empty_thumb() -> Vec<u8> {
 #[derive(Debug, Clone)]
 pub struct Workspace {
     pub assets: Vec<ImageAsset>,
+    pub videos: Vec<VideoAsset>,
     pub documents: Vec<Document>,
     pub active_document: usize,
     pub path: Option<PathBuf>,
@@ -224,6 +295,7 @@ pub struct Workspace {
 #[derive(Debug, Clone, Default)]
 struct SavedResources {
     assets: HashMap<String, (u32, u32, Option<u64>)>,
+    videos: HashSet<String>,
     layers: HashMap<String, (Option<u64>, Option<String>)>,
     previews: HashMap<String, u64>,
     manifest: Vec<u8>,
@@ -233,6 +305,7 @@ impl Default for Workspace {
     fn default() -> Self {
         let mut ws = Self {
             assets: Vec::new(),
+            videos: Vec::new(),
             documents: Vec::new(),
             active_document: 0,
             path: None,
@@ -255,6 +328,29 @@ impl Default for Workspace {
 }
 
 impl Workspace {
+    pub fn add_video(&mut self, bytes: Vec<u8>) -> Result<usize, String> {
+        if bytes.len() < 12 || &bytes[4..8] != b"ftyp" { return Err("ComfyUI returned invalid MP4 data".into()); }
+        let id = self.alloc_id("video");
+        let index = self.videos.len();
+        self.videos.push(VideoAsset { name: format!("Ltx 2.3 I2V {}.mp4", index + 1), id,
+            byte_size: bytes.len() as u64, thumb: Vec::new(), poster_attempted: false, bytes: Some(Arc::new(bytes)), deferred: None });
+        self.invalidate_thumb_atlas();
+        Ok(index)
+    }
+
+    pub fn set_video_thumb(&mut self, id: &str, thumb: Vec<u8>) -> bool {
+        if thumb.len() != (THUMB_SIZE * THUMB_SIZE * 4) as usize { return false; }
+        let Some(video) = self.videos.iter_mut().find(|v| v.id == id) else { return false; };
+        video.thumb = thumb;
+        video.poster_attempted = true;
+        self.invalidate_thumb_atlas();
+        true
+    }
+
+    pub fn delete_video(&mut self, index: usize) {
+        if index < self.videos.len() { self.videos.remove(index); self.invalidate_thumb_atlas(); }
+    }
+
     pub fn ensure_document_loaded(&mut self, index: usize) -> Result<(), String> {
         let doc = self.documents.get_mut(index).ok_or("Document not found")?;
         let Some(deferred) = &doc.deferred else { return Ok(()); };
@@ -391,13 +487,14 @@ impl Workspace {
             return;
         }
         let cols = THUMB_ATLAS_COLS;
-        let count = (self.assets.len() + self.documents.len()) as u32;
+        let count = (self.assets.len() + self.documents.len() + self.videos.len()) as u32;
         let rows = count.div_ceil(cols).max(1);
         let width = cols * THUMB_SIZE;
         let height = rows * THUMB_SIZE;
         let mut pixels = vec![0u8; width as usize * height as usize * 4];
         for (cell, thumb) in self.assets.iter().map(|asset| &asset.thumb)
             .chain(self.documents.iter().map(|doc| &doc.thumb))
+            .chain(self.videos.iter().map(|video| &video.thumb))
             .enumerate()
         {
             let col = (cell as u32) % cols;
@@ -595,6 +692,20 @@ impl Workspace {
                 preview: Some(preview),
             });
         }
+        let mut video_metas = Vec::new();
+        for video in &self.videos {
+            let video_path = format!("/videos/{}.mp4", video.id);
+            if previous.is_none_or(|saved| !saved.videos.contains(&video_path)) {
+                files.push(WriteFile::new(&video_path, "video/mp4", video.read()?));
+            }
+            next.videos.insert(video_path.clone());
+            let preview = if video.thumb.is_empty() { None } else {
+                let path = format!("/previews/videos/{}.webp", video.id);
+                save_preview(&path, &video.thumb, previous, &mut next, &mut files)?;
+                Some(path)
+            };
+            video_metas.push(VideoMeta { id: video.id.clone(), name: video.name.clone(), path: video_path, preview });
+        }
         let mut doc_metas = Vec::new();
         for doc in &self.documents {
             let mut layers = Vec::new();
@@ -647,6 +758,7 @@ impl Workspace {
             active_document: self.active_document.min(self.documents.len().saturating_sub(1)),
             assets: asset_metas,
             documents: doc_metas,
+            videos: video_metas,
         };
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)
             .map_err(|e| format!("Cannot encode manifest: {e}"))?;
@@ -678,6 +790,8 @@ impl Workspace {
                 return Err(error);
             }
             let mut paths = HashSet::from([MANIFEST_PATH.to_string()]);
+            paths.extend(manifest.videos.iter().map(|v| v.path.clone()));
+            paths.extend(manifest.videos.iter().filter_map(|v| v.preview.clone()));
             let mut replacements = HashMap::new();
             for (asset, preview) in manifest.assets.iter_mut().zip(&saved_previews.assets) {
                 paths.insert(asset.path.clone());
@@ -759,6 +873,11 @@ impl Workspace {
             for doc in &mut self.documents {
                 if doc.deferred.is_some() && let Some(meta) = manifest.documents.iter().find(|meta| meta.id == doc.id) {
                     doc.deferred = Some(DeferredDocument { source: source.clone(), layers: meta.layers.clone() });
+                }
+            }
+            for video in &mut self.videos {
+                if video.deferred.is_some() && let Some(meta) = manifest.videos.iter().find(|meta| meta.id == video.id) {
+                    video.deferred = Some(DeferredAsset { source: source.clone(), path: meta.path.clone() });
                 }
             }
             for asset in &mut self.assets {
@@ -857,8 +976,17 @@ impl Workspace {
         }
         let active_document = manifest.active_document.min(documents.len() - 1);
         let tree_selected = documents.get(active_document).map(|doc| format!("doc_{}", doc.id));
+        let videos = manifest.videos.iter().map(|meta| {
+            bump_id(&meta.id, &mut next_id);
+            let byte_size = source.0.meta(&meta.path).map_err(|e| format!("Cannot read video metadata: {e}"))?.size;
+            let thumb = read_preview(&source, meta.preview.as_deref())?.unwrap_or_default();
+            let poster_attempted = !thumb.is_empty();
+            Ok(VideoAsset { id: meta.id.clone(), name: meta.name.clone(), byte_size, thumb, poster_attempted,
+                bytes: None, deferred: Some(DeferredAsset { source: source.clone(), path: meta.path.clone() }) })
+        }).collect::<Result<Vec<_>, String>>()?;
         let mut workspace = Self {
             assets,
+            videos,
             active_document,
             documents,
             path: Some(path.to_path_buf()),
@@ -876,6 +1004,12 @@ impl Workspace {
             saved: None,
         };
         let mut saved = SavedResources { manifest: manifest_bytes, ..Default::default() };
+        saved.videos.extend(manifest.videos.iter().map(|v| v.path.clone()));
+        for (video, meta) in workspace.videos.iter().zip(&manifest.videos) {
+            if let Some(preview) = &meta.preview {
+                saved.previews.insert(preview.clone(), crate::safe_save::fingerprint(&video.thumb));
+            }
+        }
         for (asset, meta) in workspace.assets.iter().zip(&manifest.assets) {
             saved.assets.insert(meta.path.clone(), (asset.width, asset.height, None));
             if let Some(preview) = &meta.preview {
@@ -899,7 +1033,7 @@ impl Workspace {
 }
 
 fn check_manifest(manifest: &WorkspaceManifest) -> Result<(), String> {
-    if manifest.format == "mega-image-editor" && matches!(manifest.version, 5 | 6) {
+    if manifest.format == "mega-image-editor" && matches!(manifest.version, 5 | 6 | 7) {
         Ok(())
     } else {
         Err("Unsupported project format or version".into())
@@ -947,6 +1081,70 @@ mod tests {
         for index in 0..workspace.documents.len() { workspace.ensure_document_loaded(index)?; }
         for index in 0..workspace.assets.len() { workspace.ensure_asset_loaded(index)?; }
         Ok(workspace)
+    }
+
+    #[test]
+    fn video_reader_reads_bounded_chunks_and_seeks_in_memory_and_archive() {
+        use std::io::{Read, Seek, SeekFrom};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stream.mgimg");
+        let mut workspace = Workspace::default();
+        let mut bytes = b"\0\0\0\x18ftypisom".to_vec();
+        bytes.extend((0..200_000).map(|i| (i % 251) as u8));
+        workspace.add_video(bytes.clone()).unwrap();
+        workspace.save(&path).unwrap();
+        let loaded = Workspace::open(&path).unwrap();
+        assert!(loaded.videos[0].bytes.is_none());
+        for asset in [&workspace.videos[0], &loaded.videos[0]] {
+            let mut reader = asset.reader();
+            let mut buffer = vec![0; 128 * 1024];
+            assert_eq!(reader.read(&mut buffer).unwrap(), 64 * 1024);
+            assert_eq!(&buffer[..64 * 1024], &bytes[..64 * 1024]);
+            reader.seek(SeekFrom::End(-5)).unwrap();
+            let mut tail = Vec::new();
+            reader.read_to_end(&mut tail).unwrap();
+            assert_eq!(tail, bytes[bytes.len() - 5..]);
+            assert!(reader.seek(SeekFrom::Start(0)).is_ok());
+            assert!(reader.seek(SeekFrom::Current(-1)).is_err());
+            let mut header = [0; 12];
+            reader.read_exact(&mut header).unwrap();
+            assert_eq!(header, bytes[..12]);
+        }
+    }
+
+    #[test]
+    fn videos_survive_save_as_lazy_open_and_optimization() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("videos.mgimg");
+        let copy = dir.path().join("copy.mgimg");
+        let bytes = b"\0\0\0\x18ftypisomtest video bytes".to_vec();
+        let mut workspace = Workspace::default();
+        assert!(workspace.add_video(vec![0; 20]).is_err());
+        workspace.add_video(bytes.clone()).unwrap();
+        let poster = vec![127; (THUMB_SIZE * THUMB_SIZE * 4) as usize];
+        let id = workspace.videos[0].id.clone();
+        assert!(workspace.set_video_thumb(&id, poster.clone()));
+        workspace.save(&path).unwrap();
+        let archive = MegaFile::open(&path).unwrap();
+        assert_eq!(archive.read_all("/videos/video_2.mp4").unwrap(), bytes);
+        let mut loaded = Workspace::open(&path).unwrap();
+        assert!(loaded.videos[0].bytes.is_none());
+        assert_eq!(loaded.videos[0].thumb, poster);
+        assert!(loaded.videos[0].poster_attempted);
+        let before = fs::read(&path).unwrap();
+        loaded.save(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        loaded.optimize().unwrap();
+        assert_eq!(loaded.videos[0].read().unwrap(), bytes);
+        loaded.save(&copy).unwrap();
+        let mut copied = Workspace::open(&copy).unwrap();
+        assert_eq!(copied.videos[0].read().unwrap(), bytes);
+        assert_eq!(copied.videos[0].thumb, poster);
+        copied.videos.clear();
+        copied.save(&copy).unwrap();
+        copied.optimize().unwrap();
+        assert!(Workspace::open(&copy).unwrap().videos.is_empty());
+        assert!(MegaFile::open(&copy).unwrap().read_all("/videos/video_2.mp4").is_err());
     }
 
     fn lazy_fixture(path: &Path) -> Workspace {

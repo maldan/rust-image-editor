@@ -785,3 +785,42 @@
         assert!(ui.input_debug().modal_open);
         assert_eq!(app.project().layers[0].pixels.to_rgba(app.project().width, app.project().height), [20, 40, 60, 255]);
     }
+
+    #[test]
+    fn video_source_is_independent_of_active_document_and_selection() {
+        use crate::raster::Raster;
+        let mut app = EditorApp::default();
+        app.project_mut().import_rgba(&[9, 8, 7, 255].repeat(6), 3, 2).unwrap();
+        app.ai.document_id = app.workspace.active_doc().id.clone();
+        let pixels = &mut app.workspace.documents[0].project.layers[0].pixels;
+        pixels.write(0, -1, 0, [255, 0, 0, 255]);
+        pixels.write(0, 3, 0, [255, 0, 0, 255]);
+        app.workspace.create_document("Other");
+        app.workspace.active_document = 1;
+        app.session.selection = Some(Selection::all(1, 1));
+        app.ai.video_layer = Some(0);
+        let image = app.video_input().unwrap();
+        assert_eq!(image.dimensions(), (3, 2));
+        assert_eq!(image.as_raw(), &[9, 8, 7, 255].repeat(6));
+        app.ai.video_layer = None;
+        assert_eq!(app.video_input().unwrap(), image);
+        assert_eq!(app.workspace.active_document, 1);
+        app.ai.video_layer = Some(7);
+        assert!(app.video_input().is_err());
+    }
+
+    #[test]
+    fn video_completion_adds_asset_without_inserting_an_image_layer() {
+        let mut app = EditorApp::default();
+        app.ai.mode = AiMode::Video;
+        app.ai.document_id = "other-document".into();
+        let bytes = b"\0\0\0\x18ftypisomtest video bytes".to_vec();
+        app.ai.job = Some(crate::comfyui::Job::with_result(crate::comfyui::JobResult::Video(bytes.clone())));
+        let layers = app.project().layers.len();
+        app.poll_ai(&mut Ui::new());
+        assert_eq!(app.workspace.videos.len(), 1);
+        assert_eq!(app.workspace.videos[0].read().unwrap(), bytes);
+        assert_eq!(app.project().layers.len(), layers);
+        assert!(app.ai.result.is_none());
+        assert!(app.ai.job.is_none());
+    }

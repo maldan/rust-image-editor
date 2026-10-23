@@ -39,11 +39,12 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             app.draw_lasso_path(ui, view);
         }
         // Marching ants advance with frame time. The brush ring does not.
-        if app.session.selection.is_some() {
+        if app.session.preview_asset.is_none() && app.session.selection.is_some() {
             ui.request_repaint();
         }
     } else {
-        let message = "Place an asset or resize canvas to begin";
+        let message = if app.session.preview_asset.is_some() { app.status.as_str() }
+            else { "Place an asset or resize canvas to begin" };
         let pos = app.session.canvas_rect.min + rect_size(app.session.canvas_rect) * 0.5 - Vec2::new(130.0, 8.0);
         ui.text_at(pos, message);
     }

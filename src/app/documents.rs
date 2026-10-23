@@ -4,6 +4,7 @@ use crate::raster::Raster;
 impl EditorApp {
     pub fn new_project(&mut self, ui: &mut Ui) {
         self.close_asset_preview();
+        self.video_poster = None;
         self.cancel_transform();
         self.workspace = Workspace::default();
         self.image_size = None;
@@ -257,6 +258,8 @@ impl EditorApp {
                     self.show_error(ui, error);
                     return;
                 }
+                self.close_asset_preview();
+                self.video_poster = None;
                 self.cancel_transform();
                 self.workspace = workspace;
                 match self.refresh_image() {

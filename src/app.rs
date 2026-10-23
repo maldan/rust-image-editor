@@ -19,6 +19,7 @@ use crate::view::CanvasView;
 use crate::workspace::Workspace;
 
 mod ai;
+mod video;
 mod documents;
 mod history;
 mod layers;
@@ -68,6 +69,8 @@ pub struct EditorApp {
     pub resize_h: u32,
     pub ai: ui::ai_dialog::AiDialog,
     pub hsv: ui::hsv_dialog::HsvDialog,
+    video_preview: Option<crate::video::Playback>,
+    video_poster: Option<crate::video::PosterJob>,
 }
 
 impl Default for EditorApp {
@@ -98,6 +101,8 @@ impl Default for EditorApp {
             resize_h: 512,
             ai: ui::ai_dialog::AiDialog::default(),
             hsv: Default::default(),
+            video_preview: None,
+            video_poster: None,
         }
     }
 }
@@ -143,6 +148,9 @@ impl EditorApp {
     }
 
     pub fn display_size(&self) -> Option<(u32, u32)> {
+        if let Some(player) = &self.video_preview {
+            return player.frame.as_ref().map(image::RgbaImage::dimensions);
+        }
         if let Some(id) = &self.session.preview_asset {
             return self.workspace.assets.iter().find(|a| &a.id == id).map(|a| (a.width, a.height));
         }
@@ -156,7 +164,12 @@ impl EditorApp {
         }
         let Some(asset) = self.workspace.assets.get(index) else { return; };
         let id = asset.id.clone();
+        self.begin_asset_preview(id);
+    }
+
+    fn begin_asset_preview(&mut self, id: String) {
         if self.session.preview_asset.as_ref() == Some(&id) { return; }
+        self.video_preview = None;
         self.commit_transform();
         self.brush_last = None;
         self.session.lasso_points.clear();
@@ -173,6 +186,7 @@ impl EditorApp {
     }
 
     pub fn close_asset_preview(&mut self) {
+        self.video_preview = None;
         if self.session.preview_asset.take().is_some() {
             self.layers_reload = true;
             self.session.selection_mask_dirty = true;

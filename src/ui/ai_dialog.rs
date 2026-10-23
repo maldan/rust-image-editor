@@ -19,6 +19,7 @@ pub enum AiMode {
     Redraw,
     Inpaint,
     Lineart,
+    Video,
 }
 
 impl AiMode {
@@ -33,6 +34,7 @@ impl AiMode {
     }
     pub fn title(self) -> &'static str {
         match self {
+            Self::Video => "Ltx 2.3 I2V",
             Self::Edit => "Qwen 2.1 Redraw",
             Self::QwenDraw => "Qwen 2.1 Draw",
             Self::Draw => "Draw Image",
@@ -47,6 +49,7 @@ impl AiMode {
     }
     pub fn layer_prefix(self) -> &'static str {
         match self {
+            Self::Video => "AI Video",
             Self::Edit => "AI Qwen 2.1 Redraw",
             Self::QwenDraw => "AI Qwen 2.1 Draw",
             Self::Draw => "AI Draw",
@@ -115,6 +118,8 @@ impl PreviewView {
 pub struct AiDialog {
     pub open: bool,
     pub mode: AiMode,
+    pub video_settings: crate::comfyui::VideoSettings,
+    pub video_layer: Option<usize>,
     pub denoise: f32,
     pub mask_softness: f32,
     pub lineart_resolution: i32,
@@ -155,6 +160,8 @@ impl Default for AiDialog {
         Self {
             open: false,
             mode: AiMode::Edit,
+            video_settings: Default::default(),
+            video_layer: None,
             denoise: 1.0,
             mask_softness: 0.0,
             lineart_resolution: 512,
@@ -227,6 +234,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             ui.request_repaint();
         }
     }
+    if app.ai.mode == AiMode::Video {
+        super::video_dialog::draw(ui, app);
+        return;
+    }
     let (width, height) = (app.project().width, app.project().height);
     let running = app.ai.job.is_some();
     let cancelling = app.ai.job.as_ref().is_some_and(Job::is_cancelling);
@@ -296,6 +307,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                                     app.ai.draw_settings.validate_redraw(app.ai.denoise).is_ok()
                                         && input_valid(app, width, height)
                                 }
+                                AiMode::Video => false,
                                 AiMode::Edit => {
                                     !app.ai.prompt.trim().is_empty()
                                         && input_valid(app, width, height)
@@ -354,7 +366,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     }
 }
 
-fn choose(ui: &mut Ui, id: &str, selection: &mut Option<String>, names: &[String], default: &str) {
+pub(super) fn choose(ui: &mut Ui, id: &str, selection: &mut Option<String>, names: &[String], default: &str) {
     let mut options = vec![default];
     options.extend(names.iter().map(String::as_str));
     // Preserve a previous selection if a refresh no longer lists that file.

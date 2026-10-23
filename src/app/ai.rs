@@ -1,6 +1,8 @@
 use super::*;
 
 impl EditorApp {
+    pub fn open_ai_video(&mut self) { self.open_ai_mode(AiMode::Video); }
+
     pub fn open_ai(&mut self) {
         self.open_ai_mode(AiMode::Edit);
     }
@@ -42,7 +44,7 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn open_ai_mode(&mut self, mode: AiMode) {
-        if (mode.needs_input() && self.image_size.is_none()) || self.ai.job.is_some() { return; }
+        if (mode != AiMode::Video && mode.needs_input() && self.image_size.is_none()) || self.ai.job.is_some() { return; }
         self.commit_transform();
         self.ai.selection_bounds = self.session.selection.as_ref().and_then(Selection::bounds);
         self.ai.layer_bounds = self.project().active_pixels().and_then(|pixels| pixels.bounds());
@@ -51,10 +53,14 @@ impl EditorApp {
         self.ai.open = true;
         self.ai.preview_view = Default::default();
         self.ai.mode = mode;
+        if mode == AiMode::Video {
+            self.ai.document_id = self.workspace.active_doc().id.clone();
+            self.ai.video_layer = None;
+        }
         if mode == AiMode::Upscale { self.ai.fit_image = false; }
         if mode == AiMode::Inpaint && self.ai.source == AiSource::Selection { self.ai.source = AiSource::Layer; }
         self.ai.catalog_load = None;
-        if mode.uses_sd() { self.ai.catalog = Default::default(); }
+        if mode.uses_sd() || mode == AiMode::Video { self.ai.catalog = Default::default(); }
         self.ai.preview = None;
         self.ai.result = None;
         self.ai.input_region = None;
@@ -62,7 +68,7 @@ impl EditorApp {
         self.ai.fraction = None;
         match crate::comfyui::HostConfig::from_env() {
             Ok(config) => {
-                if mode.uses_sd() {
+                if mode.uses_sd() || mode == AiMode::Video {
                     self.ai.catalog_load = Some(crate::comfyui::CatalogLoad::start(config.clone(), false));
                     self.ai.catalog_message = "Loading models / LoRAs...".into();
                 }
@@ -74,6 +80,7 @@ impl EditorApp {
 
     pub fn start_ai(&mut self) {
         if self.ai.job.is_some() { return; }
+        if self.ai.mode == AiMode::Video { self.start_video(); return; }
         self.ai.preview_view = Default::default();
         let Some(config) = self.ai.config.clone() else { return; };
         if !self.ai.mode.needs_input() {
@@ -156,6 +163,35 @@ impl EditorApp {
         } else {
             crate::comfyui::Job::start(config, image, self.ai.scale, self.ai.prompt.clone())
         });
+    }
+
+    fn start_video(&mut self) {
+        let Some(config) = self.ai.config.clone() else { return; };
+        if let Err(error) = self.ai.video_settings.validate() { self.ai.message = error; return; }
+        let image = match self.video_input() {
+            Ok(image) => image,
+            Err(error) => { self.ai.message = error; return; }
+        };
+        self.ai.message = "Preparing video input…".into();
+        self.ai.fraction = None;
+        self.ai.preview = None;
+        self.ai.preview_dirty = false;
+        self.ai.job = Some(crate::comfyui::Job::start_video(config, image, self.ai.video_settings.clone()));
+    }
+
+    pub(in crate::app) fn video_input(&mut self) -> Result<image::RgbaImage, String> {
+        let index = self.workspace.documents.iter().position(|d| d.id == self.ai.document_id)
+            .ok_or("Choose a source document")?;
+        self.workspace.ensure_document_loaded(index)?;
+        let p = &self.workspace.documents[index].project;
+        crate::comfyui::scaled_size(p.width, p.height, 1.0)?;
+        let pixels = if let Some(layer) = self.ai.video_layer {
+            let layer = p.layers.get(layer).ok_or("Choose a source layer")?;
+            layer.pixels.region(0, 0, p.width, p.height)
+        } else {
+            crate::editing::composite_layers(&p.layers, p.width, p.height)
+        };
+        image::RgbaImage::from_raw(p.width, p.height, pixels).ok_or("Invalid video input".into())
     }
 
     pub(in crate::app) fn ai_mask(&self) -> Result<image::RgbaImage, String> {
@@ -309,6 +345,17 @@ impl EditorApp {
                 self.ai.preview_dirty = true;
                 self.ai.fraction = None;
                 self.ai.result = Some(image);
+            }
+            crate::comfyui::JobResult::Video(bytes) => {
+                self.ai.fraction = None;
+                match self.workspace.add_video(bytes) {
+                    Ok(index) => {
+                        self.dirty = true;
+                        self.status = format!("Video saved: videos/{}", self.workspace.videos[index].name);
+                        self.ai.message = self.status.clone();
+                    }
+                    Err(error) => { self.ai.message = error.clone(); self.status = error.clone(); ui.notify_error(&error); }
+                }
             }
             crate::comfyui::JobResult::Failed(error) => {
                 self.ai.message = error.clone();

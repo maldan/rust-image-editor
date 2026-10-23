@@ -14,6 +14,8 @@ pub struct LibraryAction {
     pub place_asset: Option<usize>,
     pub delete_asset: Option<usize>,
     pub preview_asset: Option<usize>,
+    pub open_video: Option<usize>,
+    pub delete_video: Option<usize>,
 }
 
 pub fn draw(ui: &mut Ui, workspace: &mut Workspace, input: &FrameInput, canvas: Rect) -> LibraryAction {
@@ -87,6 +89,23 @@ pub fn draw(ui: &mut Ui, workspace: &mut Workspace, input: &FrameInput, canvas: 
             }
             if let Some((index, origin)) = start_drag {
                 workspace.begin_asset_drag(index, origin);
+            }
+        });
+
+        ui.tree_node_icon_open("videos_root", "folder", "videos", true, |ui| {
+            for (index, video) in workspace.videos.iter().enumerate() {
+                let id = format!("video_{}", video.id);
+                let selected = workspace.tree_selected.as_deref() == Some(id.as_str());
+                let mut thumb_release = false;
+                let clicked = item_row(ui, &id, selected, &video.name, &format_bytes(video.byte_size), meta_style, 28.0, |ui| {
+                    let thumb = ui.area(&format!("video_thumb_{index}"), Vec2::splat(thumb_size));
+                    draw_thumb(ui, workspace, asset_count + workspace.documents.len() + index, thumb.rect);
+                    if video.thumb.is_empty() { ui.text_at(thumb.rect.min + Vec2::new(8.0, 28.0), "Video"); }
+                    if thumb.active && input.mouse_released { thumb_release = true; }
+                }, |ui| {
+                    if ui.icon_button(&format!("video_delete_{index}"), "delete", false) { action.delete_video = Some(index); }
+                });
+                if clicked || thumb_release { pick = Some(id); action.open_video = Some(index); }
             }
         });
 

@@ -1,11 +1,13 @@
 //! Editor chrome: menus, dock tabs, status bar.
 
 pub mod ai_dialog;
+mod video_dialog;
 pub mod hsv_dialog;
 mod assets_panel;
 mod canvas;
 mod menu_bar;
 mod project_panel;
+mod asset_properties;
 mod tool_options;
 mod tools_panel;
 
@@ -35,6 +37,17 @@ pub fn default_dock() -> DockState {
     ))
 }
 
+fn context_panel(node: &mut DockNode, preview: bool) {
+    match node {
+        DockNode::Leaf { tabs, .. } => {
+            for tab in tabs {
+                if tab == "Layers" || tab == "Properties" { *tab = if preview { "Properties" } else { "Layers" }.into(); }
+            }
+        }
+        DockNode::Split { first, second, .. } => { context_panel(first, preview); context_panel(second, preview); }
+    }
+}
+
 pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     let scale = ui.scale();
     let menu_h = 28.0 * scale;
@@ -48,6 +61,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
 
         let dock_size = Vec2::new(viewport.x, (viewport.y - menu_h - status_h).max(1.0));
         let mut dock = std::mem::replace(&mut app.dock, DockState::new(DockNode::leaf(&["tmp"])));
+        let preview = app.session.preview_asset.is_some();
+        context_panel(&mut dock.root, preview);
         ui.dock_space("main", dock_size, &mut dock, |ui, tab| {
             if tab == "Canvas" {
                 canvas::draw(ui, app);
@@ -71,11 +86,15 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                     let action = assets_panel::draw(ui, &mut app.workspace, &app.input, app.session.canvas_rect);
                     apply_library(ui, app, action);
                 }
-                "Layers" => project_panel::draw(ui, app),
+                "Layers" | "Properties" => {
+                    if app.session.preview_asset.is_some() { asset_properties::draw(ui, app); }
+                    else { project_panel::draw(ui, app); }
+                }
                 _ => {}
             });
         });
         app.dock = dock;
+        if preview != app.session.preview_asset.is_some() { ui.request_repaint(); }
 
         ui.status_bar(|ui| {
             ui.label(&app.status.clone());
@@ -99,6 +118,12 @@ fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
     if let Some(index) = action.switch_doc {
         app.switch_document(index);
     }
+    if let Some(index) = action.open_video { app.show_video_preview(index); }
+    if let Some(index) = action.delete_video {
+        if app.session.preview_asset.as_ref() == app.workspace.videos.get(index).map(|v| &v.id) { app.close_asset_preview(); }
+        app.workspace.delete_video(index);
+        app.dirty = true;
+    }
     if let Some(index) = action.preview_asset {
         app.show_asset_preview(index);
     }
@@ -117,5 +142,27 @@ fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
         }
         app.workspace.delete_asset(index);
         app.dirty = true;
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    #[test]
+    fn context_panel_switches_titles_without_rebuilding_the_dock() {
+        let mut dock = default_dock();
+        fn tabs(node: &DockNode) -> Vec<String> {
+            match node { DockNode::Leaf { tabs, .. } => tabs.clone(),
+                DockNode::Split { first, second, .. } => { let mut all = tabs(first); all.extend(tabs(second)); all } }
+        }
+        let original = tabs(&dock.root);
+        context_panel(&mut dock.root, true);
+        let preview = tabs(&dock.root);
+        assert!(!preview.iter().any(|tab| tab == "Layers"));
+        assert_eq!(preview.iter().filter(|tab| *tab == "Properties").count(), 1);
+        if let DockNode::Split { ratio, .. } = &mut dock.root { *ratio = 0.27; }
+        context_panel(&mut dock.root, false);
+        assert_eq!(tabs(&dock.root), original);
+        if let DockNode::Split { ratio, .. } = &dock.root { assert_eq!(*ratio, 0.27); }
     }
 }

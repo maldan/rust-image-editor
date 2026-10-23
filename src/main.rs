@@ -11,6 +11,7 @@ mod safe_save;
 mod tiles;
 mod ui;
 mod view;
+mod video;
 mod workspace;
 
 use app::EditorApp;

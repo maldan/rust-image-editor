@@ -154,6 +154,22 @@ impl CanvasRenderer {
         }
     }
 
+    /// A decoded video frame changes every pixel. Keep the texture and upload in one write.
+    pub fn upload_video_frame(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &image::RgbaImage) {
+        let (width, height) = frame.dimensions();
+        self.ensure_layers(device, 1, width, height);
+        let layer = self.layers[0].as_ref().unwrap();
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &layer.texture, mip_level: 0, origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            frame.as_raw(),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(height) },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+    }
+
     pub fn upload_all_layers(
         &mut self,
         device: &wgpu::Device,

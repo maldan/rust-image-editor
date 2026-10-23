@@ -76,6 +76,11 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     });
 
     ui.menu("ai", "AI", |ui| {
+        ui.menu("video", "Video", |ui| {
+            if ui.menu_item("ltx_i2v", "Ltx 2.3 I2V...").clicked() {
+                app.open_ai_video();
+            }
+        });
         ui.menu("anime", "Anime", |ui| {
             if ui.menu_item("anime_draw", "Draw...").clicked() {
                 app.open_ai_anime_draw();
