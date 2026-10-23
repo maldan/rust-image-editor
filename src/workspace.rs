@@ -1427,9 +1427,12 @@ fn check_manifest(manifest: &WorkspaceManifest) -> Result<(), String> {
                 return Err("Document type does not match its contents".into());
             }
             if let Some(animation) = &doc.animation {
+                let (play_start, play_end) = animation.playback_range();
                 if !(1..=120).contains(&animation.fps)
                     || animation.length == 0
                     || animation.frame >= animation.length
+                    || play_start > play_end
+                    || play_end >= animation.length
                     || doc.layers.iter().any(|l| l.timeline.is_none())
                 {
                     return Err("Invalid animation settings".into());
@@ -1485,11 +1488,7 @@ mod tests {
         let mut workspace = Workspace::default();
         let project = workspace.active_mut();
         project.resize_canvas(8, 8).unwrap();
-        project.animation = Some(crate::project::Animation {
-            fps: 12,
-            length: 24,
-            frame: 0,
-        });
+        project.animation = Some(crate::project::Animation::new(12, 24));
         project.layers[0].pixels.write(0, 0, 0, [10, 0, 0, 255]);
         project.seek(7);
         project.new_drawing(true);

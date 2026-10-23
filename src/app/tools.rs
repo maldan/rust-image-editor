@@ -82,6 +82,7 @@ impl EditorApp {
             Tool::Fill => self.handle_fill(view),
             Tool::Brush => self.handle_brush(view, self.session.erase_mode),
             Tool::Transform => self.handle_transform(view),
+            Tool::Deform => self.handle_deformation(view),
         }
     }
 

@@ -18,6 +18,7 @@ struct TileSnapshot {
 #[derive(Clone)]
 pub struct HistoryEdit {
     pub layer: usize,
+    frame: Option<u32>,
     offset_before: (i32, i32),
     offset_after: (i32, i32),
     before: Vec<TileSnapshot>,
@@ -64,6 +65,7 @@ impl HistoryEdit {
             return None;
         }
         Some(Self {
+            frame: None,
             layer,
             offset_before: before.offset,
             offset_after: after.offset,
@@ -144,6 +146,7 @@ impl EditCapture {
             return None;
         }
         Some(HistoryEdit {
+            frame: None,
             layer: self.layer,
             offset_before: self.offset,
             offset_after: pixels.offset,
@@ -167,12 +170,14 @@ enum HistoryEntry {
     },
     Pixels(HistoryEdit),
     MergeDown {
+        frame: Option<u32>,
         index: usize,
         lower: Layer,
         upper: Layer,
         merged: Layer,
     },
     InsertLayer {
+        frame: Option<u32>,
         index: usize,
         inserted: Option<Layer>,
         active_before: usize,
@@ -180,6 +185,7 @@ enum HistoryEntry {
         size_after: (u32, u32),
     },
     DeleteLayer {
+        frame: Option<u32>,
         index: usize,
         // Ownership moves between the document and history on Undo / Redo.
         removed: Option<Layer>,
@@ -188,6 +194,7 @@ enum HistoryEntry {
         width: u32,
         height: u32,
     },
+    TimelineShift(crate::project::TimelineShift),
     /// The document itself moves between the workspace and this entry.
     DeleteDocument {
         index: usize,
@@ -213,7 +220,19 @@ pub struct History {
 }
 
 impl History {
+    /// Bind newly recorded pixel edits before navigation changes the editable drawing.
+    /// Both stacks need binding: a seek must preserve a pending Redo as well as Undo.
+    pub fn bind_animation_edits(&mut self, project: &Project) {
+        let Some(animation) = &project.animation else { return; };
+        for entry in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            if let HistoryEntry::Pixels(edit) = entry {
+                edit.frame.get_or_insert(animation.frame);
+            }
+        }
+    }
+
     pub fn change_drawing(&mut self, project: &mut Project, duplicate: Option<bool>) -> bool {
+        self.bind_animation_edits(project);
         let Some(animation) = &project.animation else {
             return false;
         };
@@ -239,6 +258,15 @@ impl History {
             before,
             after,
         });
+        true
+    }
+
+    pub fn resize_drawing(&mut self, project: &mut Project, longer: bool) -> bool {
+        self.bind_animation_edits(project);
+        let Some(shift) = project.resize_held_drawing(longer) else {
+            return false;
+        };
+        self.push_entry(HistoryEntry::TimelineShift(shift));
         true
     }
 
@@ -421,6 +449,7 @@ impl History {
         project.layers.push(layer);
         project.active_layer = index;
         self.push_entry(HistoryEntry::InsertLayer {
+            frame: project.animation.as_ref().map(|a| a.frame),
             index,
             inserted: None,
             active_before,
@@ -449,6 +478,7 @@ impl History {
         project.layers.remove(index);
         project.active_layer = index - 1;
         self.push_entry(HistoryEntry::MergeDown {
+            frame: project.animation.as_ref().map(|a| a.frame),
             index,
             lower,
             upper,
@@ -463,6 +493,7 @@ impl History {
             return false;
         };
         self.push_entry(HistoryEntry::DeleteLayer {
+            frame: project.animation.as_ref().map(|a| a.frame),
             index,
             removed: Some(layer),
             active_before,
@@ -474,7 +505,10 @@ impl History {
     }
 
     pub fn undo(&mut self, project: &mut Project) -> Option<HistoryChange> {
-        let change = match self.undo.last_mut()? {
+        self.bind_animation_edits(project);
+        let entry = self.undo.last_mut()?;
+        seek_layer_edit_frame(project, entry)?;
+        let change = match entry {
             HistoryEntry::Drawing {
                 layer,
                 frame,
@@ -521,14 +555,18 @@ impl History {
                 HistoryChange::Layers
             }
             HistoryEntry::Pixels(edit) => {
-                let pixels = &mut project.layers.get_mut(edit.layer)?.pixels;
-                let rect = apply_edit(pixels, project.width, project.height, edit, false)?;
-                HistoryChange::Pixels {
-                    layer: edit.layer,
-                    rect,
-                }
+                restore_pixel_edit(project, edit, false)?
             }
             HistoryEntry::DeleteDocument { .. } => return None,
+            HistoryEntry::TimelineShift(shift) => {
+                project.restore_timeline(
+                    &shift.before,
+                    shift.length_before,
+                    shift.frame_before,
+                    shift.play_before,
+                )?;
+                HistoryChange::Layers
+            }
             HistoryEntry::DeleteLayer {
                 index,
                 removed,
@@ -552,7 +590,10 @@ impl History {
     }
 
     pub fn redo(&mut self, project: &mut Project) -> Option<HistoryChange> {
-        let change = match self.redo.last_mut()? {
+        self.bind_animation_edits(project);
+        let entry = self.redo.last_mut()?;
+        seek_layer_edit_frame(project, entry)?;
+        let change = match entry {
             HistoryEntry::Drawing {
                 layer,
                 frame,
@@ -594,14 +635,18 @@ impl History {
                 HistoryChange::Layers
             }
             HistoryEntry::Pixels(edit) => {
-                let pixels = &mut project.layers.get_mut(edit.layer)?.pixels;
-                let rect = apply_edit(pixels, project.width, project.height, edit, true)?;
-                HistoryChange::Pixels {
-                    layer: edit.layer,
-                    rect,
-                }
+                restore_pixel_edit(project, edit, true)?
             }
             HistoryEntry::DeleteDocument { .. } => return None,
+            HistoryEntry::TimelineShift(shift) => {
+                project.restore_timeline(
+                    &shift.after,
+                    shift.length_after,
+                    shift.frame_after,
+                    shift.play_after,
+                )?;
+                HistoryChange::Layers
+            }
             HistoryEntry::DeleteLayer {
                 index,
                 removed,
@@ -624,6 +669,39 @@ impl History {
     pub fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
+    }
+}
+
+/// Layer snapshots contain the editable drawing from their operation's frame.
+fn seek_layer_edit_frame(project: &mut Project, entry: &HistoryEntry) -> Option<()> {
+    let frame = match entry {
+        HistoryEntry::MergeDown { frame, .. }
+        | HistoryEntry::InsertLayer { frame, .. }
+        | HistoryEntry::DeleteLayer { frame, .. } => *frame,
+        _ => None,
+    };
+    if let Some(frame) = frame {
+        if frame >= project.animation.as_ref()?.length { return None; }
+        project.seek(frame);
+    }
+    Some(())
+}
+
+fn restore_pixel_edit(project: &mut Project, edit: &HistoryEdit, redo: bool) -> Option<HistoryChange> {
+    project.layers.get(edit.layer)?;
+    if let Some(frame) = edit.frame {
+        if frame >= project.animation.as_ref()?.length { return None; }
+        project.seek(frame);
+    }
+    let pixels = &mut project.layers.get_mut(edit.layer)?.pixels;
+    let rect = apply_edit(pixels, project.width, project.height, edit, redo)?;
+    if edit.frame.is_some() {
+        project.flush_drawings();
+        project.active_layer = edit.layer;
+        // A seek can change every layer, so upload the complete frame.
+        Some(HistoryChange::Layers)
+    } else {
+        Some(HistoryChange::Pixels { layer: edit.layer, rect })
     }
 }
 

@@ -30,6 +30,7 @@ pub(crate) use rename::RenameTarget;
 mod scene;
 mod session;
 mod tools;
+mod deform;
 mod transform;
 
 pub use session::DocumentSession;
@@ -63,6 +64,7 @@ pub struct EditorApp {
     pub dock: DockState,
     brush_last: Option<(f32, f32)>,
     brush_dirty: bool,
+    deformation: Option<deform::DeformStroke>,
     stroke_marks: Vec<u32>,
     soft_brush_coverage: SoftBrushCoverage,
     stroke_id: u32,
@@ -97,6 +99,7 @@ impl Default for EditorApp {
             dock: ui::default_dock(),
             brush_last: None,
             brush_dirty: false,
+            deformation: None,
             stroke_marks: Vec::new(),
             soft_brush_coverage: SoftBrushCoverage::default(),
             stroke_id: 1,
@@ -165,7 +168,8 @@ impl EditorApp {
     }
 
     pub fn brush_last_active(&self) -> bool {
-        self.brush_last.is_some()
+        self.deformation.is_some()
+            || self.brush_last.is_some()
             || self.session.transform_drag.is_some()
             || !self.session.lasso_points.is_empty()
             || self.session.selection_brush_last.is_some()
@@ -311,6 +315,7 @@ impl EditorApp {
         if self.session.tool == Tool::Transform && tool != Tool::Transform {
             self.commit_transform();
         }
+        self.finish_deformation(false);
         self.commit_selection_drag();
         self.session.lasso_points.clear();
         self.session.selection_brush_last = None;

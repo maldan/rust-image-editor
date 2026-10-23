@@ -64,6 +64,7 @@ impl EditorApp {
     }
 
     pub fn cancel_transform(&mut self) {
+        self.finish_deformation(true);
         if self.session.floating.take().is_none() {
             self.session.transform_drag = None;
             self.session.transform_last = None;
@@ -77,6 +78,7 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn commit_transform(&mut self) {
+        self.finish_deformation(false);
         let Some(floating) = self.session.floating.take() else {
             self.session.transform_drag = None;
             self.session.transform_last = None;

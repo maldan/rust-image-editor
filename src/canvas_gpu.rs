@@ -8,6 +8,7 @@ use crate::tiles::DirtyTiles;
 use crate::view::CanvasView;
 
 mod layers;
+mod deform;
 mod pipelines;
 mod render;
 mod transform;
@@ -98,6 +99,7 @@ pub struct LayerDraw {
 
 #[derive(Clone, Default)]
 pub struct CanvasOverlay {
+    pub deformation: Option<usize>,
     pub hsv: Option<(usize, crate::hsv::HsvAdjustment)>,
     pub brush_center: Option<Vec2>,
     pub brush_radius: f32,
@@ -133,7 +135,23 @@ struct LayerGpu {
     size: (u32, u32),
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct DeformVertex { position: [f32; 2], source: [f32; 2] }
+
+struct DeformGpu {
+    pipeline: wgpu::RenderPipeline,
+    base_pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    vertices: wgpu::Buffer,
+    uniform: wgpu::Buffer,
+    bind: Option<wgpu::BindGroup>,
+    count: u32,
+    layer: Option<usize>,
+}
+
 pub struct CanvasRenderer {
+    deform: DeformGpu,
     checker_pipeline: wgpu::RenderPipeline,
     layer_pipeline: wgpu::RenderPipeline,
     float_pipeline: wgpu::RenderPipeline,
@@ -1146,6 +1164,153 @@ mod gpu_tests {
             assert_eq!(
                 &data[offset..offset + 4],
                 if upper_opacity == 1.0 {
+                    &[0, 0, 255, 255]
+                } else {
+                    &[255, 0, 0, 255]
+                }
+            );
+            drop(data);
+            output.unmap();
+        }
+    }
+    #[test]
+    #[ignore = "requires a GPU adapter; run explicitly for renderer changes"]
+    fn deformation_gpu_preview_respects_selection_and_layer_order() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            apply_limit_buckets: false,
+        }))
+        .unwrap();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let mut renderer = CanvasRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let bytes: Vec<u8> = (0..64).flat_map(|_| (0..64).flat_map(|x| if x < 32 { [255,0,0,255] } else { [0,0,255,255] })).collect();
+        let red = SparsePixels::from_rgba(&bytes,64,64);
+        let mut mesh = crate::editing::deform::DeformMesh::new(64,64,16);
+        mesh.dab(Vec2::splat(32.0),Vec2::new(8.0,0.0),24.0,1.0,1.0,0);
+        let blue = SparsePixels::from_rgba(&[0, 0, 255, 255].repeat(64 * 64), 64, 64);
+        renderer.upload_sparse_layers(&device, &queue, &[&red, &blue], 64, 64);
+        let mut dirty = DirtyTiles::default();
+        dirty.resize(64, 64);
+        renderer.upload_layer_dirty(&device, &queue, 0, &red, 64, 64, &mut dirty);
+        assert_eq!(
+            renderer.layers.len(),
+            2,
+            "dirty upload must retain higher layers"
+        );
+
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let output = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 64 * 64 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let view = target.create_view(&Default::default());
+        // Upper blue layer must cover the deformed lower layer.
+        for (upper_opacity, selected) in [(1.0,true),(0.0,true),(0.0,false)] {
+            let mask = vec![if selected {255} else {0};64*64];
+            renderer.set_selection_mask(&device,&queue,Some(&mask),64,64);
+            renderer.sync_deformation(&device,&queue,Some((&mesh,0)));
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                renderer.render(
+                    &queue,
+                    &mut pass,
+                    Vec2::splat(64.0),
+                    Rect {
+                        min: Vec2::ZERO,
+                        max: Vec2::splat(64.0),
+                    },
+                    CanvasView {
+                        center: Vec2::splat(32.0),
+                        zoom: 1.0,
+                        rotation: 0.0,
+                        width: 64,
+                        height: 64,
+                    },
+                    CanvasOverlay {
+                        deformation: Some(0),
+                        layers: vec![
+                            LayerDraw {
+                                visible: true,
+                                opacity: 1.0,
+                            },
+                            LayerDraw {
+                                visible: true,
+                                opacity: upper_opacity,
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                    0.0,
+                );
+            }
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &target,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &output,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(64),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: 64,
+                    height: 64,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit([encoder.finish()]);
+            let (tx, rx) = std::sync::mpsc::channel();
+            output.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                tx.send(r).unwrap();
+            });
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            rx.recv().unwrap().unwrap();
+            let data = output.slice(..).get_mapped_range().unwrap();
+            let offset = (32 * 64 + 32) * 4;
+            assert_eq!(
+                &data[offset..offset + 4],
+                if upper_opacity == 1.0 || !selected {
                     &[0, 0, 255, 255]
                 } else {
                     &[255, 0, 0, 255]

@@ -1164,7 +1164,7 @@ fn fit_uses_unscaled_input_bounds_and_can_be_disabled() {
 }
 
 #[test]
-fn accept_without_new_layer_composites_onto_the_active_layer_and_undoes() {
+fn accept_without_new_layer_overwrites_the_active_layer_and_undoes() {
     use crate::raster::Raster;
     let mut app = EditorApp::default();
     app.project_mut()
@@ -1188,10 +1188,14 @@ fn accept_without_new_layer_composites_onto_the_active_layer_and_undoes() {
         }
         .into(),
     );
-    app.ai.result = Some(image::RgbaImage::from_fn(2, 1, |x, _| {
-        image::Rgba(if x == 0 { [9, 9, 9, 255] } else { [0, 0, 0, 0] })
+    app.ai.result = Some(image::RgbaImage::from_fn(3, 1, |x, _| {
+        image::Rgba(match x {
+            0 => [9, 9, 9, 255],
+            1 => [0, 0, 0, 0],
+            _ => [8, 8, 8, 64],
+        })
     }));
-    let untouched = app.project().layers[0].pixels.read(0, 1, 0);
+    let outside = app.project().layers[0].pixels.read(0, 3, 0);
     app.accept_ai();
     assert_eq!(app.project().layers.len(), 2);
     assert_eq!(app.project().active_layer, 0);
@@ -1199,7 +1203,12 @@ fn accept_without_new_layer_composites_onto_the_active_layer_and_undoes() {
         app.project().layers[0].pixels.read(0, 0, 0),
         [9, 9, 9, 255]
     );
-    assert_eq!(app.project().layers[0].pixels.read(0, 1, 0), untouched);
+    assert_eq!(app.project().layers[0].pixels.read(0, 1, 0), [0, 0, 0, 0]);
+    assert_eq!(
+        app.project().layers[0].pixels.read(0, 2, 0),
+        [8, 8, 8, 64]
+    );
+    assert_eq!(app.project().layers[0].pixels.read(0, 3, 0), outside);
     assert_eq!(
         app.project().layers[1].pixels.read(0, 3, 0),
         [7, 7, 7, 255]

@@ -149,7 +149,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                 .unwrap_or(0);
             let length = (length.round().clamp(1.0, 1200.0) as u32).max(last + 1);
             app.seek_animation(animation.frame.min(length - 1));
-            app.project_mut().animation.as_mut().unwrap().length = length;
+            let animation = app.project_mut().animation.as_mut().unwrap();
+            animation.length = length;
+            animation.clamp_playback();
             app.dirty = true;
         }
         ui.label(&format!(
@@ -171,7 +173,50 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             if ui.button("anim_layer", "+ Layer").clicked() {
                 app.add_layer();
             }
+            let hold = app.project().held_length();
+            let at_limit = app
+                .project()
+                .animation
+                .as_ref()
+                .is_some_and(|animation| animation.length >= 1200);
+            ui.add_enabled(hold > 1, |ui| {
+                if ui.button("anim_shorter", "Shorter").clicked() {
+                    app.resize_animation_frame(false);
+                }
+            });
+            ui.add_enabled(!at_limit, |ui| {
+                if ui.button("anim_longer", "Longer").clicked() {
+                    app.resize_animation_frame(true);
+                }
+            });
+            ui.label(&format!("Hold {}", app.project().held_length()));
         });
+    });
+    let animation = app.project().animation.clone().unwrap();
+    let (loop_from, loop_to) = animation.playback_range();
+    ui.horizontal(|ui| {
+        ui.label("Loop");
+        let mut from = (loop_from + 1) as f32;
+        if ui.drag_float("anim_loop_from", &mut from, 1.0).changed() {
+            let end = app
+                .project()
+                .animation
+                .as_ref()
+                .map(|animation| animation.playback_range().1)
+                .unwrap_or(loop_to);
+            app.set_animation_loop_start(from.round().clamp(1.0, (end + 1) as f32) as u32 - 1);
+        }
+        ui.label("to");
+        let mut to = (loop_to + 1) as f32;
+        if ui.drag_float("anim_loop_to", &mut to, 1.0).changed() {
+            let length = app
+                .project()
+                .animation
+                .as_ref()
+                .map(|animation| animation.length)
+                .unwrap_or(animation.length);
+            app.set_animation_loop_end(to.round().clamp(1.0, length as f32) as u32 - 1);
+        }
     });
     let scale = ui.scale();
     let size = ui.available_size().max(Vec2::splat(1.0));

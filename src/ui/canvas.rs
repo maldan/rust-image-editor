@@ -49,6 +49,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         }
         if app.session.preview_asset.is_none() {
             app.draw_lasso_path(ui, view);
+            app.draw_deformation(ui, view);
         }
         // Marching ants advance with frame time. The brush ring does not.
         if app.session.preview_asset.is_none() && app.session.selection.is_some() {

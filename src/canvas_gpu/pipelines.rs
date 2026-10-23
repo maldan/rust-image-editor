@@ -293,6 +293,7 @@ impl CanvasRenderer {
         });
 
         Self {
+            deform: DeformGpu::new(device, format),
             checker_pipeline,
             layer_pipeline,
             float_pipeline,

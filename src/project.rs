@@ -30,6 +30,73 @@ pub struct Animation {
     pub fps: u32,
     pub length: u32,
     pub frame: u32,
+    /// Inclusive playback start. Older projects omit it and begin at the first frame.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub play_start: u32,
+    /// Inclusive playback end. `u32::MAX` follows the last frame until the user sets it.
+    #[serde(default = "playback_follows_end", skip_serializing_if = "playback_is_open")]
+    pub play_end: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+fn playback_follows_end() -> u32 {
+    u32::MAX
+}
+
+fn playback_is_open(value: &u32) -> bool {
+    *value == u32::MAX
+}
+
+/// One inserted or removed timeline frame, shared by every layer.
+#[derive(Clone)]
+pub(crate) struct TimelineShift {
+    pub frame_before: u32,
+    pub frame_after: u32,
+    pub length_before: u32,
+    pub length_after: u32,
+    pub play_before: (u32, u32),
+    pub play_after: (u32, u32),
+    pub before: Vec<BTreeMap<u32, SparsePixels>>,
+    pub after: Vec<BTreeMap<u32, SparsePixels>>,
+}
+
+impl Animation {
+    pub fn new(fps: u32, length: u32) -> Self {
+        Self {
+            fps,
+            length,
+            frame: 0,
+            play_start: 0,
+            play_end: u32::MAX,
+        }
+    }
+
+    /// Inclusive frame range used by Play. An unset end stays on the last frame.
+    pub fn playback_range(&self) -> (u32, u32) {
+        let last = self.length.saturating_sub(1);
+        let end = if self.play_end >= self.length {
+            last
+        } else {
+            self.play_end
+        };
+        (self.play_start.min(end), end)
+    }
+
+    pub fn clamp_playback(&mut self) {
+        if self.length == 0 {
+            return;
+        }
+        let last = self.length - 1;
+        if self.play_end != u32::MAX {
+            self.play_end = self.play_end.min(last);
+            self.play_start = self.play_start.min(self.play_end);
+        } else {
+            self.play_start = self.play_start.min(last);
+        }
+    }
 }
 
 impl Project {
@@ -97,6 +164,157 @@ impl Project {
             .next_back()
             .map(|(_, pixels)| pixels.clone())
             .unwrap_or_default();
+    }
+
+    /// Frames the active layer's current drawing holds, including its key.
+    pub fn held_length(&self) -> u32 {
+        let Some((start, end)) = self.held_span() else {
+            return 1;
+        };
+        end.saturating_sub(start).max(1)
+    }
+
+    fn held_span(&self) -> Option<(u32, u32)> {
+        let animation = self.animation.as_ref()?;
+        let layer = self.layers.get(self.active_layer)?;
+        let start = layer
+            .drawings
+            .range(..=animation.frame)
+            .next_back()
+            .map(|(&key, _)| key)
+            .unwrap_or(0);
+        let end = layer
+            .drawings
+            .range((start + 1)..)
+            .next()
+            .map(|(&key, _)| key)
+            .unwrap_or(animation.length);
+        Some((start, end))
+    }
+
+    /// Grow or shrink the active drawing by one frame. Later keys on every layer move with it.
+    pub(crate) fn resize_held_drawing(&mut self, longer: bool) -> Option<TimelineShift> {
+        let animation = self.animation.clone()?;
+        if self.layers.get(self.active_layer).is_none() {
+            return None;
+        }
+        self.flush_drawings();
+        let (_start, end) = self.held_span()?;
+        let duration = end.saturating_sub(_start);
+        if longer {
+            if animation.length >= 1200 {
+                return None;
+            }
+        } else if duration <= 1 {
+            return None;
+        }
+        let at = end;
+        let delta = if longer { 1 } else { -1 };
+        let frame_after = if longer {
+            if animation.frame >= at {
+                animation.frame + 1
+            } else {
+                animation.frame
+            }
+        } else if animation.frame + 1 == end {
+            animation.frame.saturating_sub(1)
+        } else if animation.frame >= end {
+            animation.frame - 1
+        } else {
+            animation.frame
+        };
+        let length_after = if longer {
+            animation.length + 1
+        } else {
+            animation.length - 1
+        };
+        let play_before = (animation.play_start, animation.play_end);
+        let frame_before = animation.frame;
+        let length_before = animation.length;
+        let before = self.drawing_maps();
+        self.shift_drawing_keys(at, delta);
+        let animation = self.animation.as_mut()?;
+        animation.length = length_after;
+        animation.frame = frame_after;
+        animation.clamp_playback();
+        let play_after = (animation.play_start, animation.play_end);
+        self.load_drawing_pixels();
+        Some(TimelineShift {
+            frame_before,
+            frame_after,
+            length_before,
+            length_after,
+            play_before,
+            play_after,
+            before,
+            after: self.drawing_maps(),
+        })
+    }
+
+    pub(crate) fn restore_timeline(
+        &mut self,
+        drawings: &[BTreeMap<u32, SparsePixels>],
+        length: u32,
+        frame: u32,
+        play: (u32, u32),
+    ) -> Option<()> {
+        if self.animation.is_none()
+            || drawings.len() != self.layers.len()
+            || length == 0
+            || frame >= length
+        {
+            return None;
+        }
+        for (layer, drawings) in self.layers.iter_mut().zip(drawings) {
+            layer.drawings = drawings.clone();
+        }
+        let animation = self.animation.as_mut()?;
+        animation.length = length;
+        animation.frame = frame;
+        animation.play_start = play.0;
+        animation.play_end = play.1;
+        self.load_drawing_pixels();
+        Some(())
+    }
+
+    fn drawing_maps(&self) -> Vec<BTreeMap<u32, SparsePixels>> {
+        self.layers
+            .iter()
+            .map(|layer| layer.drawings.clone())
+            .collect()
+    }
+
+    fn shift_drawing_keys(&mut self, at: u32, delta: i32) {
+        if delta == 0 {
+            return;
+        }
+        for layer in &mut self.layers {
+            let existing = std::mem::take(&mut layer.drawings);
+            let mut shifted = BTreeMap::new();
+            for (key, pixels) in existing {
+                let key = if key >= at {
+                    u32::try_from(i64::from(key) + i64::from(delta)).unwrap_or(key)
+                } else {
+                    key
+                };
+                shifted.insert(key, pixels);
+            }
+            layer.drawings = shifted;
+        }
+    }
+
+    fn load_drawing_pixels(&mut self) {
+        let Some(frame) = self.animation.as_ref().map(|animation| animation.frame) else {
+            return;
+        };
+        for layer in &mut self.layers {
+            layer.pixels = layer
+                .drawings
+                .range(..=frame)
+                .next_back()
+                .map(|(_, pixels)| pixels.clone())
+                .unwrap_or_default();
+        }
     }
 
     pub fn import_png(&mut self, path: &Path) -> Result<(), String> {
@@ -185,7 +403,8 @@ impl Project {
         Ok(())
     }
 
-    /// Alpha-composite the result onto the active layer. Transparent source pixels leave the layer unchanged.
+    /// Replace active-layer pixels with the result. Source alpha overwrites the destination,
+    /// including fully transparent pixels.
     pub fn composite_onto_active_layer(
         &mut self,
         image: &image::RgbaImage,
@@ -222,38 +441,14 @@ impl Project {
         let target = &mut self.layers[self.active_layer].pixels;
         for (y, row) in image.rows().enumerate() {
             for (x, pixel) in row.enumerate() {
-                if pixel[3] == 0 {
-                    continue;
-                }
                 let dx = region.min_x + x as i32;
                 let dy = region.min_y + y as i32;
-                let mut dst = target.read(0, dx, dy);
-                Self::composite_over(&mut dst, &pixel.0);
-                target.write(0, dx, dy, dst);
+                target.write(0, dx, dy, pixel.0);
             }
         }
         target.prune();
         Ok(())
     }
-
-fn composite_over(dst: &mut [u8; 4], src: &[u8; 4]) {
-    let src_a = src[3] as f32 / 255.0;
-    if src_a <= f32::EPSILON {
-        return;
-    }
-    let dst_a = dst[3] as f32 / 255.0;
-    let out_a = src_a + dst_a * (1.0 - src_a);
-    if out_a <= f32::EPSILON {
-        *dst = [0; 4];
-        return;
-    }
-    for channel in 0..3 {
-        let blended = (src[channel] as f32 * src_a + dst[channel] as f32 * dst_a * (1.0 - src_a))
-            / out_a;
-        dst[channel] = blended.round().clamp(0.0, 255.0) as u8;
-    }
-    dst[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
-}
 
     /// Resize the document frame without changing any layer pixels.
     pub fn resize_canvas(&mut self, width: u32, height: u32) -> Result<(), String> {
@@ -419,11 +614,7 @@ mod tests {
         use crate::raster::Raster;
         let mut project = Project::default();
         project.resize_canvas(8, 8).unwrap();
-        project.animation = Some(Animation {
-            fps: 12,
-            length: 24,
-            frame: 0,
-        });
+        project.animation = Some(Animation::new(12, 24));
         project.layers[0].pixels.write(0, 0, 0, [10, 0, 0, 255]);
         project.add_layer();
         project.layers[1].pixels.write(0, 1, 0, [20, 0, 0, 255]);

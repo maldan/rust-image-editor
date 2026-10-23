@@ -1,3 +1,4 @@
+pub mod deform;
 mod brush;
 mod composite;
 mod fill;
@@ -31,6 +32,7 @@ pub enum Tool {
     MagicWand,
     Fill,
     Transform,
+    Deform,
 }
 
 impl Tool {
@@ -43,10 +45,11 @@ impl Tool {
             Tool::MagicWand => "Wand",
             Tool::Fill => "Fill",
             Tool::Transform => "Transform",
+            Tool::Deform => "Deform",
         }
     }
 
-    pub fn all() -> [Tool; 7] {
+    pub fn all() -> [Tool; 8] {
         [
             Tool::Brush,
             Tool::RectangleSelect,
@@ -55,6 +58,7 @@ impl Tool {
             Tool::MagicWand,
             Tool::Fill,
             Tool::Transform,
+            Tool::Deform,
         ]
     }
 }

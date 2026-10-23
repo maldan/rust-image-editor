@@ -2,26 +2,41 @@ use super::*;
 
 impl EditorApp {
     pub fn undo(&mut self) {
+        if self.deformation.is_some() {
+            self.finish_deformation(true);
+            return;
+        }
         self.cancel_transform();
+        self.animation_clock = None;
+        let frame_before = self.project().animation.as_ref().map(|a| a.frame);
         let change = if self.history.document_undo_pending() {
             self.history.undo_document(&mut self.workspace)
         } else {
             self.history.undo(self.workspace.active_mut())
         };
         if let Some(change) = change {
+            if frame_before != self.project().animation.as_ref().map(|a| a.frame) {
+                self.clear_selection();
+            }
             self.apply_history_change(change);
             self.status = "Undo".into();
         }
     }
 
     pub fn redo(&mut self) {
+        self.finish_deformation(true);
         self.cancel_transform();
+        self.animation_clock = None;
+        let frame_before = self.project().animation.as_ref().map(|a| a.frame);
         let change = if self.history.document_redo_pending() {
             self.history.redo_document(&mut self.workspace)
         } else {
             self.history.redo(self.workspace.active_mut())
         };
         if let Some(change) = change {
+            if frame_before != self.project().animation.as_ref().map(|a| a.frame) {
+                self.clear_selection();
+            }
             self.apply_history_change(change);
             self.status = "Redo".into();
         }

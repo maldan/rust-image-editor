@@ -54,6 +54,7 @@ impl EditorApp {
     }
 
     pub fn add_layer(&mut self) {
+        self.finish_deformation(false);
         if self.image_size.is_none() {
             return;
         }
@@ -128,6 +129,7 @@ impl EditorApp {
     }
 
     pub fn move_layer_to(&mut self, from: usize, to: usize) {
+        self.finish_deformation(false);
         if from == to || from >= self.project().layers.len() || to >= self.project().layers.len() {
             return;
         }

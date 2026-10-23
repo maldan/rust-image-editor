@@ -11,6 +11,38 @@ pub fn draw(ui: &mut Ui, session: &mut DocumentSession, image_ready: bool) -> Op
     ui.space(8.0);
 
     match session.tool {
+        Tool::Deform => {
+            ui.select(
+                "deform_mode",
+                &mut session.deform_mode,
+                &["Move", "Inflate", "Pinch", "Normalize", "Rotate"],
+            );
+            ui.label("Radius (px)");
+            ui.slider("deform_radius", &mut session.deform_radius, 4.0..=512.0);
+            ui.label("Strength");
+            ui.slider("deform_strength", &mut session.deform_strength, 0.01..=1.0);
+            ui.label("Softness");
+            ui.slider("deform_softness", &mut session.deform_softness, 0.0..=1.0);
+            ui.label("Mesh divisions (long edge)");
+            ui.slider_stepped(
+                "deform_density",
+                &mut session.deform_density,
+                8.0..=96.0,
+                1.0,
+            );
+            ui.checkbox("deform_grid", "Show mesh", &mut session.deform_grid);
+            ui.label("Press captures vertices until release.");
+            ui.label(match session.deform_mode {
+                1 | 2 => "Drag away from the press point to change size.",
+                3 => "Drag to smooth the mesh using its current neighbours.",
+                4 => "Drag left/right to rotate around the brush center.",
+                _ => "Drag to move the captured vertices.",
+            });
+            ui.label("Enter — apply / Esc — cancel");
+            session.deform_apply |= ui.button("deform_apply", "Apply").clicked();
+            session.deform_cancel |= ui.button("deform_cancel", "Cancel").clicked();
+            ui.label("Mesh density takes effect after Apply/Cancel.");
+        }
         Tool::Brush => {
             ui.checkbox("brush_erase", "Erase mode", &mut session.erase_mode);
             ui.space(10.0);

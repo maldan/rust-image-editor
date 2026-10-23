@@ -132,6 +132,24 @@ impl CanvasRenderer {
             let Some(Some(gpu)) = self.layers.get(i) else {
                 continue;
             };
+            if overlay.deformation == Some(i) && self.deform.layer == Some(i) {
+                if let Some(bind) = &self.deform.bind {
+                    let mut u = view_u;
+                    u.opacity = layer.opacity.clamp(0.0, 1.0);
+                    u._pad = if self.has_selection { 1.0 } else { 0.0 };
+                    queue.write_buffer(&self.deform.uniform, 0, bytemuck::bytes_of(&u));
+                    pass.set_bind_group(0, bind, &[]);
+                    if self.has_selection {
+                        pass.set_pipeline(&self.deform.base_pipeline);
+                        pass.draw(0..6, 0..1);
+                    }
+                    pass.set_pipeline(&self.deform.pipeline);
+                    pass.set_vertex_buffer(0, self.deform.vertices.slice(..));
+                    pass.draw(0..self.deform.count, 0..1);
+                    pass.set_pipeline(&self.layer_pipeline);
+                    continue;
+                }
+            }
             if let (Some(draw), Some(corners)) = (overlay.floating, overlay.transform_corners)
                 && draw.layer == i
                 && draw.whole_layer

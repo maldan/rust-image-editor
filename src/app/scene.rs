@@ -36,6 +36,7 @@ impl Scene for EditorApp {
     fn build(&mut self, ui: &mut Ui, viewport: Vec2, _stats: DrawStats) -> bool {
         self.session.viewport_size = viewport;
         self.note_frame(self.input.dt);
+        if self.input.key_escape { self.finish_deformation(true); }
         self.poll_ai(ui);
         self.poll_video();
         self.handle_animation_keys();
@@ -57,6 +58,13 @@ impl Scene for EditorApp {
         let copy = self.input.key_copy;
         let cut = self.input.key_cut;
         ui::draw(ui, self, viewport);
+        if self.session.deform_cancel || self.input.key_escape {
+            self.finish_deformation(true);
+        } else if self.session.deform_apply || self.input.key_enter {
+            self.finish_deformation(false);
+        }
+        self.session.deform_cancel = false;
+        self.session.deform_apply = false;
         self.tick_animation_preview();
         if cut {
             self.cut_selection(ui);
@@ -222,6 +230,7 @@ impl Scene for EditorApp {
             }
             self.dirty_layer = None;
         }
+        canvas.sync_deformation(device, queue, self.deformation.as_ref().map(|d| (&d.mesh, d.layer)));
         if self.session.floating.is_none() {
             canvas.clear_transform();
             self.floating_reload = false;
@@ -275,6 +284,7 @@ impl Scene for EditorApp {
                 .collect(),
             ..Default::default()
         };
+        overlay.deformation = self.deformation.as_ref().map(|d| d.layer);
         if self.hsv.open
             && self.hsv.preview
             && self.hsv.document_id == self.workspace.active_doc().id
