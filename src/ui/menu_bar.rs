@@ -41,7 +41,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         ui.separator();
         ui.menu("layer", "Layer", |ui| {
             let index = app.project().active_layer;
-            let can_merge = index > 0 && index < app.project().layers.len();
+            let can_merge = app.project().animation.is_none() && index > 0 && index < app.project().layers.len();
             if ui
                 .menu_item_enabled("merge_down", "Merge Down", can_merge)
                 .clicked()

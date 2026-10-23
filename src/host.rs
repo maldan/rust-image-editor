@@ -180,6 +180,8 @@ impl FrameInput {
     fn for_scene(&self, keyboard_captured: bool) -> Self {
         let mut input = self.clone();
         if keyboard_captured {
+            input.key_left = false;
+            input.key_right = false;
             input.key_copy = false;
             input.key_cut = false;
             input.key_paste = false;
@@ -790,6 +792,8 @@ mod text_edit_tests {
                 && !scene.key_undo
                 && !scene.key_redo
                 && !scene.key_enter
+                && !scene.key_left
+                && !scene.key_right
         );
         assert!(input.for_scene(false).key_paste);
         input.clear_edges();

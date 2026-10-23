@@ -9,6 +9,7 @@ use crate::workspace::{THUMB_VIEW, Workspace};
 pub struct LibraryAction {
     pub import: bool,
     pub new_document: bool,
+    pub new_animation: bool,
     pub switch_doc: Option<usize>,
     pub delete_doc: Option<usize>,
     pub clone_doc: Option<usize>,
@@ -31,15 +32,18 @@ pub fn draw(
     ui.separator();
     ui.space(6.0);
 
+    if ui.button("asset_import", "Import Asset…").clicked() {
+        action.import = true;
+    }
     ui.horizontal(|ui| {
         ui.flex(0.5, |ui| {
-            if ui.button("asset_import", "Import Asset…").clicked() {
-                action.import = true;
+            if ui.button("doc_new", "New Image").clicked() {
+                action.new_document = true;
             }
         });
         ui.flex(1.0, |ui| {
-            if ui.button("doc_new", "New Document").clicked() {
-                action.new_document = true;
+            if ui.button("animation_new", "New Animation").clicked() {
+                action.new_animation = true;
             }
         });
     });
@@ -170,7 +174,8 @@ pub fn draw(
                 let name = workspace.documents[index].name.clone();
                 let project = &workspace.documents[index].project;
                 let meta = format!(
-                    "{}×{} · {}",
+                    "{} · {}×{} · {}",
+                    if project.animation.is_some() { "Animation" } else { "Image" },
                     project.width,
                     project.height,
                     format_bytes(workspace.documents[index].memory_bytes()),

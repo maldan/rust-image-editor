@@ -4,12 +4,14 @@ pub mod ai_dialog;
 mod asset_properties;
 mod assets_panel;
 mod canvas;
+mod canvas_panel;
 pub mod hsv_dialog;
 mod menu_bar;
 mod project_panel;
 pub mod rename_dialog;
 mod tool_options;
 mod tools_panel;
+mod timeline;
 mod video_dialog;
 
 use glam::Vec2;
@@ -32,8 +34,8 @@ pub fn default_dock() -> DockState {
         ),
         DockNode::split_h(
             0.76,
-            DockNode::leaf(&["Canvas"]),
-            DockNode::leaf(&["Layers"]),
+            DockNode::leaf(&["Workspace"]),
+            DockNode::leaf(&["Layers", "Canvas"]),
         ),
     ))
 }
@@ -70,8 +72,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
         let preview = app.session.preview_asset.is_some();
         context_panel(&mut dock.root, preview);
         ui.dock_space("main", dock_size, &mut dock, |ui, tab| {
-            if tab == "Canvas" {
+            if tab == "Workspace" {
                 canvas::draw(ui, app);
+                if timeline::visible(app) { timeline::draw(ui, app); }
                 return;
             }
             let size = ui.available_size().max(Vec2::splat(1.0));
@@ -92,6 +95,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                     let action = assets_panel::draw(ui, &mut app.workspace, &app.input, app.session.canvas_rect);
                     apply_library(ui, app, action);
                 }
+                "Canvas" => canvas_panel::draw(ui, app),
                 "Layers" | "Properties" => {
                     if app.session.preview_asset.is_some() { asset_properties::draw(ui, app); }
                     else { project_panel::draw(ui, app); }
@@ -125,6 +129,9 @@ fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
     }
     if action.new_document {
         app.new_document();
+    }
+    if action.new_animation {
+        app.new_animation();
     }
     if let Some(index) = action.switch_doc {
         app.switch_document(index);
@@ -177,8 +184,11 @@ mod context_tests {
             }
         }
         let original = tabs(&dock.root);
+        assert_eq!(original.iter().filter(|tab| *tab == "Workspace").count(), 1);
+        assert_eq!(original.iter().filter(|tab| *tab == "Canvas").count(), 1);
         context_panel(&mut dock.root, true);
         let preview = tabs(&dock.root);
+        assert!(preview.iter().any(|tab| tab == "Canvas"));
         assert!(!preview.iter().any(|tab| tab == "Layers"));
         assert_eq!(preview.iter().filter(|tab| *tab == "Properties").count(), 1);
         if let DockNode::Split { ratio, .. } = &mut dock.root {

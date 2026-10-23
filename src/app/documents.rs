@@ -3,6 +3,7 @@ use crate::raster::Raster;
 
 impl EditorApp {
     pub fn new_project(&mut self, ui: &mut Ui) {
+        self.animation_clock = None;
         self.close_asset_preview();
         self.video_poster = None;
         self.cancel_transform();
@@ -205,6 +206,7 @@ impl EditorApp {
             return Err("Selection has no pixels".into());
         }
         Ok(crate::project::Layer {
+            drawings: Default::default(),
             name: "Selection".into(),
             visible: true,
             opacity: source.opacity,
@@ -342,6 +344,7 @@ impl EditorApp {
     }
 
     pub fn switch_document(&mut self, index: usize) {
+        self.animation_clock = None;
         if let Err(error) = self.workspace.ensure_document_loaded(index) {
             self.status = error;
             return;
@@ -362,6 +365,7 @@ impl EditorApp {
     }
 
     pub fn new_document(&mut self) {
+        self.animation_clock = None;
         self.cancel_transform();
         self.close_asset_preview();
         let name = format!("Document {}", self.workspace.documents.len() + 1);

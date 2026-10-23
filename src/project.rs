@@ -1,4 +1,6 @@
 use crate::raster::SparsePixels;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -6,6 +8,8 @@ use image::{DynamicImage, ImageFormat, RgbaImage};
 
 #[derive(Debug, Clone)]
 pub struct Layer {
+    /// Held drawings keyed by their first frame. `pixels` is the editable current drawing.
+    pub drawings: BTreeMap<u32, SparsePixels>,
     pub name: String,
     pub visible: bool,
     pub opacity: f32,
@@ -14,13 +18,87 @@ pub struct Layer {
 
 #[derive(Debug, Clone, Default)]
 pub struct Project {
+    pub animation: Option<Animation>,
     pub width: u32,
     pub height: u32,
     pub layers: Vec<Layer>,
     pub active_layer: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Animation {
+    pub fps: u32,
+    pub length: u32,
+    pub frame: u32,
+}
+
 impl Project {
+    pub fn flush_drawings(&mut self) {
+        let Some(animation) = &self.animation else {
+            return;
+        };
+        for layer in &mut self.layers {
+            let start = layer
+                .drawings
+                .range(..=animation.frame)
+                .next_back()
+                .map(|(&start, _)| start)
+                .unwrap_or(0);
+            layer.drawings.insert(start, layer.pixels.clone());
+        }
+    }
+
+    pub fn seek(&mut self, frame: u32) {
+        self.flush_drawings();
+        let Some(animation) = &mut self.animation else {
+            return;
+        };
+        animation.frame = frame.min(animation.length - 1);
+        for layer in &mut self.layers {
+            layer.pixels = layer
+                .drawings
+                .range(..=animation.frame)
+                .next_back()
+                .map(|(_, pixels)| pixels.clone())
+                .unwrap_or_default();
+        }
+    }
+
+    pub fn new_drawing(&mut self, duplicate: bool) {
+        self.flush_drawings();
+        let Some(animation) = &self.animation else {
+            return;
+        };
+        let Some(layer) = self.layers.get_mut(self.active_layer) else {
+            return;
+        };
+        if !duplicate {
+            layer.pixels = SparsePixels::default();
+        }
+        layer.drawings.insert(animation.frame, layer.pixels.clone());
+    }
+
+    pub fn delete_drawing(&mut self) {
+        self.flush_drawings();
+        let Some(animation) = &self.animation else {
+            return;
+        };
+        let Some(layer) = self.layers.get_mut(self.active_layer) else {
+            return;
+        };
+        // The initial drawing anchors the track; clearing it uses New blank drawing.
+        if animation.frame == 0 {
+            return;
+        }
+        layer.drawings.remove(&animation.frame);
+        layer.pixels = layer
+            .drawings
+            .range(..=animation.frame)
+            .next_back()
+            .map(|(_, pixels)| pixels.clone())
+            .unwrap_or_default();
+    }
+
     pub fn import_png(&mut self, path: &Path) -> Result<(), String> {
         let bytes = fs::read(path).map_err(|e| format!("Cannot read image: {e}"))?;
         let decoded = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
@@ -40,6 +118,7 @@ impl Project {
         self.width = width;
         self.height = height;
         self.layers = vec![Layer {
+            drawings: Default::default(),
             name: "Layer 1".into(),
             visible: true,
             opacity: 1.0,
@@ -55,6 +134,7 @@ impl Project {
         }
         let index = self.layers.len() + 1;
         self.layers.push(Layer {
+            drawings: Default::default(),
             name: format!("Layer {index}"),
             visible: true,
             opacity: 1.0,
@@ -113,6 +193,7 @@ impl Project {
             self.width = width;
             self.height = height;
             self.layers.push(Layer {
+                drawings: Default::default(),
                 name: "Layer 1".into(),
                 visible: true,
                 opacity: 1.0,
@@ -262,6 +343,37 @@ fn encode_png(image: &DynamicImage) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn animation_holds_drawings_independently_per_layer_and_copies_on_edit() {
+        use crate::raster::Raster;
+        let mut project = Project::default();
+        project.resize_canvas(8, 8).unwrap();
+        project.animation = Some(Animation {
+            fps: 12,
+            length: 24,
+            frame: 0,
+        });
+        project.layers[0].pixels.write(0, 0, 0, [10, 0, 0, 255]);
+        project.add_layer();
+        project.layers[1].pixels.write(0, 1, 0, [20, 0, 0, 255]);
+        project.seek(6);
+        project.new_drawing(true);
+        project.layers[1].pixels.write(0, 1, 0, [30, 0, 0, 255]);
+        project.seek(10);
+        assert_eq!(project.layers[1].pixels.read(0, 1, 0)[0], 30);
+        assert_eq!(project.layers[0].pixels.read(0, 0, 0)[0], 10);
+        project.seek(0);
+        assert_eq!(project.layers[1].pixels.read(0, 1, 0)[0], 20);
+        project.seek(9);
+        project.new_drawing(false);
+        assert_eq!(project.layers[1].pixels.read(0, 1, 0), [0; 4]);
+        project.seek(6);
+        project.delete_drawing();
+        assert_eq!(project.layers[1].pixels.read(0, 1, 0)[0], 20);
+        project.seek(9);
+        assert_eq!(project.layers[1].pixels.read(0, 1, 0), [0; 4]);
+    }
 
     #[test]
     fn trim_canvas_bounds_combine_visible_layers_and_clip_partial_off_canvas_content() {

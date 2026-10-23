@@ -20,6 +20,7 @@ use crate::view::CanvasView;
 use crate::workspace::Workspace;
 
 mod ai;
+mod animation;
 mod documents;
 mod history;
 mod layers;
@@ -45,6 +46,7 @@ mod sparse_layer_tests;
 mod transform_interaction_tests;
 
 pub struct EditorApp {
+    animation_clock: Option<(String, f64)>,
     pub workspace: Workspace,
     pub input: FrameInput,
     pub image_size: Option<(u32, u32)>,
@@ -80,6 +82,7 @@ pub struct EditorApp {
 impl Default for EditorApp {
     fn default() -> Self {
         Self {
+            animation_clock: None,
             workspace: Workspace::default(),
             input: FrameInput::default(),
             image_size: None,

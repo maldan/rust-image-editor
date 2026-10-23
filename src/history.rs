@@ -154,6 +154,12 @@ impl EditCapture {
 }
 
 enum HistoryEntry {
+    Drawing {
+        layer: usize,
+        frame: u32,
+        before: Option<SparsePixels>,
+        after: Option<SparsePixels>,
+    },
     TrimCanvas {
         origin: (i32, i32),
         size_before: (u32, u32),
@@ -207,6 +213,35 @@ pub struct History {
 }
 
 impl History {
+    pub fn change_drawing(&mut self, project: &mut Project, duplicate: Option<bool>) -> bool {
+        let Some(animation) = &project.animation else {
+            return false;
+        };
+        let frame = animation.frame;
+        let index = project.active_layer;
+        if project.layers.get(index).is_none() {
+            return false;
+        }
+        project.flush_drawings();
+        let before = project.layers[index].drawings.get(&frame).cloned();
+        if let Some(duplicate) = duplicate {
+            project.new_drawing(duplicate);
+        } else {
+            project.delete_drawing();
+        }
+        let after = project.layers[index].drawings.get(&frame).cloned();
+        if before == after {
+            return false;
+        }
+        self.push_entry(HistoryEntry::Drawing {
+            layer: index,
+            frame,
+            before,
+            after,
+        });
+        true
+    }
+
     pub fn trim_canvas(&mut self, project: &mut Project) -> bool {
         let Some(bounds) = project.visible_content_bounds() else {
             return false;
@@ -432,6 +467,15 @@ impl History {
 
     pub fn undo(&mut self, project: &mut Project) -> Option<HistoryChange> {
         let change = match self.undo.last_mut()? {
+            HistoryEntry::Drawing {
+                layer,
+                frame,
+                before,
+                ..
+            } => {
+                restore_drawing(project, *layer, *frame, before)?;
+                HistoryChange::Layers
+            }
             HistoryEntry::TrimCanvas {
                 origin,
                 size_before,
@@ -501,6 +545,15 @@ impl History {
 
     pub fn redo(&mut self, project: &mut Project) -> Option<HistoryChange> {
         let change = match self.redo.last_mut()? {
+            HistoryEntry::Drawing {
+                layer,
+                frame,
+                after,
+                ..
+            } => {
+                restore_drawing(project, *layer, *frame, after)?;
+                HistoryChange::Layers
+            }
             HistoryEntry::TrimCanvas {
                 origin, size_after, ..
             } => {
@@ -564,6 +617,32 @@ impl History {
         self.undo.clear();
         self.redo.clear();
     }
+}
+
+fn restore_drawing(
+    project: &mut Project,
+    index: usize,
+    frame: u32,
+    drawing: &Option<SparsePixels>,
+) -> Option<()> {
+    if index >= project.layers.len() || frame >= project.animation.as_ref()?.length {
+        return None;
+    }
+    project.seek(frame);
+    let layer = &mut project.layers[index];
+    if let Some(pixels) = drawing {
+        layer.drawings.insert(frame, pixels.clone());
+    } else {
+        layer.drawings.remove(&frame);
+    }
+    layer.pixels = layer
+        .drawings
+        .range(..=frame)
+        .next_back()
+        .map(|(_, pixels)| pixels.clone())
+        .unwrap_or_default();
+    project.active_layer = index;
+    Some(())
 }
 
 fn shift_canvas(project: &mut Project, delta: (i32, i32), size: (u32, u32)) -> bool {
@@ -763,6 +842,7 @@ mod tests {
         let mut history = History::default();
         history.push(edit);
         let layers = vec![crate::project::Layer {
+            drawings: Default::default(),
             name: "L".into(),
             visible: true,
             opacity: 1.0,
@@ -798,9 +878,11 @@ mod tests {
             &after.tiles[&(1, 0)]
         ));
         let mut project = Project {
+            animation: None,
             width: 128,
             height: 64,
             layers: vec![crate::project::Layer {
+                drawings: Default::default(),
                 name: "L".into(),
                 visible: true,
                 opacity: 1.0,

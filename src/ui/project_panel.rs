@@ -12,8 +12,6 @@ struct LayerCommand {
     reorder: Option<(usize, usize)>,
     opacity: Option<f32>,
     new_layer: bool,
-    resize: bool,
-    trim: bool,
 }
 
 pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
@@ -24,23 +22,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         .map(|layer| (layer.name.clone(), layer.visible, layer.opacity))
         .collect();
     let active = app.project().active_layer;
-    let image_size = app.image_size;
-    let doc_name = app.workspace.active_doc().name.clone();
-    let dirty = app.dirty;
-    let command = controls(
-        ui,
-        &rows,
-        active,
-        &app.input,
-        &mut app.layer_drag,
-        app.session.zoom,
-        &mut app.session.rotation,
-        image_size,
-        &mut app.resize_w,
-        &mut app.resize_h,
-        &doc_name,
-        dirty,
-    );
+    let command = controls(ui, &rows, active, &app.input, &mut app.layer_drag);
     if let Some(index) = command.select {
         app.project_mut().active_layer = index;
     }
@@ -64,12 +46,6 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     if command.new_layer {
         app.add_layer();
     }
-    if command.resize {
-        app.resize_canvas(ui);
-    }
-    if command.trim {
-        app.trim_canvas(ui);
-    }
 }
 
 fn controls(
@@ -78,13 +54,6 @@ fn controls(
     active: usize,
     input: &FrameInput,
     drag: &mut Option<usize>,
-    zoom: f32,
-    rotation: &mut f32,
-    image_size: Option<(u32, u32)>,
-    resize_w: &mut u32,
-    resize_h: &mut u32,
-    doc_name: &str,
-    dirty: bool,
 ) -> LayerCommand {
     let mut command = LayerCommand {
         select: None,
@@ -95,8 +64,6 @@ fn controls(
         reorder: None,
         opacity: None,
         new_layer: false,
-        resize: false,
-        trim: false,
     };
     ui.label("Layers");
     ui.separator();
@@ -173,56 +140,6 @@ fn controls(
         command.new_layer = true;
     }
 
-    ui.space(16.0);
-    ui.label("Canvas");
-    ui.separator();
-    ui.space(8.0);
-    ui.label(&format!("Zoom: {:.0}%", zoom * 100.0));
-    ui.space(8.0);
-    ui.label("Rotation");
-    ui.drag_float("canvas_rotation", rotation, 1.0);
-    if rotation.abs() > 3600.0 {
-        *rotation = rotation.rem_euclid(360.0);
-    }
-
-    ui.space(14.0);
-    match image_size {
-        Some((width, height)) => ui.label(&format!("{width} × {height}")),
-        None => ui.label("No image"),
-    }
-
-    ui.space(12.0);
-    ui.label("Resize canvas");
-    let mut w = *resize_w as f32;
-    let mut h = *resize_h as f32;
-    ui.grid(2, |ui| {
-        ui.grid_cell(|ui| {
-            ui.property("W", 0.18, |ui| {
-                ui.drag_float("canvas_w", &mut w, 1.0);
-            })
-        });
-        ui.grid_cell(|ui| {
-            ui.property("H", 0.18, |ui| {
-                ui.drag_float("canvas_h", &mut h, 1.0);
-            })
-        });
-    });
-    *resize_w = w.round().clamp(1.0, 16384.0) as u32;
-    *resize_h = h.round().clamp(1.0, 16384.0) as u32;
-    ui.horizontal(|ui| {
-        if ui.button("canvas_resize", "Apply size").clicked() {
-            command.resize = true;
-        }
-        if ui.button("canvas_trim", "Trim").clicked() {
-            command.trim = true;
-        }
-    });
-
-    ui.space(14.0);
-    ui.label(doc_name);
-    if dirty {
-        ui.label("Modified");
-    }
     command
 }
 

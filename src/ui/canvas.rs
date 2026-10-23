@@ -4,7 +4,10 @@ use mega_ui::Ui;
 use crate::app::{EditorApp, rect_size};
 
 pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
-    let size = ui.available_size().max(Vec2::splat(1.0));
+    let mut size = ui.available_size().max(Vec2::splat(1.0));
+    if super::timeline::visible(app) {
+        size.y = (size.y - super::timeline::height(size.y, ui.scale())).max(1.0);
+    }
     let area = ui.area("canvas_view", size);
     app.session.canvas_rect = area.rect;
 
@@ -33,6 +36,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         app.fit_to_canvas();
     }
     app.update_view();
+
+    if app.animation_playing() { return; }
 
     if let Some(view) = app.canvas_view() {
         if area.hovered || area.active || app.brush_last_active() {

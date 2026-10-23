@@ -13,7 +13,7 @@ use crate::project::{Layer, Project, encode_webp_rgba};
 const MANIFEST_PATH: &str = "/manifest.json";
 const MANIFEST_KIND: &str = "mega-image-editor/manifest+json";
 const IMAGE_KIND: &str = "image/webp";
-const FORMAT_VERSION: u32 = 7;
+const FORMAT_VERSION: u32 = 8;
 pub const THUMB_SIZE: u32 = 84;
 const THUMB_ATLAS_COLS: u32 = 16;
 /// On-screen library thumb size (logical px before UI scale).
@@ -164,6 +164,8 @@ fn default_opacity() -> f32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct LayerMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timeline: Option<String>,
     name: String,
     visible: bool,
     #[serde(default = "default_opacity")]
@@ -190,6 +192,43 @@ fn decode_layer(bytes: &[u8], compression: Option<&str>) -> Result<SparsePixels,
         }
         codec => Err(format!("Unsupported layer compression: {codec}")),
     }
+}
+
+fn encode_drawings(
+    drawings: &std::collections::BTreeMap<u32, SparsePixels>,
+) -> Result<Vec<u8>, String> {
+    let mut raw = Vec::new();
+    for (&frame, pixels) in drawings {
+        let bytes = pixels.encode();
+        raw.extend_from_slice(&frame.to_le_bytes());
+        raw.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        raw.extend_from_slice(&bytes);
+    }
+    zstd::stream::encode_all(raw.as_slice(), 3).map_err(|e| e.to_string())
+}
+
+fn decode_drawings(bytes: &[u8]) -> Result<std::collections::BTreeMap<u32, SparsePixels>, String> {
+    let raw = zstd::stream::decode_all(bytes).map_err(|e| e.to_string())?;
+    let mut rest = raw.as_slice();
+    let mut drawings = std::collections::BTreeMap::new();
+    while !rest.is_empty() {
+        if rest.len() < 12 {
+            return Err("Invalid drawing timeline".into());
+        }
+        let frame = u32::from_le_bytes(rest[..4].try_into().unwrap());
+        let length = usize::try_from(u64::from_le_bytes(rest[4..12].try_into().unwrap()))
+            .map_err(|_| "Invalid drawing length")?;
+        rest = &rest[12..];
+        if length > rest.len() || drawings.contains_key(&frame) {
+            return Err("Invalid drawing timeline".into());
+        }
+        drawings.insert(frame, SparsePixels::decode(&rest[..length])?);
+        rest = &rest[length..];
+    }
+    if !drawings.contains_key(&0) {
+        return Err("Timeline has no initial drawing".into());
+    }
+    Ok(drawings)
 }
 
 fn read_preview(source: &ArchiveSource, path: Option<&str>) -> Result<Option<Vec<u8>>, String> {
@@ -230,6 +269,10 @@ fn save_preview(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DocumentMeta {
+    #[serde(default, rename = "type")]
+    kind: DocumentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    animation: Option<crate::project::Animation>,
     id: String,
     name: String,
     width: u32,
@@ -238,6 +281,14 @@ struct DocumentMeta {
     layers: Vec<LayerMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum DocumentKind {
+    #[default]
+    Image,
+    Animation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,11 +351,21 @@ impl Document {
 
     /// Pixel tiles currently resident for this document.
     pub fn memory_bytes(&self) -> u64 {
-        self.project
-            .layers
-            .iter()
-            .map(|layer| layer.pixels.memory_bytes())
-            .sum()
+        if self.project.animation.is_none() {
+            return self.project.layers.iter().map(|layer| layer.pixels.memory_bytes()).sum();
+        }
+        let mut seen = HashSet::new();
+        let mut bytes = 0;
+        for layer in &self.project.layers {
+            for pixels in std::iter::once(&layer.pixels).chain(layer.drawings.values()) {
+                for tile in pixels.tiles.values() {
+                    if seen.insert(Arc::as_ptr(tile)) {
+                        bytes += tile.len() as u64;
+                    }
+                }
+            }
+        }
+        bytes
     }
 }
 
@@ -428,11 +489,24 @@ impl Workspace {
                     .0
                     .read_all(&meta.path)
                     .map_err(|e| format!("Cannot read layer '{}': {e}", meta.name))?;
-                decode_layer(&bytes, meta.compression.as_deref())
-                    .map_err(|e| format!("Layer '{}': {e}", meta.name))
+                let pixels = decode_layer(&bytes, meta.compression.as_deref())
+                    .map_err(|e| format!("Layer '{}': {e}", meta.name))?;
+                let drawings = if let Some(path) = &meta.timeline {
+                    let bytes = deferred
+                        .source
+                        .0
+                        .read_all(path)
+                        .map_err(|e| e.to_string())?;
+                    decode_drawings(&bytes)?
+                } else {
+                    Default::default()
+                };
+                Ok((pixels, drawings))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        for (index, (layer, pixels)) in doc.project.layers.iter_mut().zip(pixels).enumerate() {
+        for (index, (layer, (pixels, drawings))) in
+            doc.project.layers.iter_mut().zip(pixels).enumerate()
+        {
             if let Some(saved) = self.saved.as_mut().and_then(|saved| {
                 saved
                     .layers
@@ -441,6 +515,7 @@ impl Workspace {
                 saved.0 = Some(pixels.fingerprint());
             }
             layer.pixels = pixels;
+            layer.drawings = drawings;
         }
         doc.deferred = None;
         Ok(())
@@ -748,6 +823,11 @@ impl Workspace {
     }
 
     pub fn save(&mut self, path: &Path) -> Result<(), String> {
+        for doc in &mut self.documents {
+            if doc.deferred.is_none() {
+                doc.project.flush_drawings();
+            }
+        }
         let mut rebuilt = false;
         for doc in &mut self.documents {
             if doc.thumb_dirty && doc.deferred.is_none() {
@@ -874,7 +954,32 @@ impl Workspace {
                 };
                 next.layers
                     .insert(layer_path.clone(), (fingerprint, compression.clone()));
+                let timeline = if doc.project.animation.is_some() {
+                    let path = format!("/documents/{}/layers/{i}.timeline", doc.id);
+                    let bytes = if let Some(deferred) = &doc.deferred {
+                        let source_path = deferred.layers[i]
+                            .timeline
+                            .as_ref()
+                            .ok_or("Animation layer has no timeline")?;
+                        deferred
+                            .source
+                            .0
+                            .read_all(source_path)
+                            .map_err(|e| e.to_string())?
+                    } else {
+                        encode_drawings(&layer.drawings)?
+                    };
+                    files.push(WriteFile::new(
+                        &path,
+                        "application/x-held-drawings-zstd-v1",
+                        bytes,
+                    ));
+                    Some(path)
+                } else {
+                    None
+                };
                 layers.push(LayerMeta {
+                    timeline,
                     name: layer.name.clone(),
                     visible: layer.visible,
                     opacity: layer.opacity,
@@ -885,6 +990,12 @@ impl Workspace {
             let preview = format!("/previews/documents/{}.webp", doc.id);
             save_preview(&preview, &doc.thumb, previous, &mut next, &mut files)?;
             doc_metas.push(DocumentMeta {
+                kind: if doc.project.animation.is_some() {
+                    DocumentKind::Animation
+                } else {
+                    DocumentKind::Image
+                },
+                animation: doc.project.animation.clone(),
                 id: doc.id.clone(),
                 name: doc.name.clone(),
                 width: doc.project.width,
@@ -977,6 +1088,9 @@ impl Workspace {
                 }
                 paths.insert(document.preview.clone().unwrap());
                 for layer in &mut document.layers {
+                    if let Some(timeline) = &layer.timeline {
+                        paths.insert(timeline.clone());
+                    }
                     paths.insert(layer.path.clone());
                     match layer.compression.as_deref().unwrap_or("none") {
                         "zstd" => {}
@@ -1151,6 +1265,7 @@ impl Workspace {
             let height = meta.height;
             for layer_meta in &meta.layers {
                 layers.push(Layer {
+                    drawings: Default::default(),
                     name: layer_meta.name.clone(),
                     visible: layer_meta.visible,
                     opacity: layer_meta.opacity.clamp(0.0, 1.0),
@@ -1158,6 +1273,7 @@ impl Workspace {
                 });
             }
             let mut project = Project {
+                animation: meta.animation.clone(),
                 width,
                 height,
                 layers,
@@ -1293,7 +1409,21 @@ impl Workspace {
 }
 
 fn check_manifest(manifest: &WorkspaceManifest) -> Result<(), String> {
-    if manifest.format == "mega-image-editor" && matches!(manifest.version, 5 | 6 | 7) {
+    if manifest.format == "mega-image-editor" && matches!(manifest.version, 5 | 6 | 7 | 8) {
+        for doc in &manifest.documents {
+            if (doc.kind == DocumentKind::Animation) != doc.animation.is_some() {
+                return Err("Document type does not match its contents".into());
+            }
+            if let Some(animation) = &doc.animation {
+                if !(1..=120).contains(&animation.fps)
+                    || animation.length == 0
+                    || animation.frame >= animation.length
+                    || doc.layers.iter().any(|l| l.timeline.is_none())
+                {
+                    return Err("Invalid animation settings".into());
+                }
+            }
+        }
         Ok(())
     } else {
         Err("Unsupported project format or version".into())
@@ -1334,6 +1464,51 @@ pub fn make_thumb(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::raster::Raster;
+
+    #[test]
+    fn animation_survives_save_deferred_save_as_reorder_and_optimization() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("animation.mgimg");
+        let copy = temp.path().join("copy.mgimg");
+        let mut workspace = Workspace::default();
+        let project = workspace.active_mut();
+        project.resize_canvas(8, 8).unwrap();
+        project.animation = Some(crate::project::Animation {
+            fps: 12,
+            length: 24,
+            frame: 0,
+        });
+        project.layers[0].pixels.write(0, 0, 0, [10, 0, 0, 255]);
+        project.seek(7);
+        project.new_drawing(true);
+        project.layers[0].pixels.write(0, 0, 0, [20, 0, 0, 255]);
+        project.add_layer();
+        project.layers[1].pixels.write(0, 1, 0, [30, 0, 0, 255]);
+        workspace.save(&path).unwrap();
+        let archive = MegaFile::open(&path).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&archive.read_all(MANIFEST_PATH).unwrap()).unwrap();
+        assert_eq!(manifest["documents"][0]["type"], "animation");
+        drop(archive);
+        let mut deferred = Workspace::open(&path).unwrap();
+        assert!(deferred.documents[0].deferred.is_some());
+        deferred.save(&copy).unwrap();
+        deferred.optimize().unwrap();
+        deferred.ensure_document_loaded(0).unwrap();
+        assert_eq!(deferred.active().animation.as_ref().unwrap().frame, 7);
+        assert_eq!(deferred.active().layers[0].pixels.read(0, 0, 0)[0], 20);
+        deferred.active_mut().move_layer_to(0, 1);
+        deferred.active_mut().seek(0);
+        assert_eq!(deferred.active().layers[1].pixels.read(0, 0, 0)[0], 10);
+        assert_eq!(deferred.active().layers[0].pixels.read(0, 1, 0)[0], 30);
+        deferred.save(&copy).unwrap();
+        deferred.optimize().unwrap();
+        let mut loaded = Workspace::open(&copy).unwrap();
+        loaded.ensure_document_loaded(0).unwrap();
+        loaded.active_mut().seek(10);
+        assert_eq!(loaded.active().layers[1].pixels.read(0, 0, 0)[0], 20);
+        assert_eq!(loaded.active().animation.as_ref().unwrap().fps, 12);
+    }
 
     // Existing raster round-trip tests explicitly request the content they inspect.
     fn open_loaded(path: &Path) -> Result<Workspace, String> {

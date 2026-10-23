@@ -90,6 +90,7 @@ pub fn decode(text: &str) -> Result<Option<CopiedLayer>, String> {
     }
     Ok(Some(CopiedLayer {
         layer: Layer {
+            drawings: Default::default(),
             name: payload.name,
             visible: payload.visible,
             opacity: payload.opacity,
@@ -128,6 +129,7 @@ mod tests {
         pixels.write(0, -100, -30, [1, 2, 3, 4]);
         pixels.write(0, 20000, 20000, [5, 6, 7, 255]);
         let layer = Layer {
+            drawings: Default::default(),
             name: "Слой 🎨".into(),
             visible: false,
             opacity: 0.375,
@@ -152,6 +154,7 @@ mod tests {
         assert!(decode("ordinary copied text").unwrap().is_none());
         assert!(decode(&format!("{PREFIX}broken")).is_err());
         let layer = Layer {
+            drawings: Default::default(),
             name: "empty".into(),
             visible: true,
             opacity: 1.0,

@@ -38,6 +38,8 @@ impl Scene for EditorApp {
         self.note_frame(self.input.dt);
         self.poll_ai(ui);
         self.poll_video();
+        self.handle_animation_keys();
+        self.tick_animation();
         if self.input.key_undo {
             self.undo();
         }
@@ -67,6 +69,7 @@ impl Scene for EditorApp {
         // Static tools follow the pointer via mouse events. Only animated
         // overlays and unfinished uploads need another frame on their own.
         self.ai.open
+            || self.animation_playing()
             || self.hsv.open
             || self.rename.is_some()
             || self

@@ -98,6 +98,7 @@ pub fn merge_layers(
     }
     pixels.prune();
     crate::project::Layer {
+        drawings: Default::default(),
         name: lower.name.clone(),
         visible: lower.visible || upper.visible,
         opacity: 1.0,
@@ -114,6 +115,7 @@ mod merge_tests {
     #[test]
     fn composite_pixel_matches_the_full_image_composite() {
         let mut lower = Layer {
+            drawings: Default::default(),
             name: "Lower".into(),
             visible: true,
             opacity: 0.5,
@@ -121,6 +123,7 @@ mod merge_tests {
         };
         lower.pixels.offset = (1, 2);
         let mut upper = Layer {
+            drawings: Default::default(),
             name: "Upper".into(),
             visible: false,
             opacity: 1.0,
@@ -142,6 +145,7 @@ mod merge_tests {
         for lower_visible in [false, true] {
             for upper_visible in [false, true] {
                 let mut lower = Layer {
+                    drawings: Default::default(),
                     name: "Lower".into(),
                     visible: lower_visible,
                     opacity: 0.6,
@@ -149,6 +153,7 @@ mod merge_tests {
                 };
                 lower.pixels.offset = (1, 1);
                 let mut upper = Layer {
+                    drawings: Default::default(),
                     name: "Upper".into(),
                     visible: upper_visible,
                     opacity: 0.4,
@@ -167,6 +172,7 @@ mod merge_tests {
     #[test]
     fn merge_down_preserves_distant_offcanvas_pixels_without_filling_the_gap() {
         let mut lower = Layer {
+            drawings: Default::default(),
             name: "Lower".into(),
             visible: true,
             opacity: 1.0,

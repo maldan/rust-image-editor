@@ -66,6 +66,10 @@ impl EditorApp {
     }
 
     pub fn merge_layer_down(&mut self) {
+        if self.project().animation.is_some() {
+            self.status = "Merge Down is available for image documents".into();
+            return;
+        }
         let index = self.project().active_layer;
         if index == 0 || index >= self.project().layers.len() {
             return;
@@ -179,6 +183,10 @@ impl EditorApp {
     }
 
     pub fn trim_canvas(&mut self, ui: &mut Ui) {
+        if self.project().animation.is_some() {
+            self.status = "Use canvas size to resize an animation".into();
+            return;
+        }
         self.close_asset_preview();
         self.commit_transform();
         if !self.history.trim_canvas(self.workspace.active_mut()) {
