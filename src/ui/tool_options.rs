@@ -33,15 +33,28 @@ pub fn draw(ui: &mut Ui, session: &mut DocumentSession, image_ready: bool) -> Op
             ui.label("Ctrl — eyedropper");
         }
         Tool::RectangleSelect | Tool::Lasso => {
-            ui.label(if session.tool == Tool::Lasso { "Draw a freehand outline to select." } else { "Drag on the image to select an area." });
+            ui.label(if session.tool == Tool::Lasso {
+                "Draw a freehand outline to select."
+            } else {
+                "Drag on the image to select an area."
+            });
             ui.space(8.0);
             ui.label("Shift — add · Ctrl — subtract");
         }
         Tool::SelectionBrush => {
-            ui.checkbox("selection_brush_erase", "Erase selection", &mut session.selection_brush_erase);
+            ui.checkbox(
+                "selection_brush_erase",
+                "Erase selection",
+                &mut session.selection_brush_erase,
+            );
             ui.label("Paint to add to selection.");
             ui.label(&format!("Size: {:.0} px", session.brush_size));
-            ui.slider_stepped("selection_brush_size", &mut session.brush_size, 1.0..=256.0, 1.0);
+            ui.slider_stepped(
+                "selection_brush_size",
+                &mut session.brush_size,
+                1.0..=256.0,
+                1.0,
+            );
         }
         Tool::MagicWand => {
             ui.label("Click a pixel to select a connected region.");
@@ -49,7 +62,12 @@ pub fn draw(ui: &mut Ui, session: &mut DocumentSession, image_ready: bool) -> Op
             ui.label("Shift — add · Ctrl — subtract");
             ui.space(12.0);
             ui.label(&format!("Threshold: {:.0}", session.wand_threshold));
-            ui.slider_stepped("wand_threshold", &mut session.wand_threshold, 0.0..=255.0, 1.0);
+            ui.slider_stepped(
+                "wand_threshold",
+                &mut session.wand_threshold,
+                0.0..=255.0,
+                1.0,
+            );
         }
         Tool::Fill => {
             ui.checkbox("fill_erase", "Erase mode", &mut session.erase_mode);
@@ -63,19 +81,32 @@ pub fn draw(ui: &mut Ui, session: &mut DocumentSession, image_ready: bool) -> Op
             ui.slider("fill_opacity", &mut session.brush_opacity, 0.01..=1.0);
             ui.space(12.0);
             ui.label(&format!("Threshold: {:.0}", session.fill_threshold));
-            ui.slider_stepped("fill_threshold", &mut session.fill_threshold, 0.0..=255.0, 1.0);
+            ui.slider_stepped(
+                "fill_threshold",
+                &mut session.fill_threshold,
+                0.0..=255.0,
+                1.0,
+            );
             ui.space(8.0);
             ui.label("Ctrl — eyedropper");
         }
         Tool::Transform => {
             ui.add_enabled(image_ready && session.preview_asset.is_none(), |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("transform_flip_x", "Flip X").clicked() { flip = Some(true); }
-                    if ui.button("transform_flip_y", "Flip Y").clicked() { flip = Some(false); }
+                    if ui.button("transform_flip_x", "Flip X").clicked() {
+                        flip = Some(true);
+                    }
+                    if ui.button("transform_flip_y", "Flip Y").clicked() {
+                        flip = Some(false);
+                    }
                 });
             });
             ui.space(8.0);
-            ui.checkbox("transform_keep_aspect_ratio", "Keep aspect ratio", &mut session.transform_keep_aspect_ratio);
+            ui.checkbox(
+                "transform_keep_aspect_ratio",
+                "Keep aspect ratio",
+                &mut session.transform_keep_aspect_ratio,
+            );
             ui.space(8.0);
             ui.label("Inside — move · corners — scale");
             ui.label("Outside — rotate");
@@ -105,7 +136,11 @@ pub fn draw(ui: &mut Ui, session: &mut DocumentSession, image_ready: bool) -> Op
         ));
         ui.space(8.0);
     } else {
-        ui.label(if session.selection.is_some() { "Empty selection" } else { "None — whole image is editable." });
+        ui.label(if session.selection.is_some() {
+            "Empty selection"
+        } else {
+            "None — whole image is editable."
+        });
     }
     if session.selection.is_some() && ui.button("clear_selection", "Clear selection").clicked() {
         session.clear_selection();

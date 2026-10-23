@@ -1,7 +1,9 @@
 use super::*;
 
 impl EditorApp {
-    pub fn open_ai_video(&mut self) { self.open_ai_mode(AiMode::Video); }
+    pub fn open_ai_video(&mut self) {
+        self.open_ai_mode(AiMode::Video);
+    }
 
     pub fn open_ai(&mut self) {
         self.open_ai_mode(AiMode::Edit);
@@ -44,10 +46,17 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn open_ai_mode(&mut self, mode: AiMode) {
-        if (mode != AiMode::Video && mode.needs_input() && self.image_size.is_none()) || self.ai.job.is_some() { return; }
+        if (mode != AiMode::Video && mode.needs_input() && self.image_size.is_none())
+            || self.ai.job.is_some()
+        {
+            return;
+        }
         self.commit_transform();
         self.ai.selection_bounds = self.session.selection.as_ref().and_then(Selection::bounds);
-        self.ai.layer_bounds = self.project().active_pixels().and_then(|pixels| pixels.bounds());
+        self.ai.layer_bounds = self
+            .project()
+            .active_pixels()
+            .and_then(|pixels| pixels.bounds());
         self.workspace.clear_asset_drag();
         self.layer_drag = None;
         self.ai.open = true;
@@ -56,11 +65,19 @@ impl EditorApp {
         if mode == AiMode::Video {
             self.ai.document_id = self.workspace.active_doc().id.clone();
             self.ai.video_layer = None;
+            self.ai.video_end_document = None;
+            self.ai.video_end_layer = None;
         }
-        if mode == AiMode::Upscale { self.ai.fit_image = false; }
-        if mode == AiMode::Inpaint && self.ai.source == AiSource::Selection { self.ai.source = AiSource::Layer; }
+        if mode == AiMode::Upscale {
+            self.ai.fit_image = false;
+        }
+        if mode == AiMode::Inpaint && self.ai.source == AiSource::Selection {
+            self.ai.source = AiSource::Layer;
+        }
         self.ai.catalog_load = None;
-        if mode.uses_sd() || mode == AiMode::Video { self.ai.catalog = Default::default(); }
+        if mode.uses_sd() || mode == AiMode::Video {
+            self.ai.catalog = Default::default();
+        }
         self.ai.preview = None;
         self.ai.result = None;
         self.ai.input_region = None;
@@ -69,20 +86,32 @@ impl EditorApp {
         match crate::comfyui::HostConfig::from_env() {
             Ok(config) => {
                 if mode.uses_sd() || mode == AiMode::Video {
-                    self.ai.catalog_load = Some(crate::comfyui::CatalogLoad::start(config.clone(), false));
+                    self.ai.catalog_load =
+                        Some(crate::comfyui::CatalogLoad::start(config.clone(), false));
                     self.ai.catalog_message = "Loading models / LoRAs...".into();
                 }
-                self.ai.config = Some(config); self.ai.message.clear();
+                self.ai.config = Some(config);
+                self.ai.message.clear();
             }
-            Err(error) => { self.ai.config = None; self.ai.message = error; }
+            Err(error) => {
+                self.ai.config = None;
+                self.ai.message = error;
+            }
         }
     }
 
     pub fn start_ai(&mut self) {
-        if self.ai.job.is_some() { return; }
-        if self.ai.mode == AiMode::Video { self.start_video(); return; }
+        if self.ai.job.is_some() {
+            return;
+        }
+        if self.ai.mode == AiMode::Video {
+            self.start_video();
+            return;
+        }
         self.ai.preview_view = Default::default();
-        let Some(config) = self.ai.config.clone() else { return; };
+        let Some(config) = self.ai.config.clone() else {
+            return;
+        };
         if !self.ai.mode.needs_input() {
             if let Err(error) = self.ai.draw_settings.validate() {
                 self.ai.message = error;
@@ -90,9 +119,22 @@ impl EditorApp {
             }
             self.ai.document_id = self.workspace.active_doc().id.clone();
             let (width, height) = if self.project().width == 0 || self.project().height == 0 {
-                (self.ai.draw_settings.width as u32, self.ai.draw_settings.height as u32)
-            } else { (self.project().width, self.project().height) };
-            self.ai.input_region = Some(PixelRect { min_x: 0, min_y: 0, max_x: width, max_y: height }.into());
+                (
+                    self.ai.draw_settings.width as u32,
+                    self.ai.draw_settings.height as u32,
+                )
+            } else {
+                (self.project().width, self.project().height)
+            };
+            self.ai.input_region = Some(
+                PixelRect {
+                    min_x: 0,
+                    min_y: 0,
+                    max_x: width,
+                    max_y: height,
+                }
+                .into(),
+            );
             self.ai.message = "Preparing workflow...".into();
             self.ai.preview = None;
             self.ai.result = None;
@@ -107,7 +149,10 @@ impl EditorApp {
             });
             return;
         }
-        if matches!(self.ai.mode, AiMode::Redraw | AiMode::AnimeRedraw | AiMode::Inpaint) {
+        if matches!(
+            self.ai.mode,
+            AiMode::Redraw | AiMode::AnimeRedraw | AiMode::Inpaint
+        ) {
             if let Err(error) = self.ai.draw_settings.validate_redraw(self.ai.denoise) {
                 self.ai.message = error;
                 return;
@@ -126,7 +171,9 @@ impl EditorApp {
             }
         }
         if self.ai.mode == AiMode::Lineart {
-            if let Err(error) = crate::comfyui::validate_lineart_resolution(self.ai.lineart_resolution) {
+            if let Err(error) =
+                crate::comfyui::validate_lineart_resolution(self.ai.lineart_resolution)
+            {
                 self.ai.message = error;
                 return;
             }
@@ -134,12 +181,20 @@ impl EditorApp {
         let mask = if self.ai.mode == AiMode::Inpaint {
             match self.ai_mask() {
                 Ok(mask) => Some(mask),
-                Err(error) => { self.ai.message = error; return; }
+                Err(error) => {
+                    self.ai.message = error;
+                    return;
+                }
             }
-        } else { None };
+        } else {
+            None
+        };
         let (image, input_region) = match self.ai_input() {
             Ok(input) => input,
-            Err(error) => { self.ai.message = error; return; }
+            Err(error) => {
+                self.ai.message = error;
+                return;
+            }
         };
         self.ai.document_id = self.workspace.active_doc().id.clone();
         self.ai.input_region = Some(input_region);
@@ -149,43 +204,114 @@ impl EditorApp {
         self.ai.preview_dirty = false;
         self.ai.fraction = None;
         self.ai.job = Some(if let Some(mask) = mask {
-            crate::comfyui::Job::start_inpaint(config, image, mask, self.ai.scale, self.ai.draw_settings.clone(), self.ai.denoise)
+            crate::comfyui::Job::start_inpaint(
+                config,
+                image,
+                mask,
+                self.ai.scale,
+                self.ai.draw_settings.clone(),
+                self.ai.denoise,
+            )
         } else if self.ai.mode == AiMode::AnimeRedraw {
-            crate::comfyui::Job::start_anime_redraw(config, image, self.ai.scale, self.ai.draw_settings.clone(), self.ai.denoise)
+            crate::comfyui::Job::start_anime_redraw(
+                config,
+                image,
+                self.ai.scale,
+                self.ai.draw_settings.clone(),
+                self.ai.denoise,
+            )
         } else if self.ai.mode == AiMode::Redraw {
-            crate::comfyui::Job::start_redraw(config, image, self.ai.scale, self.ai.draw_settings.clone(), self.ai.denoise)
+            crate::comfyui::Job::start_redraw(
+                config,
+                image,
+                self.ai.scale,
+                self.ai.draw_settings.clone(),
+                self.ai.denoise,
+            )
         } else if self.ai.mode == AiMode::Lineart {
-            crate::comfyui::Job::start_lineart(config, image, self.ai.scale, self.ai.lineart_resolution)
+            crate::comfyui::Job::start_lineart(
+                config,
+                image,
+                self.ai.scale,
+                self.ai.lineart_resolution,
+            )
         } else if self.ai.mode == AiMode::DrawCn {
-            crate::comfyui::Job::start_draw_cn(config, image, self.ai.scale, self.ai.draw_settings.clone(), self.ai.control_net)
+            crate::comfyui::Job::start_draw_cn(
+                config,
+                image,
+                self.ai.scale,
+                self.ai.draw_settings.clone(),
+                self.ai.control_net,
+            )
         } else if self.ai.mode == AiMode::Upscale {
-            crate::comfyui::Job::start_upscale(config, image, self.ai.scale, self.ai.draw_settings.clone(), self.ai.upscale)
+            crate::comfyui::Job::start_upscale(
+                config,
+                image,
+                self.ai.scale,
+                self.ai.draw_settings.clone(),
+                self.ai.upscale,
+            )
         } else {
             crate::comfyui::Job::start(config, image, self.ai.scale, self.ai.prompt.clone())
         });
     }
 
     fn start_video(&mut self) {
-        let Some(config) = self.ai.config.clone() else { return; };
-        if let Err(error) = self.ai.video_settings.validate() { self.ai.message = error; return; }
+        let Some(config) = self.ai.config.clone() else {
+            return;
+        };
+        if let Err(error) = self.ai.video_settings.validate() {
+            self.ai.message = error;
+            return;
+        }
         let image = match self.video_input() {
             Ok(image) => image,
-            Err(error) => { self.ai.message = error; return; }
+            Err(error) => {
+                self.ai.message = error;
+                return;
+            }
+        };
+        let end_image = match self.ai.video_end_document.clone() {
+            Some(document) => match self.video_frame_input(&document, self.ai.video_end_layer) {
+                Ok(image) => Some(image),
+                Err(error) => {
+                    self.ai.message = error;
+                    return;
+                }
+            },
+            None => None,
         };
         self.ai.message = "Preparing video input…".into();
         self.ai.fraction = None;
         self.ai.preview = None;
         self.ai.preview_dirty = false;
-        self.ai.job = Some(crate::comfyui::Job::start_video(config, image, self.ai.video_settings.clone()));
+        self.ai.job = Some(crate::comfyui::Job::start_video(
+            config,
+            image,
+            end_image,
+            self.ai.video_settings.clone(),
+        ));
     }
 
     pub(in crate::app) fn video_input(&mut self) -> Result<image::RgbaImage, String> {
-        let index = self.workspace.documents.iter().position(|d| d.id == self.ai.document_id)
+        self.video_frame_input(&self.ai.document_id.clone(), self.ai.video_layer)
+    }
+
+    pub(in crate::app) fn video_frame_input(
+        &mut self,
+        document_id: &str,
+        layer: Option<usize>,
+    ) -> Result<image::RgbaImage, String> {
+        let index = self
+            .workspace
+            .documents
+            .iter()
+            .position(|d| d.id == document_id)
             .ok_or("Choose a source document")?;
         self.workspace.ensure_document_loaded(index)?;
         let p = &self.workspace.documents[index].project;
         crate::comfyui::scaled_size(p.width, p.height, 1.0)?;
-        let pixels = if let Some(layer) = self.ai.video_layer {
+        let pixels = if let Some(layer) = layer {
             let layer = p.layers.get(layer).ok_or("Choose a source layer")?;
             layer.pixels.region(0, 0, p.width, p.height)
         } else {
@@ -195,13 +321,21 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn ai_mask(&self) -> Result<image::RgbaImage, String> {
-        if self.ai.source == AiSource::Selection { return Err("Inpaint source must be a layer or the whole document".into()); }
+        if self.ai.source == AiSource::Selection {
+            return Err("Inpaint source must be a layer or the whole document".into());
+        }
         let p = self.project();
-        let selection = self.session.selection.as_ref().ok_or("Select an area to use as the inpaint mask")?;
+        let selection = self
+            .session
+            .selection
+            .as_ref()
+            .ok_or("Select an area to use as the inpaint mask")?;
         if selection.width != p.width || selection.height != p.height {
             return Err("Selection does not match the current canvas".into());
         }
-        if selection.is_empty() { return Err("Select an area to use as the inpaint mask".into()); }
+        if selection.is_empty() {
+            return Err("Select an area to use as the inpaint mask".into());
+        }
         let region = self.ai_source_region()?;
         let (width, height) = region.size();
         crate::comfyui::scaled_size(width, height, 1.0)?;
@@ -209,25 +343,40 @@ impl EditorApp {
         let mask = image::RgbaImage::from_fn(width, height, |x, y| {
             let x = region.min_x as i64 + x as i64;
             let y = region.min_y as i64 + y as i64;
-            let value = if x >= 0 && y >= 0 && selection.contains(x as u32, y as u32) { 255 } else { 0 };
+            let value = if x >= 0 && y >= 0 && selection.contains(x as u32, y as u32) {
+                255
+            } else {
+                0
+            };
             image::Rgba([value, value, value, 255])
         });
         let softness = self.ai.mask_softness;
         if !softness.is_finite() || !(0.0..=256.0).contains(&softness) {
             return Err("Mask softness must be between 0 and 256 px".into());
         }
-        Ok(if softness > 0.0 { image::imageops::blur(&mask, softness) } else { mask })
+        Ok(if softness > 0.0 {
+            image::imageops::blur(&mask, softness)
+        } else {
+            mask
+        })
     }
 
     /// Crop before worker-side scaling; retain document coordinates for Accept / Fit.
     pub(in crate::app) fn ai_source_region(&self) -> Result<crate::raster::RasterRect, String> {
         let p = self.project();
         if self.ai.source == AiSource::Selection {
-            let selection = self.session.selection.as_ref().ok_or("Select an area on the canvas first")?;
+            let selection = self
+                .session
+                .selection
+                .as_ref()
+                .ok_or("Select an area on the canvas first")?;
             if selection.width != p.width || selection.height != p.height {
                 return Err("Selection does not match the current canvas".into());
             }
-            return selection.bounds().map(Into::into).ok_or("Select an area on the canvas first".into());
+            return selection
+                .bounds()
+                .map(Into::into)
+                .ok_or("Select an area on the canvas first".into());
         }
         if self.ai.source == AiSource::Layer {
             let pixels = p.active_pixels().ok_or("Choose a raster layer first")?;
@@ -236,15 +385,22 @@ impl EditorApp {
         self.ai.source_region(p.width, p.height, None)
     }
 
-    pub(in crate::app) fn ai_input(&self) -> Result<(image::RgbaImage, crate::raster::RasterRect), String> {
+    pub(in crate::app) fn ai_input(
+        &self,
+    ) -> Result<(image::RgbaImage, crate::raster::RasterRect), String> {
         let p = self.project();
         let region = self.ai_source_region()?;
         let (width, height) = region.size();
         crate::comfyui::scaled_size(width, height, 1.0)?;
         crate::comfyui::scaled_size(width, height, self.ai.scale)?;
         let pixels = match self.ai.source {
-            AiSource::Layer => p.active_pixels().ok_or("Choose a raster layer first")?.region(region.min_x, region.min_y, width, height),
-            AiSource::Document | AiSource::Selection => crate::editing::composite_layers(&p.layers, p.width, p.height),
+            AiSource::Layer => p
+                .active_pixels()
+                .ok_or("Choose a raster layer first")?
+                .region(region.min_x, region.min_y, width, height),
+            AiSource::Document | AiSource::Selection => {
+                crate::editing::composite_layers(&p.layers, p.width, p.height)
+            }
         };
         let image = if self.ai.source == AiSource::Selection {
             let selection = self.session.selection.as_ref().unwrap();
@@ -253,8 +409,11 @@ impl EditorApp {
                 for x in region.min_x as u32..region.max_x as u32 {
                     if selection.contains(x, y) {
                         let index = ((y as usize * p.width as usize) + x as usize) * 4;
-                        cropped.put_pixel(x - region.min_x as u32, y - region.min_y as u32,
-                            image::Rgba(pixels[index..index + 4].try_into().unwrap()));
+                        cropped.put_pixel(
+                            x - region.min_x as u32,
+                            y - region.min_y as u32,
+                            image::Rgba(pixels[index..index + 4].try_into().unwrap()),
+                        );
                     }
                 }
             }
@@ -286,7 +445,9 @@ impl EditorApp {
     }
 
     pub fn accept_ai(&mut self) {
-        if self.ai.job.is_some() || self.ai.result.is_none() { return; }
+        if self.ai.job.is_some() || self.ai.result.is_none() {
+            return;
+        }
         if self.workspace.active_doc().id != self.ai.document_id {
             self.ai.message = "Destination document changed; result was not inserted".into();
             return;
@@ -296,24 +457,36 @@ impl EditorApp {
             self.ai.message = "Missing source bounds; regenerate the image".into();
             return;
         };
-        let size = if self.ai.fit_image { region.size() } else { image.dimensions() };
+        let size = if self.ai.fit_image {
+            region.size()
+        } else {
+            image.dimensions()
+        };
         let action = self.ai.mode.layer_prefix();
         let name = format!("{action} {}", self.workspace.active().layers.len() + 1);
         let project = self.workspace.active_mut();
-        let insertion = if !self.ai.mode.needs_input() && (project.width == 0 || project.height == 0) {
-            project.import_rgba(image.as_raw(), image.width(), image.height()).map(|()| {
-                project.layers[0].name = name;
-            })
-        } else {
-            project.add_raster_layer(image, name, region, self.ai.fit_image)
-        };
+        let insertion =
+            if !self.ai.mode.needs_input() && (project.width == 0 || project.height == 0) {
+                project
+                    .import_rgba(image.as_raw(), image.width(), image.height())
+                    .map(|()| {
+                        project.layers[0].name = name;
+                    })
+            } else {
+                project.add_raster_layer(image, name, region, self.ai.fit_image)
+            };
         match insertion {
             Ok(()) => {
                 let needs_fit = self.image_size.is_none();
                 self.history.clear();
                 self.sync_layer_structure();
-                self.ai.layer_bounds = self.project().active_pixels().and_then(|pixels| pixels.bounds());
-                if needs_fit { self.session.fit_image = true; }
+                self.ai.layer_bounds = self
+                    .project()
+                    .active_pixels()
+                    .and_then(|pixels| pixels.bounds());
+                if needs_fit {
+                    self.session.fit_image = true;
+                }
                 self.status = format!("{action} added: {} × {} px", size.0, size.1);
                 self.ai.preview = self.ai.result.take();
                 self.ai.message = format!("{} — regenerate for another result", self.status);
@@ -323,24 +496,35 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn poll_ai(&mut self, ui: &mut Ui) {
-        let Some(job) = self.ai.job.as_ref() else { return; };
+        let Some(job) = self.ai.job.as_ref() else {
+            return;
+        };
         if let Ok(mut progress) = job.progress.try_lock() {
-            if !job.is_cancelling() { self.ai.message = progress.message.clone(); }
+            if !job.is_cancelling() {
+                self.ai.message = progress.message.clone();
+            }
             self.ai.fraction = progress.fraction;
             if let Some(preview) = progress.preview.take() {
                 self.ai.preview = Some(preview);
                 self.ai.preview_dirty = true;
             }
         }
-        let Some(result) = job.poll() else { return; };
+        let Some(result) = job.poll() else {
+            return;
+        };
         self.ai.job = None;
         match result {
             crate::comfyui::JobResult::Done(image) => {
                 if self.workspace.active_doc().id != self.ai.document_id {
-                    self.ai.message = "Destination document changed; result was not inserted".into();
+                    self.ai.message =
+                        "Destination document changed; result was not inserted".into();
                     return;
                 }
-                self.ai.message = format!("Result: {} × {} px — accept or regenerate", image.width(), image.height());
+                self.ai.message = format!(
+                    "Result: {} × {} px — accept or regenerate",
+                    image.width(),
+                    image.height()
+                );
                 self.ai.preview = Some(image::imageops::thumbnail(&image, 1024, 1024));
                 self.ai.preview_dirty = true;
                 self.ai.fraction = None;
@@ -351,10 +535,15 @@ impl EditorApp {
                 match self.workspace.add_video(bytes) {
                     Ok(index) => {
                         self.dirty = true;
-                        self.status = format!("Video saved: videos/{}", self.workspace.videos[index].name);
+                        self.status =
+                            format!("Video saved: videos/{}", self.workspace.videos[index].name);
                         self.ai.message = self.status.clone();
                     }
-                    Err(error) => { self.ai.message = error.clone(); self.status = error.clone(); ui.notify_error(&error); }
+                    Err(error) => {
+                        self.ai.message = error.clone();
+                        self.status = error.clone();
+                        ui.notify_error(&error);
+                    }
                 }
             }
             crate::comfyui::JobResult::Failed(error) => {

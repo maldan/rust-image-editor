@@ -6,8 +6,9 @@ use mega_ui::{DockState, Rect, Theme, Ui};
 
 use crate::canvas_gpu::{CanvasOverlay, CanvasRenderer, FloatingDraw, LayerDraw};
 use crate::editing::{
-    BrushStroke, FloatingTransform, PixelRect, SelectMode, Selection, SoftBrushCoverage, Tool, TransformHit, TransformCursor,
-    apply_brush, brush_dirty_bounds, composite_pixel, fill_bucket, flood_mask,
+    BrushStroke, FloatingTransform, PixelRect, SelectMode, Selection, SoftBrushCoverage, Tool,
+    TransformCursor, TransformHit, apply_brush, brush_dirty_bounds, composite_pixel, fill_bucket,
+    flood_mask,
 };
 use crate::history::{EditCapture, History, HistoryChange};
 use crate::host::{FrameInput, Scene};
@@ -19,10 +20,12 @@ use crate::view::CanvasView;
 use crate::workspace::Workspace;
 
 mod ai;
-mod video;
 mod documents;
 mod history;
 mod layers;
+mod rename;
+mod video;
+pub(crate) use rename::RenameTarget;
 mod scene;
 mod session;
 mod tools;
@@ -69,6 +72,7 @@ pub struct EditorApp {
     pub resize_h: u32,
     pub ai: ui::ai_dialog::AiDialog,
     pub hsv: ui::hsv_dialog::HsvDialog,
+    pub rename: Option<ui::rename_dialog::RenameDialog>,
     video_preview: Option<crate::video::Playback>,
     video_poster: Option<crate::video::PosterJob>,
 }
@@ -101,6 +105,7 @@ impl Default for EditorApp {
             resize_h: 512,
             ai: ui::ai_dialog::AiDialog::default(),
             hsv: Default::default(),
+            rename: None,
             video_preview: None,
             video_poster: None,
         }
@@ -109,26 +114,40 @@ impl Default for EditorApp {
 
 impl EditorApp {
     pub fn open_hsv(&mut self) {
-        if self.ai.open || self.hsv.open || self.project().layers.is_empty() { return; }
+        if self.ai.open || self.hsv.open || self.project().layers.is_empty() {
+            return;
+        }
         self.close_asset_preview();
         self.commit_transform();
         self.hsv = ui::hsv_dialog::HsvDialog {
-            open:true,layer:self.project().active_layer,document_id:self.workspace.active_doc().id.clone(),
+            open: true,
+            layer: self.project().active_layer,
+            document_id: self.workspace.active_doc().id.clone(),
             ..Default::default()
         };
     }
 
     pub fn apply_hsv(&mut self) {
-        if !self.hsv.open { return; }
+        if !self.hsv.open {
+            return;
+        }
         self.hsv.open = false;
-        if self.hsv.document_id != self.workspace.active_doc().id { return; }
+        if self.hsv.document_id != self.workspace.active_doc().id {
+            return;
+        }
         let index = self.hsv.layer;
         let adjustment = self.hsv.adjustment;
-        let Some(layer) = self.workspace.active_mut().layers.get_mut(index) else { return; };
+        let Some(layer) = self.workspace.active_mut().layers.get_mut(index) else {
+            return;
+        };
         let before = layer.pixels.clone();
-        if !adjustment.apply(&mut layer.pixels) { return; }
+        if !adjustment.apply(&mut layer.pixels) {
+            return;
+        }
         let edit = crate::history::HistoryEdit::from_diff(index, &before, &layer.pixels);
-        if let Some(edit) = edit { self.history.push(edit); }
+        if let Some(edit) = edit {
+            self.history.push(edit);
+        }
         self.layers_reload = true;
         self.dirty = true;
         self.workspace.mark_active_thumb_dirty();
@@ -143,16 +162,23 @@ impl EditorApp {
     }
 
     pub fn brush_last_active(&self) -> bool {
-        self.brush_last.is_some() || self.session.transform_drag.is_some()
-            || !self.session.lasso_points.is_empty() || self.session.selection_brush_last.is_some()
+        self.brush_last.is_some()
+            || self.session.transform_drag.is_some()
+            || !self.session.lasso_points.is_empty()
+            || self.session.selection_brush_last.is_some()
     }
 
     pub fn display_size(&self) -> Option<(u32, u32)> {
         if let Some(player) = &self.video_preview {
-            return player.frame.as_ref().map(image::RgbaImage::dimensions);
+            return player.frame.as_ref().map(|frame| frame.dimensions());
         }
         if let Some(id) = &self.session.preview_asset {
-            return self.workspace.assets.iter().find(|a| &a.id == id).map(|a| (a.width, a.height));
+            return self
+                .workspace
+                .assets
+                .iter()
+                .find(|a| &a.id == id)
+                .map(|a| (a.width, a.height));
         }
         self.image_size
     }
@@ -162,13 +188,17 @@ impl EditorApp {
             self.status = error;
             return;
         }
-        let Some(asset) = self.workspace.assets.get(index) else { return; };
+        let Some(asset) = self.workspace.assets.get(index) else {
+            return;
+        };
         let id = asset.id.clone();
         self.begin_asset_preview(id);
     }
 
     fn begin_asset_preview(&mut self, id: String) {
-        if self.session.preview_asset.as_ref() == Some(&id) { return; }
+        if self.session.preview_asset.as_ref() == Some(&id) {
+            return;
+        }
         self.video_preview = None;
         self.commit_transform();
         self.brush_last = None;
@@ -177,7 +207,8 @@ impl EditorApp {
         self.session.selection_anchor = None;
         self.session.selection_current = None;
         if self.session.preview_asset.is_none() {
-            self.session.preview_document_view = Some((self.session.pan, self.session.zoom, self.session.rotation));
+            self.session.preview_document_view =
+                Some((self.session.pan, self.session.zoom, self.session.rotation));
         }
         self.session.preview_asset = Some(id);
         self.session.preview_asset_dirty = true;
@@ -202,7 +233,9 @@ impl EditorApp {
     pub fn canvas_view(&self) -> Option<CanvasView> {
         let (width, height) = self.display_size()?;
         Some(CanvasView {
-            center: self.session.canvas_rect.min + rect_size(self.session.canvas_rect) * 0.5 + self.session.pan,
+            center: self.session.canvas_rect.min
+                + rect_size(self.session.canvas_rect) * 0.5
+                + self.session.pan,
             zoom: self.session.zoom,
             rotation: self.session.rotation.to_radians(),
             width,
@@ -234,14 +267,19 @@ impl EditorApp {
             return;
         }
         let sample = 1.0 / dt;
-        self.fps = if self.fps == 0.0 { sample } else { self.fps * 0.85 + sample * 0.15 };
+        self.fps = if self.fps == 0.0 {
+            sample
+        } else {
+            self.fps * 0.85 + sample * 0.15
+        };
     }
 
     pub fn fit_to_canvas(&mut self) {
         let Some((width, height)) = self.display_size() else {
             return;
         };
-        let available = (rect_size(self.session.canvas_rect) - Vec2::splat(32.0)).max(Vec2::splat(1.0));
+        let available =
+            (rect_size(self.session.canvas_rect) - Vec2::splat(32.0)).max(Vec2::splat(1.0));
         self.session.zoom = (available.x / width as f32)
             .min(available.y / height as f32)
             .clamp(0.05, 1.0);
@@ -345,42 +383,64 @@ mod hsv_tests {
 
     fn document() -> EditorApp {
         let mut app = EditorApp::default();
-        app.project_mut().import_rgba(&[0,0,255,255].repeat(4),2,2).unwrap();
+        app.project_mut()
+            .import_rgba(&[0, 0, 255, 255].repeat(4), 2, 2)
+            .unwrap();
         app.project_mut().add_layer();
-        app.project_mut().layers[1].pixels.write(0,-20,30,[255,0,0,128]);
+        app.project_mut().layers[1]
+            .pixels
+            .write(0, -20, 30, [255, 0, 0, 128]);
         app.project_mut().layers[1].opacity = 0.7;
         app.sync_layer_structure();
         app.dirty = false;
-        app.session.canvas_rect = Rect::from_min_size(Vec2::ZERO,Vec2::splat(400.0));
+        app.session.canvas_rect = Rect::from_min_size(Vec2::ZERO, Vec2::splat(400.0));
         app
     }
 
     #[test]
     fn hsv_preview_does_not_edit_pixels_and_apply_is_one_undoable_active_layer_edit() {
         let mut app = document();
-        let before:Vec<_> = app.project().layers.iter().map(|l|l.pixels.clone()).collect();
+        let before: Vec<_> = app
+            .project()
+            .layers
+            .iter()
+            .map(|l| l.pixels.clone())
+            .collect();
         app.open_hsv();
-        app.hsv.adjustment = HsvAdjustment {hue:120.0,..Default::default()};
+        app.hsv.adjustment = HsvAdjustment {
+            hue: 120.0,
+            ..Default::default()
+        };
         assert!(app.canvas_present().unwrap().2.hsv.is_some());
-        assert_eq!(app.project().layers[1].pixels,before[1]);
+        assert_eq!(app.project().layers[1].pixels, before[1]);
         assert!(!app.dirty);
         app.hsv.preview = false;
         assert!(app.canvas_present().unwrap().2.hsv.is_none());
         app.apply_hsv();
         assert!(!app.hsv.open);
-        assert_eq!(app.project().layers[0].pixels,before[0]);
-        assert_eq!(app.project().layers[1].pixels.read(0,-20,30),[0,255,0,128]);
-        assert_eq!(app.project().layers[1].opacity,0.7);
+        assert_eq!(app.project().layers[0].pixels, before[0]);
+        assert_eq!(
+            app.project().layers[1].pixels.read(0, -20, 30),
+            [0, 255, 0, 128]
+        );
+        assert_eq!(app.project().layers[1].opacity, 0.7);
         assert!(app.dirty);
         app.undo();
-        assert_eq!(app.project().layers[1].pixels,before[1]);
+        assert_eq!(app.project().layers[1].pixels, before[1]);
         app.redo();
-        assert_eq!(app.project().layers[1].pixels.read(0,-20,30),[0,255,0,128]);
+        assert_eq!(
+            app.project().layers[1].pixels.read(0, -20, 30),
+            [0, 255, 0, 128]
+        );
         app.open_hsv();
         assert!(app.hsv.adjustment.is_identity());
         app.apply_hsv();
         app.undo();
-        assert_eq!(app.project().layers[1].pixels,before[1],"neutral Apply must not add a history entry");
+        assert_eq!(
+            app.project().layers[1].pixels,
+            before[1],
+            "neutral Apply must not add a history entry"
+        );
     }
 
     #[test]
@@ -397,13 +457,15 @@ mod hsv_tests {
         app.begin_frame(&input);
         assert!(!app.input.mouse_pressed && !app.input.key_undo && !app.input.key_paste);
         let mut ui = Ui::new();
-        ui.begin_frame(mega_ui::UiInput {viewport:Vec2::new(900.0,700.0),..Default::default()});
-        ui::hsv_dialog::draw(&mut ui,&mut app);
+        ui.begin_frame(mega_ui::UiInput {
+            viewport: Vec2::new(900.0, 700.0),
+            ..Default::default()
+        });
+        ui::hsv_dialog::draw(&mut ui, &mut app);
         ui.end_frame();
         assert!(!app.hsv.open);
-        assert_eq!(app.project().layers[1].pixels,original);
+        assert_eq!(app.project().layers[1].pixels, original);
         assert!(!app.dirty);
         assert!(app.history.undo(app.workspace.active_mut()).is_none());
     }
 }
-

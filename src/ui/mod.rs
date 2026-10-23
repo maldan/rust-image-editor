@@ -1,15 +1,16 @@
 //! Editor chrome: menus, dock tabs, status bar.
 
 pub mod ai_dialog;
-mod video_dialog;
-pub mod hsv_dialog;
+mod asset_properties;
 mod assets_panel;
 mod canvas;
+pub mod hsv_dialog;
 mod menu_bar;
 mod project_panel;
-mod asset_properties;
+pub mod rename_dialog;
 mod tool_options;
 mod tools_panel;
+mod video_dialog;
 
 use glam::Vec2;
 use mega_ui::{DockNode, DockState, Ui};
@@ -41,10 +42,15 @@ fn context_panel(node: &mut DockNode, preview: bool) {
     match node {
         DockNode::Leaf { tabs, .. } => {
             for tab in tabs {
-                if tab == "Layers" || tab == "Properties" { *tab = if preview { "Properties" } else { "Layers" }.into(); }
+                if tab == "Layers" || tab == "Properties" {
+                    *tab = if preview { "Properties" } else { "Layers" }.into();
+                }
             }
         }
-        DockNode::Split { first, second, .. } => { context_panel(first, preview); context_panel(second, preview); }
+        DockNode::Split { first, second, .. } => {
+            context_panel(first, preview);
+            context_panel(second, preview);
+        }
     }
 }
 
@@ -53,7 +59,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     let menu_h = 28.0 * scale;
     let status_h = 24.0 * scale;
 
-    let modal_open = app.ai.open || app.hsv.open;
+    let modal_open = app.ai.open || app.hsv.open || app.rename.is_some();
     ui.add_enabled(!modal_open, |ui| {
         ui.menu_bar(|ui| {
             menu_bar::draw(ui, app);
@@ -106,9 +112,14 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     });
     ai_dialog::draw(ui, app);
     hsv_dialog::draw(ui, app);
+    rename_dialog::draw(ui, app);
 }
 
 fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
+    if let Some(target) = action.rename {
+        app.open_rename(target);
+        return;
+    }
     if action.import {
         app.import_image(ui);
     }
@@ -118,9 +129,13 @@ fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
     if let Some(index) = action.switch_doc {
         app.switch_document(index);
     }
-    if let Some(index) = action.open_video { app.show_video_preview(index); }
+    if let Some(index) = action.open_video {
+        app.show_video_preview(index);
+    }
     if let Some(index) = action.delete_video {
-        if app.session.preview_asset.as_ref() == app.workspace.videos.get(index).map(|v| &v.id) { app.close_asset_preview(); }
+        if app.session.preview_asset.as_ref() == app.workspace.videos.get(index).map(|v| &v.id) {
+            app.close_asset_preview();
+        }
         app.workspace.delete_video(index);
         app.dirty = true;
     }
@@ -152,17 +167,27 @@ mod context_tests {
     fn context_panel_switches_titles_without_rebuilding_the_dock() {
         let mut dock = default_dock();
         fn tabs(node: &DockNode) -> Vec<String> {
-            match node { DockNode::Leaf { tabs, .. } => tabs.clone(),
-                DockNode::Split { first, second, .. } => { let mut all = tabs(first); all.extend(tabs(second)); all } }
+            match node {
+                DockNode::Leaf { tabs, .. } => tabs.clone(),
+                DockNode::Split { first, second, .. } => {
+                    let mut all = tabs(first);
+                    all.extend(tabs(second));
+                    all
+                }
+            }
         }
         let original = tabs(&dock.root);
         context_panel(&mut dock.root, true);
         let preview = tabs(&dock.root);
         assert!(!preview.iter().any(|tab| tab == "Layers"));
         assert_eq!(preview.iter().filter(|tab| *tab == "Properties").count(), 1);
-        if let DockNode::Split { ratio, .. } = &mut dock.root { *ratio = 0.27; }
+        if let DockNode::Split { ratio, .. } = &mut dock.root {
+            *ratio = 0.27;
+        }
         context_panel(&mut dock.root, false);
         assert_eq!(tabs(&dock.root), original);
-        if let DockNode::Split { ratio, .. } = &dock.root { assert_eq!(*ratio, 0.27); }
+        if let DockNode::Split { ratio, .. } = &dock.root {
+            assert_eq!(*ratio, 0.27);
+        }
     }
 }

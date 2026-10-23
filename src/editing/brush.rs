@@ -8,7 +8,9 @@ pub struct SoftBrushCoverage {
 }
 
 impl SoftBrushCoverage {
-    pub fn clear(&mut self) { self.pixels.clear(); }
+    pub fn clear(&mut self) {
+        self.pixels.clear();
+    }
 
     fn begin(&mut self, stroke_id: u32) {
         if self.stroke_id != stroke_id {
@@ -46,7 +48,10 @@ pub fn apply_brush(
     let radius = (stroke.size * 0.5).max(0.5);
     let hardness = stroke.hardness.clamp(0.0, 1.0);
     let mut local_coverage = SoftBrushCoverage::default();
-    let soft_coverage = stroke.soft_coverage.as_deref_mut().unwrap_or(&mut local_coverage);
+    let soft_coverage = stroke
+        .soft_coverage
+        .as_deref_mut()
+        .unwrap_or(&mut local_coverage);
     soft_coverage.begin(stroke.stroke_id);
     let dx = stroke.to.0 - stroke.from.0;
     let dy = stroke.to.1 - stroke.from.1;
@@ -137,9 +142,13 @@ fn stamp(
                 let inner = radius * hardness;
                 let t = ((distance_sq.sqrt() - inner) / (radius - inner)).clamp(0.0, 1.0);
                 let amount = opacity * (1.0 - t * t * (3.0 - 2.0 * t));
-                if amount <= 0.0 { continue; }
+                if amount <= 0.0 {
+                    continue;
+                }
                 let (maximum, original) = soft_coverage.pixels.entry(index).or_insert((0.0, pixel));
-                if amount <= *maximum { continue; }
+                if amount <= *maximum {
+                    continue;
+                }
                 *maximum = amount;
                 pixel = *original;
                 amount
@@ -155,9 +164,14 @@ fn stamp(
                 }
                 opacity
             };
-            if erase { erase_pixel(&mut pixel, opacity); }
-            else { paint_color(&mut pixel, opacity, color); }
-            if pixel == before { continue; }
+            if erase {
+                erase_pixel(&mut pixel, opacity);
+            } else {
+                paint_color(&mut pixel, opacity, color);
+            }
+            if pixel == before {
+                continue;
+            }
             pixels.write(width, x as i32, y as i32, pixel);
             changed = true;
             dirty_min_x = dirty_min_x.min(x);
@@ -180,15 +194,27 @@ mod soft_brush_tests {
 
     fn stroke<'a>(hardness: f32, coverage: Option<&'a mut SoftBrushCoverage>) -> BrushStroke<'a> {
         BrushStroke {
-            from: (4.5, 4.5), to: (4.5, 4.5), size: 8.0,
-            opacity: 1.0, hardness, erase: false, color: [1.0, 0.0, 0.0],
-            selection: None, coverage_marks: None, soft_coverage: coverage, stroke_id: 1,
+            from: (4.5, 4.5),
+            to: (4.5, 4.5),
+            size: 8.0,
+            opacity: 1.0,
+            hardness,
+            erase: false,
+            color: [1.0, 0.0, 0.0],
+            selection: None,
+            coverage_marks: None,
+            soft_coverage: coverage,
+            stroke_id: 1,
         }
     }
 
     #[test]
     fn hardness_controls_smooth_falloff_and_keeps_hard_edge_at_100_percent() {
-        for (hardness, expected) in [(0.0, [255, 215, 128, 40, 0]), (0.5, [255, 255, 255, 128, 0]), (1.0, [255; 5])] {
+        for (hardness, expected) in [
+            (0.0, [255, 215, 128, 40, 0]),
+            (0.5, [255, 255, 255, 128, 0]),
+            (1.0, [255; 5]),
+        ] {
             let mut pixels = vec![0; 9 * 9 * 4];
             apply_brush(&mut pixels, 9, 9, &mut stroke(hardness, None));
             for (distance, alpha) in expected.into_iter().enumerate() {
@@ -200,7 +226,11 @@ mod soft_brush_tests {
     #[test]
     fn soft_brush_strengthens_fringe_from_original_pixel_without_compounding() {
         for erase in [false, true] {
-            let mut pixels = if erase { [10, 20, 30, 200].repeat(81) } else { vec![0; 81 * 4] };
+            let mut pixels = if erase {
+                [10, 20, 30, 200].repeat(81)
+            } else {
+                vec![0; 81 * 4]
+            };
             let mut coverage = SoftBrushCoverage::default();
             let mut brush = stroke(0.0, Some(&mut coverage));
             brush.opacity = 0.5;
@@ -219,20 +249,34 @@ mod soft_brush_tests {
             brush.stroke_id = 2;
             apply_brush(&mut pixels, 9, 9, &mut brush);
             assert_eq!(pixels.read(9, 4, 4)[3], if erase { 50 } else { 192 });
-            if erase { assert_eq!(&pixels.read(9, 4, 4)[..3], &[10, 20, 30]); }
+            if erase {
+                assert_eq!(&pixels.read(9, 4, 4)[..3], &[10, 20, 30]);
+            }
         }
     }
 
     #[test]
     fn soft_brush_respects_selection_and_opacity() {
-        let selection = Selection::from_rect(PixelRect { min_x: 4, min_y: 4, max_x: 5, max_y: 5 }, 9, 9);
+        let selection = Selection::from_rect(
+            PixelRect {
+                min_x: 4,
+                min_y: 4,
+                max_x: 5,
+                max_y: 5,
+            },
+            9,
+            9,
+        );
         let mut pixels = vec![0; 9 * 9 * 4];
         let mut brush = stroke(0.0, None);
         brush.selection = Some(&selection);
         brush.opacity = 0.5;
         apply_brush(&mut pixels, 9, 9, &mut brush);
         assert_eq!(pixels.read(9, 4, 4), [255, 0, 0, 128]);
-        assert_eq!(pixels.chunks_exact(4).filter(|pixel| pixel[3] != 0).count(), 1);
+        assert_eq!(
+            pixels.chunks_exact(4).filter(|pixel| pixel[3] != 0).count(),
+            1
+        );
     }
 }
 

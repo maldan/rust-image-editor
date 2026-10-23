@@ -1,17 +1,17 @@
 mod app;
-mod comfyui;
 mod canvas_gpu;
+mod comfyui;
 mod editing;
 mod history;
+mod host;
 mod hsv;
 mod layer_clipboard;
-mod host;
 mod project;
 mod safe_save;
 mod tiles;
 mod ui;
-mod view;
 mod video;
+mod view;
 mod workspace;
 
 use app::EditorApp;

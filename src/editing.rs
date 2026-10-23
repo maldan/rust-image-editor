@@ -6,15 +6,17 @@ mod selection;
 mod transform;
 
 #[allow(unused_imports)]
-pub use brush::{apply_brush, BrushStroke, SoftBrushCoverage};
+pub use brush::{BrushStroke, SoftBrushCoverage, apply_brush};
 #[allow(unused_imports)]
 pub use composite::{composite_layers, composite_pixel, composite_region, merge_layers};
 #[allow(unused_imports)]
 pub use fill::{fill_bucket, flood_mask};
 #[allow(unused_imports)]
-pub use sample::{color_distance, resize_rgba, sample_bilinear, sample_mask_bilinear, sample_pixel};
+pub use sample::{
+    color_distance, resize_rgba, sample_bilinear, sample_mask_bilinear, sample_pixel,
+};
 #[allow(unused_imports)]
-pub use selection::{brush_dirty_bounds, PixelRect, SelectMode, Selection};
+pub use selection::{PixelRect, SelectMode, Selection, brush_dirty_bounds};
 #[allow(unused_imports)]
 pub use transform::{FloatingTransform, TransformCursor, TransformHit};
 

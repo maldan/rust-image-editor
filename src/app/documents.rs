@@ -53,7 +53,12 @@ impl EditorApp {
 
     /// Ctrl+C: copy the selection when one exists, otherwise the active layer.
     pub fn copy_shortcut(&mut self, ui: &mut Ui) {
-        if self.session.selection.as_ref().is_some_and(|selection| !selection.is_empty()) {
+        if self
+            .session
+            .selection
+            .as_ref()
+            .is_some_and(|selection| !selection.is_empty())
+        {
             self.copy_selection(ui);
         } else {
             self.copy_layer(ui);
@@ -65,7 +70,10 @@ impl EditorApp {
             self.status = "Apply or cancel the transform before copying".into();
             return;
         }
-        match self.selection_clipboard_text().and_then(crate::layer_clipboard::write) {
+        match self
+            .selection_clipboard_text()
+            .and_then(crate::layer_clipboard::write)
+        {
             Ok(()) => self.status = "Selection copied".into(),
             Err(error) => self.show_error(ui, error),
         }
@@ -76,11 +84,19 @@ impl EditorApp {
             self.status = "Apply or cancel the transform before cutting".into();
             return;
         }
-        if self.session.selection.as_ref().is_none_or(|selection| selection.is_empty()) {
+        if self
+            .session
+            .selection
+            .as_ref()
+            .is_none_or(|selection| selection.is_empty())
+        {
             self.status = "Select an area to cut".into();
             return;
         }
-        if let Err(error) = self.selection_clipboard_text().and_then(crate::layer_clipboard::write) {
+        if let Err(error) = self
+            .selection_clipboard_text()
+            .and_then(crate::layer_clipboard::write)
+        {
             self.show_error(ui, error);
             return;
         }
@@ -96,7 +112,12 @@ impl EditorApp {
             self.status = "Apply or cancel the transform before deleting".into();
             return;
         }
-        if self.session.selection.as_ref().is_none_or(|selection| selection.is_empty()) {
+        if self
+            .session
+            .selection
+            .as_ref()
+            .is_none_or(|selection| selection.is_empty())
+        {
             return;
         }
         match self.erase_active_selection() {
@@ -112,20 +133,32 @@ impl EditorApp {
     }
 
     pub fn copy_layer_at(&mut self, index: usize, ui: &mut Ui) {
-        match self.copy_layer_text(index).and_then(crate::layer_clipboard::write) {
+        match self
+            .copy_layer_text(index)
+            .and_then(crate::layer_clipboard::write)
+        {
             Ok(()) => self.status = "Layer copied with position and properties".into(),
             Err(error) => self.show_error(ui, error),
         }
     }
 
-    pub(in crate::app) fn insert_copied_layer(&mut self, copied: crate::layer_clipboard::CopiedLayer) {
+    pub(in crate::app) fn insert_copied_layer(
+        &mut self,
+        copied: crate::layer_clipboard::CopiedLayer,
+    ) {
         let fragment = copied.fragment;
         self.commit_transform();
         self.close_asset_preview();
         let was_empty = self.image_size.is_none();
-        self.history.insert_layer(self.workspace.active_mut(), copied.layer, copied.canvas_size);
+        self.history.insert_layer(
+            self.workspace.active_mut(),
+            copied.layer,
+            copied.canvas_size,
+        );
         self.sync_layer_structure();
-        if was_empty { self.session.fit_image = true; }
+        if was_empty {
+            self.session.fit_image = true;
+        }
         self.status = "Layer pasted with position and properties".into();
         if fragment {
             self.clear_selection();
@@ -142,22 +175,35 @@ impl EditorApp {
 
     fn capture_selection_layer(&self) -> Result<crate::project::Layer, String> {
         let (width, _) = self.image_size.ok_or("No image")?;
-        let selection = self.session.selection.as_ref().ok_or("Select an area first")?;
+        let selection = self
+            .session
+            .selection
+            .as_ref()
+            .ok_or("Select an area first")?;
         let bounds = selection.bounds().ok_or("Selection is empty")?;
         let project = self.project();
-        let source = project.layers.get(project.active_layer).ok_or("Choose a layer")?;
+        let source = project
+            .layers
+            .get(project.active_layer)
+            .ok_or("Choose a layer")?;
         let mut pixels = crate::raster::SparsePixels::default();
         let mut any = false;
         for y in bounds.min_y..bounds.max_y {
             for x in bounds.min_x..bounds.max_x {
-                if !selection.contains(x, y) { continue; }
+                if !selection.contains(x, y) {
+                    continue;
+                }
                 let pixel = source.pixels.read(width, x as i32, y as i32);
-                if pixel[3] == 0 { continue; }
+                if pixel[3] == 0 {
+                    continue;
+                }
                 pixels.write(width, x as i32, y as i32, pixel);
                 any = true;
             }
         }
-        if !any { return Err("Selection has no pixels".into()); }
+        if !any {
+            return Err("Selection has no pixels".into());
+        }
         Ok(crate::project::Layer {
             name: "Selection".into(),
             visible: true,
@@ -168,22 +214,38 @@ impl EditorApp {
 
     pub(in crate::app) fn erase_active_selection(&mut self) -> Result<(), String> {
         let (width, _) = self.image_size.ok_or("No image")?;
-        let selection = self.session.selection.clone().ok_or("Select an area to cut")?;
+        let selection = self
+            .session
+            .selection
+            .clone()
+            .ok_or("Select an area to cut")?;
         let bounds = selection.bounds().ok_or("Selection is empty")?;
         let index = self.project().active_layer;
         {
-            let pixels = &mut self.workspace.active_mut().layers.get_mut(index).ok_or("Choose a layer")?.pixels;
+            let pixels = &mut self
+                .workspace
+                .active_mut()
+                .layers
+                .get_mut(index)
+                .ok_or("Choose a layer")?
+                .pixels;
             let before = pixels.clone();
             let mut changed = false;
             for y in bounds.min_y..bounds.max_y {
                 for x in bounds.min_x..bounds.max_x {
-                    if !selection.contains(x, y) { continue; }
-                    if pixels.read(width, x as i32, y as i32) == [0; 4] { continue; }
+                    if !selection.contains(x, y) {
+                        continue;
+                    }
+                    if pixels.read(width, x as i32, y as i32) == [0; 4] {
+                        continue;
+                    }
                     pixels.write(width, x as i32, y as i32, [0; 4]);
                     changed = true;
                 }
             }
-            if !changed { return Ok(()); }
+            if !changed {
+                return Ok(());
+            }
             pixels.prune();
             self.history.push_diff(index, &before, pixels);
         }
@@ -238,7 +300,11 @@ impl EditorApp {
     pub fn optimize_project(&mut self, ui: &mut Ui) {
         match self.workspace.optimize() {
             Ok((before, after)) => {
-                self.status = format!("Project optimized: {} → {} KiB", before / 1024, after / 1024);
+                self.status = format!(
+                    "Project optimized: {} → {} KiB",
+                    before / 1024,
+                    after / 1024
+                );
                 ui.notify_success("Saved project optimized");
             }
             Err(error) => self.show_error(ui, error),
@@ -287,7 +353,10 @@ impl EditorApp {
         self.cancel_transform();
         self.workspace.set_active_document(index);
         self.history.discard_project_edits();
-        if let Err(error) = self.reload_active_view() { self.status = error; return; }
+        if let Err(error) = self.reload_active_view() {
+            self.status = error;
+            return;
+        }
         self.dirty = true;
         self.status = format!("Document: {}", self.workspace.active_doc().name);
     }
@@ -304,7 +373,9 @@ impl EditorApp {
     }
 
     pub fn duplicate_document(&mut self, index: usize) {
-        let Some(index) = self.workspace.duplicate_document(index) else { return; };
+        let Some(index) = self.workspace.duplicate_document(index) else {
+            return;
+        };
         self.switch_document(index);
         self.status = format!("Duplicated {}", self.workspace.active_doc().name);
     }
@@ -314,19 +385,30 @@ impl EditorApp {
             return;
         }
         if index == self.workspace.active_document && self.workspace.documents.len() > 1 {
-            let fallback = if index + 1 < self.workspace.documents.len() { index + 1 } else { index - 1 };
+            let fallback = if index + 1 < self.workspace.documents.len() {
+                index + 1
+            } else {
+                index - 1
+            };
             if let Err(error) = self.workspace.ensure_document_loaded(fallback) {
                 self.status = error;
                 return;
             }
         }
-        let active_id = self.workspace.documents[self.workspace.active_document].id.clone();
+        let active_id = self.workspace.documents[self.workspace.active_document]
+            .id
+            .clone();
         self.cancel_transform();
         self.close_asset_preview();
-        let Some(document) = self.workspace.take_document(index) else { return; };
+        let Some(document) = self.workspace.take_document(index) else {
+            return;
+        };
         let switched = document.id == active_id;
-        let fallback_id = self.workspace.documents[self.workspace.active_document].id.clone();
-        self.history.push_delete_document(index, document, fallback_id, switched);
+        let fallback_id = self.workspace.documents[self.workspace.active_document]
+            .id
+            .clone();
+        self.history
+            .push_delete_document(index, document, fallback_id, switched);
         if switched {
             let _ = self.reload_active_view();
         }
@@ -359,7 +441,11 @@ impl EditorApp {
         else {
             return;
         };
-        let format = if webp { image::ImageFormat::WebP } else { image::ImageFormat::Png };
+        let format = if webp {
+            image::ImageFormat::WebP
+        } else {
+            image::ImageFormat::Png
+        };
         match self.workspace.active_mut().export_image(&path, format) {
             Ok(()) => {
                 self.status = format!("Exported {}", file_name(&path));

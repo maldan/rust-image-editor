@@ -20,13 +20,17 @@ impl Scene for EditorApp {
     fn begin_frame(&mut self, input: &FrameInput) {
         self.session.canvas_cursor = None;
         self.ai.preview_input = input.clone();
-        self.input = if self.ai.open || self.hsv.open {
+        self.input = if self.ai.open || self.hsv.open || self.rename.is_some() {
             let mut blocked = FrameInput::default();
             blocked.key_escape = input.key_escape;
             blocked.dt = input.dt;
-            if self.hsv.open { blocked.key_enter = input.key_enter; }
+            if self.hsv.open || self.rename.is_some() {
+                blocked.key_enter = input.key_enter;
+            }
             blocked
-        } else { input.clone() };
+        } else {
+            input.clone()
+        };
     }
 
     fn build(&mut self, ui: &mut Ui, viewport: Vec2, _stats: DrawStats) -> bool {
@@ -40,10 +44,10 @@ impl Scene for EditorApp {
         if self.input.key_redo {
             self.redo();
         }
-        if self.input.key_escape && self.session.floating.is_some() {
+        if self.rename.is_none() && self.input.key_escape && self.session.floating.is_some() {
             self.cancel_transform();
         }
-        if self.input.key_enter && self.session.floating.is_some() {
+        if self.rename.is_none() && self.input.key_enter && self.session.floating.is_some() {
             self.commit_transform();
         }
         let thumb_waiting = self.workspace.tick_thumbs();
@@ -51,27 +55,47 @@ impl Scene for EditorApp {
         let copy = self.input.key_copy;
         let cut = self.input.key_cut;
         ui::draw(ui, self, viewport);
-        if cut { self.cut_selection(ui); }
-        else if copy { self.copy_shortcut(ui); }
-        else if paste { self.paste_clipboard(ui); }
-        else if self.input.key_delete { self.delete_selection(); }
+        if cut {
+            self.cut_selection(ui);
+        } else if copy {
+            self.copy_shortcut(ui);
+        } else if paste {
+            self.paste_clipboard(ui);
+        } else if self.input.key_delete {
+            self.delete_selection();
+        }
         // Static tools follow the pointer via mouse events. Only animated
         // overlays and unfinished uploads need another frame on their own.
-        self.ai.open || self.hsv.open
-            || self.video_preview.as_ref().is_some_and(crate::video::Playback::needs_repaint)
+        self.ai.open
+            || self.hsv.open
+            || self.rename.is_some()
+            || self
+                .video_preview
+                .as_ref()
+                .is_some_and(crate::video::Playback::needs_repaint)
             || self.video_poster.is_some()
             || (self.session.preview_asset.is_none() && self.session.selection.is_some())
             || thumb_waiting
             || !self.dirty_tiles.is_empty()
     }
 
-    fn sync_ui_textures(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut mega_ui::wgpu::UiRenderer) {
+    fn sync_ui_textures(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut mega_ui::wgpu::UiRenderer,
+    ) {
         self.workspace.prepare_thumb_atlas();
         if self.workspace.thumb_needs_upload() {
             let (width, height) = self.workspace.thumb_atlas_size;
             renderer.set_texture_rgba_nearest(
-                device, queue, crate::host::THUMB_ATLAS,
-                &self.workspace.thumb_atlas, width, height, "library thumbs",
+                device,
+                queue,
+                crate::host::THUMB_ATLAS,
+                &self.workspace.thumb_atlas,
+                width,
+                height,
+                "library thumbs",
             );
             self.workspace.mark_thumb_atlas_uploaded();
         }
@@ -82,9 +106,18 @@ impl Scene for EditorApp {
                 let preview = if preview.width() > limit || preview.height() > limit {
                     resized = image::imageops::thumbnail(preview, limit, limit);
                     &resized
-                } else { preview };
-                renderer.set_texture_rgba(device, queue, crate::host::AI_PREVIEW_TEXTURE,
-                    preview.as_raw(), preview.width(), preview.height(), "AI preview");
+                } else {
+                    preview
+                };
+                renderer.set_texture_rgba(
+                    device,
+                    queue,
+                    crate::host::AI_PREVIEW_TEXTURE,
+                    preview.as_raw(),
+                    preview.width(),
+                    preview.height(),
+                    "AI preview",
+                );
             }
             self.ai.preview_dirty = false;
         }
@@ -102,7 +135,9 @@ impl Scene for EditorApp {
                     canvas.upload_video_frame(device, queue, frame);
                     player.dirty = false;
                 }
-            } else { canvas.clear(); }
+            } else {
+                canvas.clear();
+            }
             canvas.clear_transform();
             canvas.set_selection_mask(device, queue, None, 0, 0);
             return;
@@ -111,7 +146,13 @@ impl Scene for EditorApp {
             && let Some(asset) = self.workspace.assets.iter().find(|a| &a.id == id)
         {
             if self.session.preview_asset_dirty {
-                canvas.upload_all_layers(device, queue, &[&asset.pixels], asset.width, asset.height);
+                canvas.upload_all_layers(
+                    device,
+                    queue,
+                    &[&asset.pixels],
+                    asset.width,
+                    asset.height,
+                );
                 self.session.preview_asset_dirty = false;
             }
             canvas.clear_transform();
@@ -150,7 +191,13 @@ impl Scene for EditorApp {
         } else if let Some(layer) = self.dirty_layer
             && !self.dirty_tiles.is_empty()
         {
-            if let Some(pixels) = self.workspace.active_mut().layers.get(layer).map(|l| &l.pixels) {
+            if let Some(pixels) = self
+                .workspace
+                .active_mut()
+                .layers
+                .get(layer)
+                .map(|l| &l.pixels)
+            {
                 canvas.upload_layer_dirty(
                     device,
                     queue,
@@ -172,8 +219,16 @@ impl Scene for EditorApp {
             let ready = if let Some(source) = floating.source.as_ref() {
                 canvas.sync_sparse_transform(device, queue, source, self.floating_reload)
             } else {
-                canvas.sync_transform(device, queue, floating.layer, &floating.mask, &floating.pixels,
-                    floating.bw, floating.bh, self.floating_reload)
+                canvas.sync_transform(
+                    device,
+                    queue,
+                    floating.layer,
+                    &floating.mask,
+                    &floating.pixels,
+                    floating.bw,
+                    floating.bh,
+                    self.floating_reload,
+                )
             };
             if ready {
                 self.floating_reload = false;
@@ -184,10 +239,17 @@ impl Scene for EditorApp {
     fn canvas_present(&self) -> Option<(Rect, CanvasView, CanvasOverlay)> {
         let view = self.canvas_view()?;
         if self.session.preview_asset.is_some() {
-            return Some((self.session.canvas_rect, view, CanvasOverlay {
-                layers: vec![LayerDraw { visible: true, opacity: 1.0 }],
-                ..Default::default()
-            }));
+            return Some((
+                self.session.canvas_rect,
+                view,
+                CanvasOverlay {
+                    layers: vec![LayerDraw {
+                        visible: true,
+                        opacity: 1.0,
+                    }],
+                    ..Default::default()
+                },
+            ));
         }
         let mut overlay = CanvasOverlay {
             dim_outside: self.session.dim_outside_selection && self.session.selection.is_some(),
@@ -203,10 +265,15 @@ impl Scene for EditorApp {
                 .collect(),
             ..Default::default()
         };
-        if self.hsv.open && self.hsv.preview && self.hsv.document_id == self.workspace.active_doc().id {
-            overlay.hsv = Some((self.hsv.layer,self.hsv.adjustment));
+        if self.hsv.open
+            && self.hsv.preview
+            && self.hsv.document_id == self.workspace.active_doc().id
+        {
+            overlay.hsv = Some((self.hsv.layer, self.hsv.adjustment));
         }
-        if matches!(self.session.tool, Tool::Brush | Tool::SelectionBrush) && !self.eyedropper_armed() {
+        if matches!(self.session.tool, Tool::Brush | Tool::SelectionBrush)
+            && !self.eyedropper_armed()
+        {
             let radius = (self.session.brush_size * self.session.zoom * 0.5).max(2.5);
             let expanded = Rect {
                 min: self.session.canvas_rect.min - Vec2::splat(radius),
@@ -217,7 +284,10 @@ impl Scene for EditorApp {
                 overlay.brush_radius = radius;
             }
         }
-        if let (Some(anchor), Some(current)) = (self.session.selection_anchor, self.session.selection_current) {
+        if let (Some(anchor), Some(current)) = (
+            self.session.selection_anchor,
+            self.session.selection_current,
+        ) {
             let rect = PixelRect::from_points(anchor, current, view.width, view.height);
             if !rect.is_empty() {
                 overlay.selection_rect = Some(view.pixel_corners(rect));
@@ -238,5 +308,7 @@ impl Scene for EditorApp {
         Some((self.session.canvas_rect, view, overlay))
     }
 
-    fn canvas_cursor(&self) -> Option<TransformCursor> { self.session.canvas_cursor }
+    fn canvas_cursor(&self) -> Option<TransformCursor> {
+        self.session.canvas_cursor
+    }
 }

@@ -5,10 +5,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use super::{
-    HostConfig,
-    client::Client,
-};
+use super::{HostConfig, client::Client};
 use image::RgbaImage;
 
 #[derive(Default)]
@@ -27,11 +24,23 @@ pub enum JobResult {
 
 enum InputWorkflow {
     Edit(String),
-    Video(super::VideoSettings),
-    AnimeRedraw { settings: super::DrawSettings, denoise: f32 },
+    Video {
+        settings: super::VideoSettings,
+        end_pixels: Option<RgbaImage>,
+    },
+    AnimeRedraw {
+        settings: super::DrawSettings,
+        denoise: f32,
+    },
     Lineart(i32),
-    DrawCn { settings: super::DrawSettings, control: super::ControlNetSettings },
-    Upscale { settings: super::DrawSettings, upscale: super::UpscaleSettings },
+    DrawCn {
+        settings: super::DrawSettings,
+        control: super::ControlNetSettings,
+    },
+    Upscale {
+        settings: super::DrawSettings,
+        upscale: super::UpscaleSettings,
+    },
     Inpaint {
         settings: super::DrawSettings,
         denoise: f32,
@@ -70,21 +79,32 @@ struct RemoteCancellation {
 }
 
 impl RemoteCancellation {
-    fn stop(&self) -> Result<(),String> {
+    fn stop(&self) -> Result<(), String> {
         // An upload/submission may still be in flight. If no prompt id is known
         // yet, the generation worker retries cleanup once it receives that id.
-        let Some(id) = self.prompt_id.lock().unwrap().clone() else { return Ok(()); };
-        if self.requested.swap(true,Ordering::Relaxed) { return Ok(()); }
+        let Some(id) = self.prompt_id.lock().unwrap().clone() else {
+            return Ok(());
+        };
+        if self.requested.swap(true, Ordering::Relaxed) {
+            return Ok(());
+        }
         Client::new(self.config.clone())?.cancel(&id)
     }
 }
 
 impl Job {
     #[cfg(test)]
-    pub(crate) fn pending() -> (Self,mpsc::Sender<JobResult>) {
-        let (sender,receiver) = mpsc::channel();
-        (Self {receiver,progress:Arc::new(Mutex::new(Progress::default())),
-            cancel:Arc::new(AtomicBool::new(false)),remote:None},sender)
+    pub(crate) fn pending() -> (Self, mpsc::Sender<JobResult>) {
+        let (sender, receiver) = mpsc::channel();
+        (
+            Self {
+                receiver,
+                progress: Arc::new(Mutex::new(Progress::default())),
+                cancel: Arc::new(AtomicBool::new(false)),
+                remote: None,
+            },
+            sender,
+        )
     }
 
     #[cfg(test)]
@@ -110,14 +130,38 @@ impl Job {
         )
     }
 
-    pub fn start_video(config: HostConfig, pixels: RgbaImage, settings: super::VideoSettings) -> Self {
-        Self::start_request(config, Request::Input { pixels, scale: 1.0, workflow: InputWorkflow::Video(settings) })
-    }
-
-    pub fn start_lineart(config: HostConfig, pixels: RgbaImage, scale: f32, resolution: i32) -> Self {
+    pub fn start_video(
+        config: HostConfig,
+        pixels: RgbaImage,
+        end_pixels: Option<RgbaImage>,
+        settings: super::VideoSettings,
+    ) -> Self {
         Self::start_request(
             config,
-            Request::Input { pixels, scale, workflow: InputWorkflow::Lineart(resolution) },
+            Request::Input {
+                pixels,
+                scale: 1.0,
+                workflow: InputWorkflow::Video {
+                    settings,
+                    end_pixels,
+                },
+            },
+        )
+    }
+
+    pub fn start_lineart(
+        config: HostConfig,
+        pixels: RgbaImage,
+        scale: f32,
+        resolution: i32,
+    ) -> Self {
+        Self::start_request(
+            config,
+            Request::Input {
+                pixels,
+                scale,
+                workflow: InputWorkflow::Lineart(resolution),
+            },
         )
     }
 
@@ -128,18 +172,31 @@ impl Job {
         settings: super::DrawSettings,
         control: super::ControlNetSettings,
     ) -> Self {
-        Self::start_request(config, Request::Input {
-            pixels, scale, workflow: InputWorkflow::DrawCn { settings, control },
-        })
+        Self::start_request(
+            config,
+            Request::Input {
+                pixels,
+                scale,
+                workflow: InputWorkflow::DrawCn { settings, control },
+            },
+        )
     }
 
     pub fn start_upscale(
-        config: HostConfig, pixels: RgbaImage, scale: f32,
-        settings: super::DrawSettings, upscale: super::UpscaleSettings,
+        config: HostConfig,
+        pixels: RgbaImage,
+        scale: f32,
+        settings: super::DrawSettings,
+        upscale: super::UpscaleSettings,
     ) -> Self {
-        Self::start_request(config, Request::Input {
-            pixels, scale, workflow: InputWorkflow::Upscale { settings, upscale },
-        })
+        Self::start_request(
+            config,
+            Request::Input {
+                pixels,
+                scale,
+                workflow: InputWorkflow::Upscale { settings, upscale },
+            },
+        )
     }
 
     pub fn start_draw(config: HostConfig, settings: super::DrawSettings) -> Self {
@@ -155,12 +212,20 @@ impl Job {
     }
 
     pub fn start_anime_redraw(
-        config: HostConfig, pixels: RgbaImage, scale: f32,
-        settings: super::DrawSettings, denoise: f32,
+        config: HostConfig,
+        pixels: RgbaImage,
+        scale: f32,
+        settings: super::DrawSettings,
+        denoise: f32,
     ) -> Self {
-        Self::start_request(config, Request::Input {
-            pixels, scale, workflow: InputWorkflow::AnimeRedraw { settings, denoise },
-        })
+        Self::start_request(
+            config,
+            Request::Input {
+                pixels,
+                scale,
+                workflow: InputWorkflow::AnimeRedraw { settings, denoise },
+            },
+        )
     }
 
     pub fn start_redraw(
@@ -212,8 +277,11 @@ impl Job {
         let worker_cancel = cancel.clone();
         let worker_progress = progress.clone();
         let remote = Arc::new(RemoteCancellation {
-            config:config.clone(),prompt_id:Arc::new(Mutex::new(None)),
-            stop_ws:Arc::new(AtomicBool::new(false)),requested:AtomicBool::new(false),finished:AtomicBool::new(false),
+            config: config.clone(),
+            prompt_id: Arc::new(Mutex::new(None)),
+            stop_ws: Arc::new(AtomicBool::new(false)),
+            requested: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
         });
         let worker_remote = remote.clone();
         std::thread::spawn(move || {
@@ -244,7 +312,7 @@ impl Job {
                     Err(error) => JobResult::Failed(error),
                 }
             };
-            worker_remote.finished.store(true,Ordering::Relaxed);
+            worker_remote.finished.store(true, Ordering::Relaxed);
             let _ = sender.send(result);
         });
         Self {
@@ -256,9 +324,11 @@ impl Job {
     }
 
     pub fn cancel(&self) {
-        if self.cancel.swap(true,Ordering::Relaxed) { return; }
+        if self.cancel.swap(true, Ordering::Relaxed) {
+            return;
+        }
         if let Some(remote) = &self.remote {
-            remote.stop_ws.store(true,Ordering::Relaxed);
+            remote.stop_ws.store(true, Ordering::Relaxed);
             if !remote.finished.load(Ordering::Relaxed) {
                 let remote = remote.clone();
                 // Independent of a stalled upload/history/download request.
@@ -277,7 +347,9 @@ impl Job {
     }
 
     pub fn poll(&self) -> Option<JobResult> {
-        if self.is_cancelling() { return Some(JobResult::Cancelled); }
+        if self.is_cancelling() {
+            return Some(JobResult::Cancelled);
+        }
         match self.receiver.try_recv() {
             Ok(JobResult::Done(_)) if self.is_cancelling() => Some(JobResult::Cancelled),
             Ok(result) => Some(result),
@@ -325,7 +397,13 @@ fn run(
     check_cancel(cancel)?;
     // Fresh randomness for every Run/Regenerate; stay within exact JSON integer range.
     let seed = rand::random::<u64>() & ((1_u64 << 53) - 1);
-    let video = matches!(&request, Request::Input { workflow: InputWorkflow::Video(_), .. });
+    let video = matches!(
+        &request,
+        Request::Input {
+            workflow: InputWorkflow::Video { .. },
+            ..
+        }
+    );
     let (graph, save_node) = match request {
         Request::QwenDraw(settings) => super::workflow::prepare_qwen_draw(&settings, seed)?,
         Request::AnimeDraw(settings) => super::workflow::prepare_anime(None, &settings, 1.0, seed)?,
@@ -335,7 +413,16 @@ fn run(
             scale,
             workflow,
         } => {
-            if let InputWorkflow::Video(settings) = &workflow { settings.validate()?; }
+            if let InputWorkflow::Video {
+                settings,
+                end_pixels,
+            } = &workflow
+            {
+                settings.validate()?;
+                if let Some(end) = end_pixels {
+                    super::scaled_size(end.width(), end.height(), 1.0)?;
+                }
+            }
             if let InputWorkflow::Lineart(resolution) = &workflow {
                 super::workflow::validate_lineart_resolution(*resolution)?;
             }
@@ -393,7 +480,26 @@ fn run(
                         seed,
                     )?
                 }
-                InputWorkflow::Video(settings) => super::video::prepare(&filename, &settings, seed)?,
+                InputWorkflow::Video {
+                    settings,
+                    end_pixels,
+                } => {
+                    let end_filename = if let Some(end) = end_pixels {
+                        progress.lock().unwrap().message = "Uploading end frame...".into();
+                        let png = crate::project::encode_png_rgba(
+                            end.as_raw(),
+                            end.width(),
+                            end.height(),
+                        )?;
+                        check_cancel(cancel)?;
+                        let filename = client.upload_video_end(png)?;
+                        check_cancel(cancel)?;
+                        Some(filename)
+                    } else {
+                        None
+                    };
+                    super::video::prepare(&filename, end_filename.as_deref(), &settings, seed)?
+                }
                 InputWorkflow::Edit(prompt) => super::workflow::prepare(&filename, &prompt, seed)?,
                 InputWorkflow::DrawCn { settings, control } => {
                     super::workflow::prepare_draw_cn(&filename, &settings, control, seed)?
@@ -432,12 +538,22 @@ fn run(
             return Err("ComfyUI generation timed out".into());
         }
         let history = client.history(&id)?;
-        if let Some(output) = super::client::output_from_history_kind(&history, &id, &save_node, video)? {
+        if let Some(output) =
+            super::client::output_from_history_kind(&history, &id, &save_node, video)?
+        {
             check_cancel(cancel)?;
             progress.lock().unwrap().message = "Downloading result…".into();
-            let bytes = if video { client.download_video(&output)? } else { client.download(&output)? };
+            let bytes = if video {
+                client.download_video(&output)?
+            } else {
+                client.download(&output)?
+            };
             check_cancel(cancel)?;
-            return if video { Ok(JobResult::Video(bytes)) } else { super::decode_image(&bytes).map(JobResult::Done) };
+            return if video {
+                Ok(JobResult::Video(bytes))
+            } else {
+                super::decode_image(&bytes).map(JobResult::Done)
+            };
         }
         for _ in 0..10 {
             check_cancel(cancel)?;
@@ -452,29 +568,53 @@ mod tests {
 
     #[test]
     fn video_job_uploads_input_submits_graph_and_downloads_mp4() {
-        use std::{io::{Read, Write}, net::TcpListener};
+        check_video_job(false);
+    }
+
+    #[test]
+    fn video_job_uploads_both_frames_and_submits_between_graph() {
+        check_video_job(true);
+    }
+
+    fn check_video_job(between: bool) {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+        };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let config = HostConfig { host: format!("http://{}", listener.local_addr().unwrap()),
-            ws: "ws://127.0.0.1:0".into(), login: String::new(), password: String::new() };
+        let config = HostConfig {
+            host: format!("http://{}", listener.local_addr().unwrap()),
+            ws: "ws://127.0.0.1:0".into(),
+            login: String::new(),
+            password: String::new(),
+        };
         let video = b"\0\0\0\x18ftypisomvideo".to_vec();
         let expected = video.clone();
         let server = std::thread::spawn(move || {
-            for step in 0..4 {
+            for step in 0..(4 + usize::from(between)) {
                 let (mut stream, _) = listener.accept().unwrap();
-                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
                 let mut request = Vec::new();
                 let header_end = loop {
                     let mut buffer = [0; 4096];
                     let n = stream.read(&mut buffer).unwrap();
                     assert!(n > 0);
                     request.extend_from_slice(&buffer[..n]);
-                    if let Some(end) = request.windows(4).position(|b| b == b"\r\n\r\n") { break end + 4; }
+                    if let Some(end) = request.windows(4).position(|b| b == b"\r\n\r\n") {
+                        break end + 4;
+                    }
                 };
                 let headers = String::from_utf8_lossy(&request[..header_end]).to_string();
-                let length = headers.lines().find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
-                }).unwrap_or(0);
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
                 while request.len() < header_end + length {
                     let mut buffer = [0; 4096];
                     let n = stream.read(&mut buffer).unwrap();
@@ -485,18 +625,57 @@ mod tests {
                     0 => {
                         assert!(headers.starts_with("POST /upload/image "));
                         assert!(request.windows(8).any(|b| b == b"image/pn"));
+                        assert!(
+                            String::from_utf8_lossy(&request)
+                                .contains("filename=\"mega-image-editor-input.png\"")
+                        );
                         br#"{"name":"input.png"}"#.to_vec()
                     }
-                    1 => {
+                    1 if between => {
+                        assert!(headers.starts_with("POST /upload/image "));
+                        assert!(
+                            String::from_utf8_lossy(&request)
+                                .contains("filename=\"mega-image-editor-video-end.png\"")
+                        );
+                        let signature = b"\x89PNG\r\n\x1a\n";
+                        let offset = request
+                            .windows(signature.len())
+                            .position(|b| b == signature)
+                            .unwrap();
+                        let image = image::load_from_memory_with_format(
+                            &request[offset..],
+                            image::ImageFormat::Png,
+                        )
+                        .unwrap()
+                        .to_rgba8();
+                        assert_eq!(image.dimensions(), (128, 64));
+                        assert_eq!(image.get_pixel(0, 0).0, [25, 50, 75, 255]);
+                        br#"{"name":"end.png"}"#.to_vec()
+                    }
+                    step if step == 1 + usize::from(between) => {
                         assert!(headers.starts_with("POST /prompt "));
-                        let body: serde_json::Value = serde_json::from_slice(&request[header_end..]).unwrap();
-                        assert_eq!(body["prompt"]["269"]["inputs"]["image"], "input.png");
-                        assert_eq!(body["prompt"]["320:319"]["inputs"]["value"], "Animate clouds");
+                        let body: serde_json::Value =
+                            serde_json::from_slice(&request[header_end..]).unwrap();
+                        let (first, positive, prompt_key) = if between {
+                            assert_eq!(body["prompt"]["39"]["inputs"]["image"], "end.png");
+                            ("31", "129:128", "text")
+                        } else {
+                            ("269", "320:319", "value")
+                        };
+                        assert_eq!(body["prompt"][first]["inputs"]["image"], "input.png");
+                        assert_eq!(
+                            body["prompt"][positive]["inputs"][prompt_key],
+                            "Animate clouds"
+                        );
                         br#"{"prompt_id":"video-job"}"#.to_vec()
                     }
-                    2 => {
+                    step if step == 2 + usize::from(between) => {
                         assert!(headers.starts_with("GET /history/video-job "));
-                        br#"{"video-job":{"outputs":{"270":{"gifs":[{"filename":"result.mp4","subfolder":"ltx","type":"output"}]}},"status":{"completed":true}}}"#.to_vec()
+                        let save = if between { "69" } else { "270" };
+                        serde_json::to_vec(&serde_json::json!({"video-job": {
+                            "outputs": {save: {"gifs": [{"filename": "result.mp4", "subfolder": "ltx", "type": "output"}]}},
+                            "status": {"completed": true}
+                        }})).unwrap()
                     }
                     _ => {
                         assert!(headers.starts_with("GET /view?"));
@@ -505,17 +684,32 @@ mod tests {
                         video.clone()
                     }
                 };
-                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
                 stream.write_all(&body).unwrap();
             }
         });
-        let job = Job::start_video(config, RgbaImage::new(64, 64),
-            super::super::VideoSettings { prompt: "Animate clouds".into(), ..Default::default() });
+        let job = Job::start_video(
+            config,
+            RgbaImage::new(64, 64),
+            between.then(|| RgbaImage::from_pixel(128, 64, image::Rgba([25, 50, 75, 255]))),
+            super::super::VideoSettings {
+                prompt: "Animate clouds".into(),
+                ..Default::default()
+            },
+        );
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             if let Some(result) = job.poll() {
-                match result { JobResult::Video(bytes) => assert_eq!(bytes, expected),
-                    JobResult::Failed(error) => panic!("{error}"), _ => panic!("Expected video") }
+                match result {
+                    JobResult::Video(bytes) => assert_eq!(bytes, expected),
+                    JobResult::Failed(error) => panic!("{error}"),
+                    _ => panic!("Expected video"),
+                }
                 break;
             }
             assert!(Instant::now() < deadline, "Video worker timed out");
@@ -526,21 +720,31 @@ mod tests {
 
     #[test]
     fn cancelling_a_pending_job_reports_cancelled_without_worker_response() {
-        let (job,_sender) = Job::pending();
+        let (job, _sender) = Job::pending();
         assert!(job.poll().is_none());
         job.cancel();
-        assert!(matches!(job.poll(),Some(JobResult::Cancelled)));
+        assert!(matches!(job.poll(), Some(JobResult::Cancelled)));
     }
 
     #[test]
     fn cancellation_before_prompt_id_is_known_keeps_late_cleanup_available() {
         let remote = RemoteCancellation {
-            config:HostConfig {host:String::new(),ws:String::new(),login:String::new(),password:String::new()},
-            prompt_id:Arc::new(Mutex::new(None)),stop_ws:Arc::new(AtomicBool::new(false)),
-            requested:AtomicBool::new(false),finished:AtomicBool::new(false),
+            config: HostConfig {
+                host: String::new(),
+                ws: String::new(),
+                login: String::new(),
+                password: String::new(),
+            },
+            prompt_id: Arc::new(Mutex::new(None)),
+            stop_ws: Arc::new(AtomicBool::new(false)),
+            requested: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
         };
         assert!(remote.stop().is_ok());
-        assert!(!remote.requested.load(Ordering::Relaxed),"an in-flight submission must still be cleaned up once its id arrives");
+        assert!(
+            !remote.requested.load(Ordering::Relaxed),
+            "an in-flight submission must still be cleaned up once its id arrives"
+        );
     }
 
     #[test]

@@ -50,16 +50,18 @@ pub fn composite_region(
             continue;
         }
         let side = crate::tiles::TILE_SIZE as i32;
-        for (&(tx,ty), tile) in &layer.pixels.tiles {
-            let ox = tx*side + layer.pixels.offset.0;
-            let oy = ty*side + layer.pixels.offset.1;
-            let x0 = ox.max(x as i32); let x1 = (ox+side).min(x1 as i32);
-            let y0 = oy.max(y as i32); let y1 = (oy+side).min(y1 as i32);
+        for (&(tx, ty), tile) in &layer.pixels.tiles {
+            let ox = tx * side + layer.pixels.offset.0;
+            let oy = ty * side + layer.pixels.offset.1;
+            let x0 = ox.max(x as i32);
+            let x1 = (ox + side).min(x1 as i32);
+            let y0 = oy.max(y as i32);
+            let y1 = (oy + side).min(y1 as i32);
             for py in y0..y1 {
                 for px in x0..x1 {
-                    let dst = (py as usize * width as usize + px as usize)*4;
-                    let src = ((py-oy)*side+px-ox) as usize*4;
-                    over(&mut out[dst..dst+4], &tile[src..src+4], opacity);
+                    let dst = (py as usize * width as usize + px as usize) * 4;
+                    let src = ((py - oy) * side + px - ox) as usize * 4;
+                    over(&mut out[dst..dst + 4], &tile[src..src + 4], opacity);
                 }
             }
         }
@@ -67,15 +69,25 @@ pub fn composite_region(
 }
 
 /// Merge physical tiles without clipping to the document or allocating the gap between them.
-pub fn merge_layers(lower: &crate::project::Layer, upper: &crate::project::Layer) -> crate::project::Layer {
-    let mut pixels = crate::raster::SparsePixels { offset: lower.pixels.offset, ..Default::default() };
+pub fn merge_layers(
+    lower: &crate::project::Layer,
+    upper: &crate::project::Layer,
+) -> crate::project::Layer {
+    let mut pixels = crate::raster::SparsePixels {
+        offset: lower.pixels.offset,
+        ..Default::default()
+    };
     let side = crate::tiles::TILE_SIZE as i32;
     for layer in [lower, upper] {
         let opacity = layer.opacity.clamp(0.0, 1.0);
-        if !layer.visible || opacity <= f32::EPSILON { continue; }
+        if !layer.visible || opacity <= f32::EPSILON {
+            continue;
+        }
         for (&(tx, ty), tile) in &layer.pixels.tiles {
             for (i, source) in tile.chunks_exact(4).enumerate() {
-                if source[3] == 0 { continue; }
+                if source[3] == 0 {
+                    continue;
+                }
                 let x = tx * side + (i % side as usize) as i32 + layer.pixels.offset.0;
                 let y = ty * side + (i / side as usize) as i32 + layer.pixels.offset.1;
                 let mut destination = pixels.read(0, x, y);
@@ -86,7 +98,10 @@ pub fn merge_layers(lower: &crate::project::Layer, upper: &crate::project::Layer
     }
     pixels.prune();
     crate::project::Layer {
-        name: lower.name.clone(), visible: lower.visible || upper.visible, opacity: 1.0, pixels,
+        name: lower.name.clone(),
+        visible: lower.visible || upper.visible,
+        opacity: 1.0,
+        pixels,
     }
 }
 
@@ -98,11 +113,19 @@ mod merge_tests {
 
     #[test]
     fn composite_pixel_matches_the_full_image_composite() {
-        let mut lower = Layer { name: "Lower".into(), visible: true, opacity: 0.5,
-            pixels: SparsePixels::from_rgba(&[200, 40, 80, 255, 0, 0, 0, 0, 10, 20, 30, 128], 3, 1) };
+        let mut lower = Layer {
+            name: "Lower".into(),
+            visible: true,
+            opacity: 0.5,
+            pixels: SparsePixels::from_rgba(&[200, 40, 80, 255, 0, 0, 0, 0, 10, 20, 30, 128], 3, 1),
+        };
         lower.pixels.offset = (1, 2);
-        let mut upper = Layer { name: "Upper".into(), visible: false, opacity: 1.0,
-            pixels: SparsePixels::from_rgba(&[255, 255, 255, 255].repeat(3), 3, 1) };
+        let mut upper = Layer {
+            name: "Upper".into(),
+            visible: false,
+            opacity: 1.0,
+            pixels: SparsePixels::from_rgba(&[255, 255, 255, 255].repeat(3), 3, 1),
+        };
         upper.pixels.offset = (1, 2);
         let layers = [lower, upper];
         let full = composite_layers(&layers, 5, 4);
@@ -118,11 +141,19 @@ mod merge_tests {
     fn merge_down_matches_composite_with_alpha_opacity_offsets_and_visibility() {
         for lower_visible in [false, true] {
             for upper_visible in [false, true] {
-                let mut lower = Layer { name: "Lower".into(), visible: lower_visible, opacity: 0.6,
-                    pixels: SparsePixels::from_rgba(&[200, 40, 80, 128].repeat(6), 3, 2) };
+                let mut lower = Layer {
+                    name: "Lower".into(),
+                    visible: lower_visible,
+                    opacity: 0.6,
+                    pixels: SparsePixels::from_rgba(&[200, 40, 80, 128].repeat(6), 3, 2),
+                };
                 lower.pixels.offset = (1, 1);
-                let mut upper = Layer { name: "Upper".into(), visible: upper_visible, opacity: 0.4,
-                    pixels: SparsePixels::from_rgba(&[20, 80, 240, 192].repeat(6), 2, 3) };
+                let mut upper = Layer {
+                    name: "Upper".into(),
+                    visible: upper_visible,
+                    opacity: 0.4,
+                    pixels: SparsePixels::from_rgba(&[20, 80, 240, 192].repeat(6), 2, 3),
+                };
                 upper.pixels.offset = (2, 0);
                 let original = composite_layers(&[lower.clone(), upper.clone()], 5, 4);
                 let merged = merge_layers(&lower, &upper);
@@ -135,7 +166,12 @@ mod merge_tests {
 
     #[test]
     fn merge_down_preserves_distant_offcanvas_pixels_without_filling_the_gap() {
-        let mut lower = Layer { name: "Lower".into(), visible: true, opacity: 1.0, pixels: SparsePixels::default() };
+        let mut lower = Layer {
+            name: "Lower".into(),
+            visible: true,
+            opacity: 1.0,
+            pixels: SparsePixels::default(),
+        };
         lower.pixels.offset = (-7, 9);
         lower.pixels.write(0, -100, -200, [1, 2, 3, 255]);
         let mut upper = lower.clone();

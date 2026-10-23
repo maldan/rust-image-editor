@@ -36,11 +36,7 @@ pub fn sample_bilinear(pixels: &[u8], width: u32, height: u32, fx: f32, fy: f32)
     let p10 = sample_pixel_clamped(pixels, width, height, x0 + 1, y0);
     let p01 = sample_pixel_clamped(pixels, width, height, x0, y0 + 1);
     let p11 = sample_pixel_clamped(pixels, width, height, x0 + 1, y0 + 1);
-    lerp_premul(
-        lerp_premul(p00, p10, tx),
-        lerp_premul(p01, p11, tx),
-        ty,
-    )
+    lerp_premul(lerp_premul(p00, p10, tx), lerp_premul(p01, p11, tx), ty)
 }
 
 fn lerp_premul(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
@@ -121,15 +117,7 @@ pub fn resize_rgba(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     out
 }
 
-fn area_sample_rgba(
-    src: &[u8],
-    sw: u32,
-    sh: u32,
-    x0: f64,
-    y0: f64,
-    x1: f64,
-    y1: f64,
-) -> [u8; 4] {
+fn area_sample_rgba(src: &[u8], sw: u32, sh: u32, x0: f64, y0: f64, x1: f64, y1: f64) -> [u8; 4] {
     let x0 = x0.clamp(0.0, sw as f64);
     let x1 = x1.clamp(0.0, sw as f64).max(x0);
     let y0 = y0.clamp(0.0, sh as f64);

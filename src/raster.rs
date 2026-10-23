@@ -16,16 +16,25 @@ pub struct RasterRect {
 }
 
 impl RasterRect {
-    pub fn is_empty(self) -> bool { self.max_x <= self.min_x || self.max_y <= self.min_y }
+    pub fn is_empty(self) -> bool {
+        self.max_x <= self.min_x || self.max_y <= self.min_y
+    }
     pub fn size(self) -> (u32, u32) {
-        (self.max_x.abs_diff(self.min_x), self.max_y.abs_diff(self.min_y))
+        (
+            self.max_x.abs_diff(self.min_x),
+            self.max_y.abs_diff(self.min_y),
+        )
     }
 }
 
 impl From<crate::editing::PixelRect> for RasterRect {
     fn from(rect: crate::editing::PixelRect) -> Self {
-        Self { min_x: rect.min_x as i32, min_y: rect.min_y as i32,
-            max_x: rect.max_x as i32, max_y: rect.max_y as i32 }
+        Self {
+            min_x: rect.min_x as i32,
+            min_y: rect.min_y as i32,
+            max_x: rect.max_x as i32,
+            max_y: rect.max_y as i32,
+        }
     }
 }
 
@@ -167,22 +176,35 @@ impl SparsePixels {
     pub fn bounds_in(&self, frame: RasterRect) -> Option<RasterRect> {
         let mut bounds: Option<RasterRect> = None;
         let side = TILE_SIZE as i32;
-        for (&(tx,ty), tile) in &self.tiles {
-            let ox = tx*side + self.offset.0;
-            let oy = ty*side + self.offset.1;
+        for (&(tx, ty), tile) in &self.tiles {
+            let ox = tx * side + self.offset.0;
+            let oy = ty * side + self.offset.1;
             let x0 = frame.min_x.max(ox);
             let y0 = frame.min_y.max(oy);
-            let x1 = frame.max_x.min(ox+side);
-            let y1 = frame.max_y.min(oy+side);
-            if x0 >= x1 || y0 >= y1 { continue; }
+            let x1 = frame.max_x.min(ox + side);
+            let y1 = frame.max_y.min(oy + side);
+            if x0 >= x1 || y0 >= y1 {
+                continue;
+            }
             for y in y0..y1 {
                 for x in x0..x1 {
-                    let i = ((y-oy)*side+x-ox) as usize*4;
-                    if tile[i+3] == 0 { continue; }
+                    let i = ((y - oy) * side + x - ox) as usize * 4;
+                    if tile[i + 3] == 0 {
+                        continue;
+                    }
                     bounds = Some(match bounds {
-                        Some(b) => RasterRect {min_x:b.min_x.min(x),min_y:b.min_y.min(y),
-                            max_x:b.max_x.max(x+1),max_y:b.max_y.max(y+1)},
-                        None => RasterRect {min_x:x,min_y:y,max_x:x+1,max_y:y+1},
+                        Some(b) => RasterRect {
+                            min_x: b.min_x.min(x),
+                            min_y: b.min_y.min(y),
+                            max_x: b.max_x.max(x + 1),
+                            max_y: b.max_y.max(y + 1),
+                        },
+                        None => RasterRect {
+                            min_x: x,
+                            min_y: y,
+                            max_x: x + 1,
+                            max_y: y + 1,
+                        },
                     });
                 }
             }
@@ -194,10 +216,16 @@ impl SparsePixels {
     pub fn invert_colors(&mut self) -> bool {
         let mut changed = false;
         for tile in self.tiles.values_mut() {
-            if !tile.chunks_exact(4).any(|pixel| pixel[3] != 0) { continue; }
+            if !tile.chunks_exact(4).any(|pixel| pixel[3] != 0) {
+                continue;
+            }
             for pixel in Arc::make_mut(tile).chunks_exact_mut(4) {
-                if pixel[3] == 0 { continue; }
-                for channel in &mut pixel[..3] { *channel = 255 - *channel; }
+                if pixel[3] == 0 {
+                    continue;
+                }
+                for channel in &mut pixel[..3] {
+                    *channel = 255 - *channel;
+                }
                 changed = true;
             }
         }
@@ -218,7 +246,9 @@ impl SparsePixels {
                 }
             }
         }
-        if changed > 0 { self.prune(); }
+        if changed > 0 {
+            self.prune();
+        }
         changed
     }
 

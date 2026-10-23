@@ -3,6 +3,7 @@ use crate::workspace::VideoAsset;
 use ffmpeg_next as ffmpeg;
 use image::RgbaImage;
 use std::{
+    collections::VecDeque,
     sync::{
         Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -91,7 +92,69 @@ struct DecodedFrame {
     image: RgbaImage,
     timestamp: Option<f64>,
     duration: f64,
+    seek_start: f64,
 }
+
+const FRAME_CACHE_BYTES: usize = 2 * 1024 * 1024 * 1024;
+
+struct CachedFrame {
+    image: Arc<RgbaImage>,
+    position: f64,
+    duration: f64,
+    seek_start: f64,
+}
+struct FrameCache {
+    frames: VecDeque<CachedFrame>,
+    bytes: usize,
+    limit: usize,
+}
+impl FrameCache {
+    fn new(limit: usize) -> Self {
+        Self {
+            frames: VecDeque::new(),
+            bytes: 0,
+            limit,
+        }
+    }
+    fn get(&mut self, target: f64, duration: f64) -> Option<(Arc<RgbaImage>, f64)> {
+        let index = self.frames.iter().position(|frame| {
+            (target <= frame.position + 0.000_001
+                && (target > frame.seek_start + 0.000_001
+                    || (target - frame.position).abs() <= 0.000_001))
+                || (target >= duration && frame.position + frame.duration >= duration - 0.000_001)
+        })?;
+        let frame = self.frames.remove(index).unwrap();
+        let result = (frame.image.clone(), frame.position);
+        self.frames.push_back(frame);
+        Some(result)
+    }
+    fn insert(&mut self, image: Arc<RgbaImage>, position: f64, duration: f64, seek_start: f64) {
+        let bytes = image.as_raw().len();
+        if bytes > self.limit {
+            return;
+        }
+        if let Some(index) = self
+            .frames
+            .iter()
+            .position(|f| (f.position - position).abs() < 0.000_001)
+        {
+            let old = self.frames.remove(index).unwrap();
+            self.bytes -= old.image.as_raw().len();
+        }
+        while self.bytes > self.limit - bytes {
+            let old = self.frames.pop_front().unwrap();
+            self.bytes -= old.image.as_raw().len();
+        }
+        self.bytes += bytes;
+        self.frames.push_back(CachedFrame {
+            image,
+            position,
+            duration,
+            seek_start,
+        });
+    }
+}
+
 struct VideoDecoder {
     input: ffmpeg::format::context::Input,
     decoder: ffmpeg::decoder::Video,
@@ -106,6 +169,9 @@ struct VideoDecoder {
     control: Arc<DecoderControl>,
     info: VideoInfo,
     start_time: f64,
+    previous_timestamp: Option<f64>,
+    #[cfg(test)]
+    converted_frames: usize,
 }
 impl VideoDecoder {
     fn open(
@@ -171,6 +237,9 @@ impl VideoDecoder {
         Ok(Self {
             info,
             start_time,
+            previous_timestamp: None,
+            #[cfg(test)]
+            converted_frames: 0,
             input,
             decoder,
             decoded: ffmpeg::frame::Video::empty(),
@@ -186,13 +255,63 @@ impl VideoDecoder {
     }
 
     fn next_frame(&mut self, reusable: Option<RgbaImage>) -> Result<Option<DecodedFrame>, String> {
-        loop {
-            if self.control.stopped.load(Ordering::Relaxed) {
+        self.next_frame_at(reusable, f64::NEG_INFINITY, None)
+    }
+
+    fn next_frame_at(
+        &mut self,
+        reusable: Option<RgbaImage>,
+        target: f64,
+        revision: Option<u64>,
+    ) -> Result<Option<DecodedFrame>, String> {
+        let mut previous = ffmpeg::frame::Video::empty();
+        let mut previous_time = None;
+        let mut end_time = self.start_time;
+        let (timestamp, duration, seek_start) = loop {
+            if revision.is_some_and(|r| !self.control.unchanged(r)) {
                 return Ok(None);
             }
+            if !self.decode_next()? {
+                if let Some(time) = previous_time {
+                    // Keep only a native frame reference during preroll, including the endpoint.
+                    std::mem::swap(&mut self.decoded, &mut previous);
+                    break time;
+                }
+                return Ok(None);
+            }
+            let timestamp = self
+                .decoded
+                .timestamp()
+                .map(|t| t as f64 * self.time_base)
+                .filter(|t| t.is_finite());
+            let duration = self.decoded.packet().duration as f64 * self.time_base;
+            let duration = if duration.is_finite() && duration > 0.0 {
+                duration
+            } else {
+                self.fallback_duration
+            };
+            let position = timestamp.unwrap_or(end_time);
+            let seek_start = self.previous_timestamp.unwrap_or(position);
+            self.previous_timestamp = Some(position);
+            end_time = position + duration;
+            if position + 0.000_001 >= target {
+                break (timestamp, duration, seek_start);
+            }
+            std::mem::swap(&mut self.decoded, &mut previous);
+            previous_time = Some((timestamp, duration, seek_start));
+        };
+        self.convert_frame(reusable, timestamp, duration, seek_start)
+            .map(Some)
+    }
+
+    fn decode_next(&mut self) -> Result<bool, String> {
+        loop {
+            if self.control.stopped.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
             match self.decoder.receive_frame(&mut self.decoded) {
-                Ok(()) => break,
-                Err(ffmpeg::Error::Eof) => return Ok(None),
+                Ok(()) => return Ok(true),
+                Err(ffmpeg::Error::Eof) => return Ok(false),
                 Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => {}
                 Err(e) => return Err(error("Cannot decode video frame", e)),
             }
@@ -201,7 +320,7 @@ impl VideoDecoder {
             }
             loop {
                 if self.control.stopped.load(Ordering::Relaxed) {
-                    return Ok(None);
+                    return Ok(false);
                 }
                 let mut packet = ffmpeg::Packet::empty();
                 match packet.read(&mut self.input) {
@@ -222,6 +341,19 @@ impl VideoDecoder {
                     Err(e) => return Err(error("Cannot read video packet", e)),
                 }
             }
+        }
+    }
+
+    fn convert_frame(
+        &mut self,
+        reusable: Option<RgbaImage>,
+        timestamp: Option<f64>,
+        duration: f64,
+        seek_start: f64,
+    ) -> Result<DecodedFrame, String> {
+        #[cfg(test)]
+        {
+            self.converted_frames += 1;
         }
         let (width, height) = preview_size(
             self.decoded.width(),
@@ -267,22 +399,12 @@ impl VideoDecoder {
             let offset = y * self.rgba.stride(0);
             row.copy_from_slice(&self.rgba.data(0)[offset..offset + row_bytes]);
         }
-        let timestamp = self
-            .decoded
-            .timestamp()
-            .map(|t| t as f64 * self.time_base)
-            .filter(|t| t.is_finite());
-        let duration = self.decoded.packet().duration as f64 * self.time_base;
-        let duration = if duration.is_finite() && duration > 0.0 {
-            duration
-        } else {
-            self.fallback_duration
-        };
-        Ok(Some(DecodedFrame {
+        Ok(DecodedFrame {
             image,
             timestamp,
             duration,
-        }))
+            seek_start,
+        })
     }
 
     fn seek(&mut self, seconds: f64) -> Result<(), String> {
@@ -292,6 +414,7 @@ impl VideoDecoder {
             .map_err(|e| error("Cannot seek video", e))?;
         self.decoder.flush();
         self.draining = false;
+        self.previous_timestamp = None;
         Ok(())
     }
 
@@ -303,7 +426,7 @@ impl VideoDecoder {
 
 #[derive(Default)]
 struct PlaybackState {
-    frame: Option<RgbaImage>,
+    frame: Option<Arc<RgbaImage>>,
     spare: Option<RgbaImage>,
     error: Option<String>,
     info: Option<VideoInfo>,
@@ -313,7 +436,7 @@ struct PlaybackState {
 pub struct Playback {
     control: Arc<DecoderControl>,
     state: Arc<Mutex<PlaybackState>>,
-    pub frame: Option<RgbaImage>,
+    pub frame: Option<Arc<RgbaImage>>,
     pub dirty: bool,
     pub failed: bool,
     pub info: Option<VideoInfo>,
@@ -329,6 +452,7 @@ fn play(
     output: &Mutex<PlaybackState>,
 ) -> Result<(), String> {
     let mut decoder = VideoDecoder::open(asset, worker.clone(), (1920, 1080))?;
+    let mut cache = FrameCache::new(FRAME_CACHE_BYTES);
     output.lock().unwrap().info = Some(decoder.info);
     let mut revision = u64::MAX;
     let mut target = 0.0;
@@ -344,26 +468,39 @@ fn play(
             worker.wait_for_change(revision);
             continue;
         }
+        if let Some((image, position)) = cache.get(target, decoder.info.duration) {
+            if !publish(worker, output, revision, image, position) {
+                continue;
+            }
+            if request.paused {
+                worker.wait_for_change(revision);
+                continue;
+            }
+        }
         decoder.seek(target)?;
-        let speed = request.fps.unwrap_or(decoder.info.fps) / decoder.info.fps;
+        let limited_fps = request.fps.filter(|fps| *fps < decoder.info.fps);
+        let mut next_presentation = f64::NEG_INFINITY;
         let mut clock: Option<(Instant, f64)> = None;
         let mut end_time = 0.0;
         let mut found = false;
-        let mut last_before_target = None;
         loop {
             if !worker.unchanged(revision) {
                 break;
             }
             let reusable = output.lock().unwrap().spare.take();
-            let frame = decoder.next_frame(reusable)?;
+            let frame = decoder.next_frame_at(
+                reusable,
+                if found {
+                    next_presentation + decoder.start_time
+                } else {
+                    target + decoder.start_time
+                },
+                Some(revision),
+            )?;
+            if !worker.unchanged(revision) {
+                break;
+            }
             let Some(frame) = frame else {
-                // Seeking exactly to duration still displays the final frame, including on pause.
-                if !found {
-                    if let Some((frame, time)) = last_before_target.take() {
-                        publish(worker, output, revision, frame, time);
-                        found = true;
-                    }
-                }
                 if !found {
                     return Err("Video has no decodable frames".into());
                 }
@@ -371,7 +508,7 @@ fn play(
                     worker.wait_for_change(revision);
                 } else if let Some((start, position)) = clock {
                     worker.wait_until(
-                        start + Duration::from_secs_f64(((end_time - position) / speed).max(0.0)),
+                        start + Duration::from_secs_f64((end_time - position).max(0.0)),
                         revision,
                     );
                 }
@@ -383,21 +520,35 @@ fn play(
                 .map(|t| (t - decoder.start_time).max(0.0))
                 .unwrap_or(end_time);
             end_time = position + frame.duration;
-            if position + 0.000_001 < target {
-                last_before_target = Some((frame.image, position));
+            // Seeking returns the last frame at EOF even when the requested time is
+            // later. Keep its end time for looping, but do not present a skipped frame.
+            if found && position + 0.000_001 < next_presentation {
                 continue;
             }
             let (start, origin) = *clock.get_or_insert((Instant::now(), position));
             if !worker.wait_until(
-                start + Duration::from_secs_f64(((position - origin) / speed).max(0.0)),
+                start + Duration::from_secs_f64((position - origin).max(0.0)),
                 revision,
             ) {
                 break;
             }
-            if !publish(worker, output, revision, frame.image, position) {
+            let image = Arc::new(frame.image);
+            cache.insert(
+                image.clone(),
+                position,
+                frame.duration,
+                (frame.seek_start - decoder.start_time).max(0.0),
+            );
+            if !publish(worker, output, revision, image, position) {
                 break;
             }
             found = true;
+            if let Some(fps) = limited_fps {
+                // Sample on a fixed source-time grid, so fractional ratios (25 -> 12)
+                // alternate skipped frame counts without accumulating timing drift.
+                next_presentation =
+                    origin + (((position - origin) * fps + 0.000_001).floor() + 1.0) / fps;
+            }
             if request.paused {
                 worker.wait_for_change(revision);
                 break;
@@ -411,7 +562,7 @@ fn publish(
     worker: &DecoderControl,
     output: &Mutex<PlaybackState>,
     revision: u64,
-    image: RgbaImage,
+    image: Arc<RgbaImage>,
     position: f64,
 ) -> bool {
     // Serialize with UI commands so a seek/pause never publishes an obsolete frame afterward.
@@ -422,7 +573,7 @@ fn publish(
     let mut state = output.lock().unwrap();
     let previous = state.frame.replace(image);
     if state.spare.is_none() {
-        state.spare = previous;
+        state.spare = previous.and_then(|image| Arc::try_unwrap(image).ok());
     }
     state.position = position;
     state.has_frame = true;
@@ -507,7 +658,9 @@ impl Playback {
         self.info = state.info;
         if let Some(frame) = state.frame.take() {
             if let Some(previous) = self.frame.replace(frame) {
-                state.spare = Some(previous);
+                if let Ok(previous) = Arc::try_unwrap(previous) {
+                    state.spare = Some(previous);
+                }
             }
             self.position = state.position;
             self.pending_update = false;
@@ -576,12 +729,104 @@ impl Drop for PosterJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "manual benchmark; generate target/seek-benchmark.mp4 first"]
+    fn seek_latency_benchmark() {
+        let mut workspace = crate::workspace::Workspace::default();
+        workspace
+            .add_video(std::fs::read("target/seek-benchmark.mp4").unwrap())
+            .unwrap();
+        let mut player = Playback::start(workspace.videos[0].clone());
+        player.set_paused(true);
+        wait_for(&mut player, |p| !p.pending_update);
+        for target in [5.8, 3.0, 5.0, 5.8, 3.0, 5.0] {
+            let start = Instant::now();
+            player.seek(target);
+            wait_for(&mut player, |p| !p.pending_update);
+            eprintln!(
+                "seek {target:.1}s: {:?}, presented {:.3}s",
+                start.elapsed(),
+                player.position
+            );
+        }
+    }
     fn workspace() -> crate::workspace::Workspace {
         let mut workspace = crate::workspace::Workspace::default();
         workspace
             .add_video(include_bytes!("../tests/fixtures/video-preview.mp4").to_vec())
             .unwrap();
         workspace
+    }
+
+    #[test]
+    fn frame_cache_bounds_bytes_evicts_lru_and_shares_pixels() {
+        let image = Arc::new(RgbaImage::new(2, 2));
+        let mut cache = FrameCache::new(32);
+        cache.insert(image.clone(), 0.25, 0.25, 0.0);
+        cache.insert(Arc::new(RgbaImage::new(2, 2)), 0.5, 0.25, 0.25);
+        assert!(
+            cache.get(0.0, 1.0).is_none(),
+            "do not substitute a missing earlier frame"
+        );
+        assert!(Arc::ptr_eq(&cache.get(0.1, 1.0).unwrap().0, &image));
+        cache.insert(Arc::new(RgbaImage::new(2, 2)), 0.75, 0.25, 0.5);
+        assert_eq!(cache.bytes, 32);
+        assert!(
+            cache.get(0.5, 1.0).is_none(),
+            "least recently used frame must be evicted"
+        );
+        assert!(cache.get(0.25, 1.0).is_some());
+        assert_eq!(cache.get(1.0, 1.0).unwrap().1, 0.75);
+        cache.insert(image.clone(), 0.25, 0.25, 0.0);
+        assert_eq!(cache.bytes, 32, "replacement does not grow the cache");
+        cache.insert(Arc::new(RgbaImage::new(4, 4)), 0.0, 0.25, 0.0);
+        assert_eq!(cache.bytes, 32, "oversized frames are not cached");
+        let mut vfr = FrameCache::new(32);
+        vfr.insert(image, 0.75, 0.1, 0.25);
+        assert!(
+            vfr.get(0.5, 1.0).is_some(),
+            "use actual preceding timestamps for VFR"
+        );
+        assert!(vfr.get(0.25, 1.0).is_none());
+    }
+
+    #[test]
+    fn seek_converts_only_presented_frame_and_cancels_obsolete_requests() {
+        let workspace = workspace();
+        let control = Arc::new(DecoderControl::default());
+        let mut decoder =
+            VideoDecoder::open(&workspace.videos[0], control.clone(), (1920, 1080)).unwrap();
+        let mut hashes = Vec::new();
+        while let Some(frame) = decoder.next_frame(None).unwrap() {
+            hashes.push(crate::safe_save::fingerprint(frame.image.as_raw()));
+        }
+        for (target, index) in [(0.5, 2), (1.0, 3)] {
+            decoder.seek(target).unwrap();
+            decoder.converted_frames = 0;
+            let frame = decoder
+                .next_frame_at(None, target, Some(0))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                decoder.converted_frames, 1,
+                "preroll must skip RGBA conversion"
+            );
+            assert_eq!(
+                crate::safe_save::fingerprint(frame.image.as_raw()),
+                hashes[index]
+            );
+            assert_eq!(frame.timestamp, Some(index as f64 * 0.25));
+        }
+        decoder.seek(0.75).unwrap();
+        decoder.converted_frames = 0;
+        control.transport.lock().unwrap().revision = 1;
+        assert!(
+            decoder
+                .next_frame_at(None, 0.75, Some(0))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(decoder.converted_frames, 0);
     }
 
     #[test]
@@ -743,6 +988,7 @@ mod tests {
             crate::safe_save::fingerprint(player.frame.as_ref().unwrap().as_raw()),
             hashes[3]
         );
+        let cached_last = player.frame.as_ref().unwrap().clone();
         player.seek(1.0);
         wait_for(&mut player, |p| !p.pending_update);
         assert!(
@@ -755,6 +1001,14 @@ mod tests {
             crate::safe_save::fingerprint(player.frame.as_ref().unwrap().as_raw()),
             hashes[2]
         );
+        player.seek(0.75);
+        wait_for(&mut player, |p| !p.pending_update);
+        assert!(
+            Arc::ptr_eq(player.frame.as_ref().unwrap(), &cached_last),
+            "cached seek shares pixels without another decode or copy"
+        );
+        player.seek(0.5);
+        wait_for(&mut player, |p| !p.pending_update);
         player.set_fps(None);
         assert!(player.fps_override.is_none());
         wait_for(&mut player, |p| !p.pending_update);
@@ -772,33 +1026,44 @@ mod tests {
     }
 
     #[test]
-    fn fps_override_changes_loop_speed_and_reset_restores_original() {
+    fn fps_limit_skips_frames_preserves_duration_and_reset_restores_original() {
         let workspace = workspace();
         let mut player = Playback::start(workspace.videos[0].clone());
         player.set_paused(true);
         wait_for(&mut player, |p| p.info.is_some() && !p.pending_update);
-        player.set_fps(Some(8.0));
-        player.set_paused(false);
-        wait_for(&mut player, |p| !p.pending_update);
-        let started = Instant::now();
-        wait_for(&mut player, |p| p.position >= 0.75);
-        wait_for(&mut player, |p| p.position < 0.25);
-        assert!(started.elapsed() >= Duration::from_millis(400));
-        assert!(
-            started.elapsed() < Duration::from_millis(950),
-            "4 FPS source at 8 FPS should take about half a second"
-        );
-        player.set_paused(true);
-        wait_for(&mut player, |p| !p.pending_update);
-        player.seek(0.0);
-        player.set_fps(None);
-        wait_for(&mut player, |p| !p.pending_update);
-        player.set_paused(false);
-        wait_for(&mut player, |p| !p.pending_update);
-        let started = Instant::now();
-        wait_for(&mut player, |p| p.position >= 0.75);
-        wait_for(&mut player, |p| p.position < 0.25);
-        assert!(started.elapsed() >= Duration::from_millis(800));
+        for (fps, expected) in [
+            (Some(2.0), vec![0.0, 0.5]),
+            (Some(8.0), vec![0.0, 0.25, 0.5, 0.75]),
+            (None, vec![0.0, 0.25, 0.5, 0.75]),
+        ] {
+            player.seek(0.0);
+            player.set_fps(fps);
+            wait_for(&mut player, |p| !p.pending_update);
+            player.set_paused(false);
+            wait_for(&mut player, |p| !p.pending_update);
+            let started = Instant::now();
+            let mut positions = vec![player.position];
+            let deadline = started + Duration::from_secs(5);
+            loop {
+                assert!(player.poll().is_none());
+                let previous = *positions.last().unwrap();
+                if player.position < previous {
+                    break;
+                }
+                if player.position != previous {
+                    positions.push(player.position);
+                }
+                assert!(Instant::now() < deadline, "Video did not loop");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(positions, expected, "present source frames at FPS {fps:?}");
+            assert!(
+                started.elapsed() >= Duration::from_millis(900),
+                "FPS {fps:?} must preserve the 1-second duration"
+            );
+            player.set_paused(true);
+            wait_for(&mut player, |p| !p.pending_update);
+        }
         assert_eq!(player.info.unwrap().fps, 4.0);
         assert!(player.fps_override.is_none());
     }

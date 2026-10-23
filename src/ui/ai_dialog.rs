@@ -30,7 +30,10 @@ impl AiMode {
         matches!(self, Self::AnimeDraw | Self::AnimeRedraw)
     }
     pub fn uses_sd(self) -> bool {
-        matches!(self, Self::Draw | Self::DrawCn | Self::Upscale | Self::Redraw | Self::Inpaint)
+        matches!(
+            self,
+            Self::Draw | Self::DrawCn | Self::Upscale | Self::Redraw | Self::Inpaint
+        )
     }
     pub fn title(self) -> &'static str {
         match self {
@@ -80,7 +83,11 @@ pub struct PreviewView {
 
 impl Default for PreviewView {
     fn default() -> Self {
-        Self { zoom: 1.0, pan: Vec2::ZERO, panning: false }
+        Self {
+            zoom: 1.0,
+            pan: Vec2::ZERO,
+            panning: false,
+        }
     }
 }
 
@@ -109,9 +116,18 @@ impl PreviewView {
         let fit = (available.x / image_size.x).min(available.y / image_size.y);
         let size = image_size * fit * self.zoom;
         let origin = (viewport.min + viewport.max - size) * 0.5 + self.pan;
-        let clipped = Rect { min: origin.max(viewport.min), max: (origin + size).min(viewport.max) };
-        if clipped.width() <= 0.0 || clipped.height() <= 0.0 { return None; }
-        Some((clipped, (clipped.min - origin) / size, (clipped.max - origin) / size))
+        let clipped = Rect {
+            min: origin.max(viewport.min),
+            max: (origin + size).min(viewport.max),
+        };
+        if clipped.width() <= 0.0 || clipped.height() <= 0.0 {
+            return None;
+        }
+        Some((
+            clipped,
+            (clipped.min - origin) / size,
+            (clipped.max - origin) / size,
+        ))
     }
 }
 
@@ -120,6 +136,8 @@ pub struct AiDialog {
     pub mode: AiMode,
     pub video_settings: crate::comfyui::VideoSettings,
     pub video_layer: Option<usize>,
+    pub video_end_document: Option<String>,
+    pub video_end_layer: Option<usize>,
     pub denoise: f32,
     pub mask_softness: f32,
     pub lineart_resolution: i32,
@@ -162,6 +180,8 @@ impl Default for AiDialog {
             mode: AiMode::Edit,
             video_settings: Default::default(),
             video_layer: None,
+            video_end_document: None,
+            video_end_layer: None,
             denoise: 1.0,
             mask_softness: 0.0,
             lineart_resolution: 512,
@@ -195,14 +215,25 @@ impl Default for AiDialog {
 }
 
 impl AiDialog {
-    pub fn source_region(&self, width: u32, height: u32, layer_bounds: Option<(i32, i32, i32, i32)>) -> Result<crate::raster::RasterRect, String> {
+    pub fn source_region(
+        &self,
+        width: u32,
+        height: u32,
+        layer_bounds: Option<(i32, i32, i32, i32)>,
+    ) -> Result<crate::raster::RasterRect, String> {
         use crate::raster::RasterRect;
         if self.source == AiSource::Selection {
-            return self.selection_bounds.map(Into::into).ok_or("Select an area on the canvas first".into());
+            return self
+                .selection_bounds
+                .map(Into::into)
+                .ok_or("Select an area on the canvas first".into());
         }
         if self.source == AiSource::Layer && !self.layer_canvas_size {
-            if self.layer_padding < 0 { return Err("Padding must be zero or positive".into()); }
-            let (x, y, x1, y1) = layer_bounds.ok_or("Current layer has no nontransparent pixels")?;
+            if self.layer_padding < 0 {
+                return Err("Padding must be zero or positive".into());
+            }
+            let (x, y, x1, y1) =
+                layer_bounds.ok_or("Current layer has no nontransparent pixels")?;
             let padding = self.layer_padding;
             let error = "Layer bounds with padding exceed supported coordinates";
             return Ok(RasterRect {
@@ -212,7 +243,12 @@ impl AiDialog {
                 max_y: y1.checked_add(padding).ok_or(error)?,
             });
         }
-        Ok(RasterRect { min_x: 0, min_y: 0, max_x: width as i32, max_y: height as i32 })
+        Ok(RasterRect {
+            min_x: 0,
+            min_y: 0,
+            max_x: width as i32,
+            max_y: height as i32,
+        })
     }
 }
 
@@ -256,19 +292,32 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             ui.horizontal(|ui| {
                 ui.flex_width(controls_width, |ui| {
                     ui.add_enabled(!running, |ui| {
-                        if app.ai.mode.uses_sd() || app.ai.mode.is_anime() || app.ai.mode == AiMode::QwenDraw {
+                        if app.ai.mode.uses_sd()
+                            || app.ai.mode.is_anime()
+                            || app.ai.mode == AiMode::QwenDraw
+                        {
                             draw_controls(ui, &mut app.ai, width, height);
                         } else {
                             source_controls(ui, &mut app.ai, width, height);
                             if app.ai.mode == AiMode::Lineart {
                                 ui.label("Resolution");
-                                ui.drag_int("lineart_resolution", &mut app.ai.lineart_resolution, 64);
-                                if let Err(error) = crate::comfyui::validate_lineart_resolution(app.ai.lineart_resolution) {
+                                ui.drag_int(
+                                    "lineart_resolution",
+                                    &mut app.ai.lineart_resolution,
+                                    64,
+                                );
+                                if let Err(error) = crate::comfyui::validate_lineart_resolution(
+                                    app.ai.lineart_resolution,
+                                ) {
                                     ui.label(&error);
                                 }
                             } else {
                                 ui.label("Prompt");
-                                ui.text_area("ai_prompt", &mut app.ai.prompt, Vec2::new(0.0, 110.0));
+                                ui.text_area(
+                                    "ai_prompt",
+                                    &mut app.ai.prompt,
+                                    Vec2::new(0.0, 110.0),
+                                );
                             }
                         }
                         ui.checkbox("ai_fit_image", "Fit Image", &mut app.ai.fit_image);
@@ -290,7 +339,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     } else {
                         let valid = app.ai.config.is_some()
                             && match app.ai.mode {
-                                AiMode::Draw | AiMode::AnimeDraw | AiMode::QwenDraw => app.ai.draw_settings.validate().is_ok(),
+                                AiMode::Draw | AiMode::AnimeDraw | AiMode::QwenDraw => {
+                                    app.ai.draw_settings.validate().is_ok()
+                                }
                                 AiMode::Upscale => {
                                     app.ai.upscale.validate(&app.ai.draw_settings).is_ok()
                                         && input_valid(app, width, height)
@@ -300,7 +351,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                                         && input_valid(app, width, height)
                                 }
                                 AiMode::Lineart => {
-                                    crate::comfyui::validate_lineart_resolution(app.ai.lineart_resolution).is_ok()
+                                    crate::comfyui::validate_lineart_resolution(
+                                        app.ai.lineart_resolution,
+                                    )
+                                    .is_ok()
                                         && input_valid(app, width, height)
                                 }
                                 AiMode::Redraw | AiMode::AnimeRedraw | AiMode::Inpaint => {
@@ -320,7 +374,14 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                             }
                             ui.add_enabled(valid, |ui| {
                                 run = ui
-                                    .button("ai_run", if has_result || app.ai.preview.is_some() { "Regenerate" } else { "Run" })
+                                    .button(
+                                        "ai_run",
+                                        if has_result || app.ai.preview.is_some() {
+                                            "Regenerate"
+                                        } else {
+                                            "Run"
+                                        },
+                                    )
                                     .clicked();
                             });
                         });
@@ -336,10 +397,19 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                         let available = ui.available_size().max(Vec2::splat(1.0));
                         let size = Vec2::new(available.x, available.y.min(560.0 * ui.scale()));
                         let area = ui.area("ai_preview_view", size);
-                        app.ai.preview_view.update(area.rect, area.hovered, &app.ai.preview_input);
+                        app.ai
+                            .preview_view
+                            .update(area.rect, area.hovered, &app.ai.preview_input);
                         ui.fill_rect(area.rect, [0.075, 0.08, 0.095, 1.0]);
-                        if let Some((rect, uv_min, uv_max)) = app.ai.preview_view.visible_image(area.rect, image_size) {
-                            ui.texture_rect(crate::host::AI_PREVIEW_TEXTURE, rect, uv_min.to_array(), uv_max.to_array());
+                        if let Some((rect, uv_min, uv_max)) =
+                            app.ai.preview_view.visible_image(area.rect, image_size)
+                        {
+                            ui.texture_rect(
+                                crate::host::AI_PREVIEW_TEXTURE,
+                                rect,
+                                uv_min.to_array(),
+                                uv_max.to_array(),
+                            );
                         }
                         ui.horizontal(|ui| {
                             if ui.button("ai_preview_reset", "Fit preview").clicked() {
@@ -366,7 +436,13 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     }
 }
 
-pub(super) fn choose(ui: &mut Ui, id: &str, selection: &mut Option<String>, names: &[String], default: &str) {
+pub(super) fn choose(
+    ui: &mut Ui,
+    id: &str,
+    selection: &mut Option<String>,
+    names: &[String],
+    default: &str,
+) {
     let mut options = vec![default];
     options.extend(names.iter().map(String::as_str));
     // Preserve a previous selection if a refresh no longer lists that file.
@@ -399,7 +475,10 @@ fn draw_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
             if ai.mode.needs_input() {
                 source_controls(ui, ai, width, height);
             }
-            if matches!(ai.mode, AiMode::Redraw | AiMode::AnimeRedraw | AiMode::Inpaint) {
+            if matches!(
+                ai.mode,
+                AiMode::Redraw | AiMode::AnimeRedraw | AiMode::Inpaint
+            ) {
                 ui.label("Denoise");
                 ui.slider("redraw_denoise", &mut ai.denoise, 0.0..=1.0);
             }
@@ -410,7 +489,11 @@ fn draw_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
                 ui.slider("upscale_denoise", &mut ai.upscale.denoise, 0.0..=1.0);
             }
             if matches!(ai.mode, AiMode::DrawCn | AiMode::Upscale) {
-                let control = if ai.mode == AiMode::Upscale { &mut ai.upscale.control } else { &mut ai.control_net };
+                let control = if ai.mode == AiMode::Upscale {
+                    &mut ai.upscale.control
+                } else {
+                    &mut ai.control_net
+                };
                 ui.label("ControlNet strength");
                 ui.slider("cn_strength", &mut control.strength, 0.0..=1.0);
                 ui.label("ControlNet start (%)");
@@ -509,7 +592,9 @@ fn input_size(ai: &AiDialog, width: u32, height: u32) -> Result<(u32, u32), Stri
         return Err("Select an area to use as the inpaint mask".into());
     }
     let region = ai.source_region(width, height, ai.layer_bounds)?;
-    if region.is_empty() { return Err("Input region is empty".into()); }
+    if region.is_empty() {
+        return Err("Input region is empty".into());
+    }
     let (width, height) = region.size();
     crate::comfyui::scaled_size(width, height, 1.0)?;
     let size = crate::comfyui::scaled_size(width, height, ai.scale)?;
@@ -547,7 +632,11 @@ fn source_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
         };
     }
     if ai.source == AiSource::Layer {
-        ui.checkbox("ai_layer_canvas_size", "Use canvas size", &mut ai.layer_canvas_size);
+        ui.checkbox(
+            "ai_layer_canvas_size",
+            "Use canvas size",
+            &mut ai.layer_canvas_size,
+        );
         if !ai.layer_canvas_size {
             ui.label("Padding (px per side)");
             ui.drag_int("ai_layer_padding", &mut ai.layer_padding, 1);
@@ -595,7 +684,12 @@ mod tests {
         assert_eq!(input_size(&ai, 128, 128).unwrap(), (64, 64));
         ai.source = AiSource::Selection;
         assert!(input_size(&ai, 128, 128).is_err());
-        ai.selection_bounds = Some(crate::editing::PixelRect { min_x: 16, min_y: 24, max_x: 112, max_y: 104 });
+        ai.selection_bounds = Some(crate::editing::PixelRect {
+            min_x: 16,
+            min_y: 24,
+            max_x: 112,
+            max_y: 104,
+        });
         assert_eq!(input_size(&ai, 128, 128).unwrap(), (48, 40));
         ai.upscale.scale_by = 1000.0;
         assert!(input_size(&ai, 128, 128).is_err());
@@ -611,7 +705,10 @@ mod tests {
         ai.source = AiSource::Selection;
         assert!(input_size(&ai, 128, 128).is_err());
         ai.selection_bounds = Some(crate::editing::PixelRect {
-            min_x: 16, min_y: 24, max_x: 112, max_y: 104,
+            min_x: 16,
+            min_y: 24,
+            max_x: 112,
+            max_y: 104,
         });
         assert_eq!(input_size(&ai, 128, 128).unwrap(), (96, 80));
     }
@@ -671,7 +768,13 @@ mod tests {
 
     #[test]
     fn lora_rows_appear_in_order_and_hidden_selections_are_cleared() {
-        for mode in [AiMode::Draw, AiMode::DrawCn, AiMode::Upscale, AiMode::Redraw, AiMode::Inpaint] {
+        for mode in [
+            AiMode::Draw,
+            AiMode::DrawCn,
+            AiMode::Upscale,
+            AiMode::Redraw,
+            AiMode::Inpaint,
+        ] {
             let mut ai = AiDialog::default();
             ai.mode = mode;
             let one = render_controls(&mut ai);

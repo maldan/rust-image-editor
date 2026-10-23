@@ -113,7 +113,10 @@ impl CanvasRenderer {
             rotation: view.rotation,
             opacity: 1.0,
             _pad: 0.0,
-            hue:0.0,saturation:0.0,value:0.0,_hsv_pad:0.0,
+            hue: 0.0,
+            saturation: 0.0,
+            value: 0.0,
+            _hsv_pad: 0.0,
         };
         queue.write_buffer(&self.view_uniform_buf, 0, bytemuck::bytes_of(&view_u));
 
@@ -130,32 +133,59 @@ impl CanvasRenderer {
                 continue;
             };
             if let (Some(draw), Some(corners)) = (overlay.floating, overlay.transform_corners)
-                && draw.layer == i && draw.whole_layer {
+                && draw.layer == i
+                && draw.whole_layer
+            {
                 let side = TRANSFORM_PREVIEW_SIDE as f32;
                 for tile in &self.floating_tiles {
                     let local = (tile.origin - draw.origin) / draw.size;
                     let size = Vec2::splat(side) / draw.size;
-                    let corner = |uv: Vec2| corners[0] + (corners[1]-corners[0])*uv.x + (corners[3]-corners[0])*uv.y;
-                    let points = [corner(local),corner(local+Vec2::new(size.x,0.0)),corner(local+size),corner(local+Vec2::new(0.0,size.y))];
-                    // Skip tiles outside the visible panel without rebuilding their textures.
-                    if points.iter().all(|p|p.x<canvas_rect.min.x) || points.iter().all(|p|p.x>canvas_rect.max.x)
-                        || points.iter().all(|p|p.y<canvas_rect.min.y) || points.iter().all(|p|p.y>canvas_rect.max.y) { continue; }
-                    let fu = FloatUniforms {
-                        viewport: viewport.into(), opacity: draw.opacity,
-                        filter_scale: ((corners[1]-corners[0]).length()/draw.size.x/view.zoom).clamp(0.05,1.0),
-                        origin: [TRANSFORM_PREVIEW_PAD as f32;2], size: [side;2],
-                        image_size: [side + TRANSFORM_PREVIEW_PAD as f32*2.0;2],
-                        c0: points[0].into(), c1: points[1].into(), c2: points[2].into(), c3: points[3].into(),
+                    let corner = |uv: Vec2| {
+                        corners[0]
+                            + (corners[1] - corners[0]) * uv.x
+                            + (corners[3] - corners[0]) * uv.y
                     };
-                    queue.write_buffer(&tile.uniform,0,bytemuck::bytes_of(&fu));
+                    let points = [
+                        corner(local),
+                        corner(local + Vec2::new(size.x, 0.0)),
+                        corner(local + size),
+                        corner(local + Vec2::new(0.0, size.y)),
+                    ];
+                    // Skip tiles outside the visible panel without rebuilding their textures.
+                    if points.iter().all(|p| p.x < canvas_rect.min.x)
+                        || points.iter().all(|p| p.x > canvas_rect.max.x)
+                        || points.iter().all(|p| p.y < canvas_rect.min.y)
+                        || points.iter().all(|p| p.y > canvas_rect.max.y)
+                    {
+                        continue;
+                    }
+                    let fu = FloatUniforms {
+                        viewport: viewport.into(),
+                        opacity: draw.opacity,
+                        filter_scale: ((corners[1] - corners[0]).length()
+                            / draw.size.x
+                            / view.zoom)
+                            .clamp(0.05, 1.0),
+                        origin: [TRANSFORM_PREVIEW_PAD as f32; 2],
+                        size: [side; 2],
+                        image_size: [side + TRANSFORM_PREVIEW_PAD as f32 * 2.0; 2],
+                        c0: points[0].into(),
+                        c1: points[1].into(),
+                        c2: points[2].into(),
+                        c3: points[3].into(),
+                    };
+                    queue.write_buffer(&tile.uniform, 0, bytemuck::bytes_of(&fu));
                     pass.set_pipeline(&self.float_pipeline);
-                    pass.set_bind_group(0,&tile.bind_group,&[]);
-                    pass.draw(0..6,0..1);
+                    pass.set_bind_group(0, &tile.bind_group, &[]);
+                    pass.draw(0..6, 0..1);
                 }
                 pass.set_pipeline(&self.layer_pipeline);
                 continue;
             }
-            if overlay.floating.as_ref().is_some_and(|draw| draw.layer == i)
+            if overlay
+                .floating
+                .as_ref()
+                .is_some_and(|draw| draw.layer == i)
                 && let Some(bg) = self.punch_bind_group.as_ref()
                 && let Some(draw) = overlay.floating
             {
@@ -186,8 +216,11 @@ impl CanvasRenderer {
                     let fu = FloatUniforms {
                         viewport: [viewport.x, viewport.y],
                         opacity: draw.opacity.clamp(0.0, 1.0),
-                        filter_scale: ((corners[1]-corners[0]).length()/draw.size.x/view.zoom).clamp(0.05,1.0),
-                        origin: [0.0;2],
+                        filter_scale: ((corners[1] - corners[0]).length()
+                            / draw.size.x
+                            / view.zoom)
+                            .clamp(0.05, 1.0),
+                        origin: [0.0; 2],
                         size: [draw.size.x, draw.size.y],
                         image_size: [draw.size.x, draw.size.y],
                         c0: [corners[0].x, corners[0].y],
@@ -206,7 +239,7 @@ impl CanvasRenderer {
             }
             let mut u = view_u;
             u.opacity = layer.opacity.clamp(0.0, 1.0);
-            if let Some((index,adjustment)) = overlay.hsv {
+            if let Some((index, adjustment)) = overlay.hsv {
                 if index == i {
                     u.hue = adjustment.hue;
                     u.saturation = adjustment.saturation;
@@ -255,10 +288,22 @@ impl CanvasRenderer {
                 push_handle(&mut verts, corners[i], 5.0, cyan);
             }
             if let Some(pivot) = overlay.transform_pivot {
-                for (width,color) in [(3.0,black),(1.0,cyan)] {
-                    push_circle(&mut verts,pivot,5.0,width,color);
-                    push_line(&mut verts,pivot-Vec2::new(9.0,0.0),pivot+Vec2::new(9.0,0.0),width,color);
-                    push_line(&mut verts,pivot-Vec2::new(0.0,9.0),pivot+Vec2::new(0.0,9.0),width,color);
+                for (width, color) in [(3.0, black), (1.0, cyan)] {
+                    push_circle(&mut verts, pivot, 5.0, width, color);
+                    push_line(
+                        &mut verts,
+                        pivot - Vec2::new(9.0, 0.0),
+                        pivot + Vec2::new(9.0, 0.0),
+                        width,
+                        color,
+                    );
+                    push_line(
+                        &mut verts,
+                        pivot - Vec2::new(0.0, 9.0),
+                        pivot + Vec2::new(0.0, 9.0),
+                        width,
+                        color,
+                    );
                 }
             }
         }

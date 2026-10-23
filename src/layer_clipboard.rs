@@ -36,30 +36,47 @@ pub fn encode_fragment(layer: &Layer, canvas_size: (u32, u32)) -> Result<String,
 
 fn encode_kind(layer: &Layer, canvas_size: (u32, u32), fragment: bool) -> Result<String, String> {
     let tiles = layer.pixels.encode();
-    if tiles.len() > MAX_BYTES { return Err("Layer is too large for the clipboard".into()); }
+    if tiles.len() > MAX_BYTES {
+        return Err("Layer is too large for the clipboard".into());
+    }
     let payload = Payload {
-        version: 1, canvas_width: canvas_size.0, canvas_height: canvas_size.1,
-        name: layer.name.clone(), visible: layer.visible, opacity: layer.opacity,
-        tiles: STANDARD.encode(tiles), fragment,
+        version: 1,
+        canvas_width: canvas_size.0,
+        canvas_height: canvas_size.1,
+        name: layer.name.clone(),
+        visible: layer.visible,
+        opacity: layer.opacity,
+        tiles: STANDARD.encode(tiles),
+        fragment,
     };
-    serde_json::to_string(&payload).map(|json| format!("{PREFIX}{json}"))
+    serde_json::to_string(&payload)
+        .map(|json| format!("{PREFIX}{json}"))
         .map_err(|e| format!("Cannot copy layer: {e}"))
 }
 
 /// Ordinary text is not a layer; a recognized but corrupt layer reports an error.
 pub fn decode(text: &str) -> Result<Option<CopiedLayer>, String> {
-    let Some(json) = text.strip_prefix(PREFIX) else { return Ok(None); };
+    let Some(json) = text.strip_prefix(PREFIX) else {
+        return Ok(None);
+    };
     if json.len() > MAX_BYTES / 3 * 4 + 1024 * 1024 {
         return Err("Clipboard layer is too large".into());
     }
-    let payload: Payload = serde_json::from_str(json).map_err(|e| format!("Invalid clipboard layer: {e}"))?;
-    if payload.version != 1 { return Err("Unsupported clipboard layer version".into()); }
+    let payload: Payload =
+        serde_json::from_str(json).map_err(|e| format!("Invalid clipboard layer: {e}"))?;
+    if payload.version != 1 {
+        return Err("Unsupported clipboard layer version".into());
+    }
     crate::comfyui::scaled_size(payload.canvas_width, payload.canvas_height, 1.0)?;
     if !payload.opacity.is_finite() || !(0.0..=1.0).contains(&payload.opacity) {
         return Err("Invalid clipboard layer opacity".into());
     }
-    let bytes = STANDARD.decode(&payload.tiles).map_err(|_| "Invalid clipboard layer tiles")?;
-    if bytes.len() > MAX_BYTES { return Err("Clipboard layer is too large".into()); }
+    let bytes = STANDARD
+        .decode(&payload.tiles)
+        .map_err(|_| "Invalid clipboard layer tiles")?;
+    if bytes.len() > MAX_BYTES {
+        return Err("Clipboard layer is too large".into());
+    }
     let pixels = SparsePixels::decode(&bytes)?;
     // A foreign clipboard must not overflow signed coordinates during rendering.
     let side = crate::tiles::TILE_SIZE as i64;
@@ -72,19 +89,26 @@ pub fn decode(text: &str) -> Result<Option<CopiedLayer>, String> {
         }
     }
     Ok(Some(CopiedLayer {
-        layer: Layer { name: payload.name, visible: payload.visible, opacity: payload.opacity, pixels },
+        layer: Layer {
+            name: payload.name,
+            visible: payload.visible,
+            opacity: payload.opacity,
+            pixels,
+        },
         canvas_size: (payload.canvas_width, payload.canvas_height),
         fragment: payload.fragment,
     }))
 }
 
 pub fn write(text: String) -> Result<(), String> {
-    arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text))
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text))
         .map_err(|e| format!("Cannot copy layer to clipboard: {e}"))
 }
 
 pub fn read() -> Result<Option<CopiedLayer>, String> {
-    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("Cannot open clipboard: {e}"))?;
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("Cannot open clipboard: {e}"))?;
     match clipboard.get_text() {
         Ok(text) => decode(&text),
         Err(arboard::Error::ContentNotAvailable) => Ok(None),
@@ -103,7 +127,12 @@ mod tests {
         pixels.offset = (-120, 45);
         pixels.write(0, -100, -30, [1, 2, 3, 4]);
         pixels.write(0, 20000, 20000, [5, 6, 7, 255]);
-        let layer = Layer { name: "Слой 🎨".into(), visible: false, opacity: 0.375, pixels };
+        let layer = Layer {
+            name: "Слой 🎨".into(),
+            visible: false,
+            opacity: 0.375,
+            pixels,
+        };
         let text = encode(&layer, (1000, 800)).unwrap();
         let copied = decode(&text).unwrap().unwrap();
         assert_eq!(copied.canvas_size, (1000, 800));
@@ -122,13 +151,23 @@ mod tests {
     fn plain_text_is_ignored_but_invalid_layer_payload_is_rejected() {
         assert!(decode("ordinary copied text").unwrap().is_none());
         assert!(decode(&format!("{PREFIX}broken")).is_err());
-        let layer = Layer { name: "empty".into(), visible: true, opacity: 1.0, pixels: SparsePixels::default() };
+        let layer = Layer {
+            name: "empty".into(),
+            visible: true,
+            opacity: 1.0,
+            pixels: SparsePixels::default(),
+        };
         let text = encode(&layer, (64, 64)).unwrap();
         let copied = decode(&text).unwrap().unwrap();
         assert_eq!(copied.layer.pixels, layer.pixels);
-        let original: serde_json::Value = serde_json::from_str(text.strip_prefix(PREFIX).unwrap()).unwrap();
-        for (key, value) in [("version", serde_json::json!(2)), ("canvas_width", serde_json::json!(0)),
-            ("opacity", serde_json::json!(2)), ("tiles", serde_json::json!("invalid"))] {
+        let original: serde_json::Value =
+            serde_json::from_str(text.strip_prefix(PREFIX).unwrap()).unwrap();
+        for (key, value) in [
+            ("version", serde_json::json!(2)),
+            ("canvas_width", serde_json::json!(0)),
+            ("opacity", serde_json::json!(2)),
+            ("tiles", serde_json::json!("invalid")),
+        ] {
             let mut payload = original.clone();
             payload[key] = value;
             assert!(decode(&format!("{PREFIX}{payload}")).is_err());

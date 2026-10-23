@@ -51,7 +51,8 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn reload_active_view(&mut self) -> Result<(), String> {
-        self.workspace.ensure_document_loaded(self.workspace.active_document)?;
+        self.workspace
+            .ensure_document_loaded(self.workspace.active_document)?;
         self.close_asset_preview();
         self.cancel_transform();
         let project = self.workspace.active();
@@ -85,7 +86,8 @@ impl EditorApp {
 
     pub(in crate::app) fn mark_dirty_rect(&mut self, rect: PixelRect) {
         let layer = self
-            .session.floating
+            .session
+            .floating
             .as_ref()
             .map(|f| f.layer)
             .unwrap_or(self.workspace.active().active_layer);

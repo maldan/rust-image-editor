@@ -20,8 +20,12 @@ pub struct UpscaleSettings {
 impl Default for UpscaleSettings {
     fn default() -> Self {
         Self {
-            scale_by: 1.75, denoise: 0.3,
-            control: ControlNetSettings { strength: 0.75, ..Default::default() },
+            scale_by: 1.75,
+            denoise: 0.3,
+            control: ControlNetSettings {
+                strength: 0.75,
+                ..Default::default()
+            },
         }
     }
 }
@@ -38,7 +42,10 @@ impl UpscaleSettings {
 }
 
 pub fn prepare_upscale(
-    filename: &str, settings: &DrawSettings, upscale: UpscaleSettings, seed: u64,
+    filename: &str,
+    settings: &DrawSettings,
+    upscale: UpscaleSettings,
+    seed: u64,
 ) -> Result<(Value, String), String> {
     upscale.validate(settings)?;
     let mut graph: Value =
@@ -59,7 +66,11 @@ pub struct ControlNetSettings {
 
 impl Default for ControlNetSettings {
     fn default() -> Self {
-        Self { strength: 1.0, start_percent: 0.0, end_percent: 1.0 }
+        Self {
+            strength: 1.0,
+            start_percent: 0.0,
+            end_percent: 1.0,
+        }
     }
 }
 
@@ -69,7 +80,8 @@ impl ControlNetSettings {
         if !self.strength.is_finite() || !(0.0..=1.0).contains(&self.strength) {
             return Err("ControlNet strength must be between 0 and 1".into());
         }
-        if !self.start_percent.is_finite() || !self.end_percent.is_finite()
+        if !self.start_percent.is_finite()
+            || !self.end_percent.is_finite()
             || !(0.0..=1.0).contains(&self.start_percent)
             || !(self.start_percent..=1.0).contains(&self.end_percent)
         {
@@ -95,8 +107,18 @@ pub fn prepare_draw_cn(
 
 fn patch_control_net(graph: &mut Value, control: ControlNetSettings) -> Result<(), String> {
     patch(graph, "ControlNet", "strength", control.strength.into())?;
-    patch(graph, "ControlNet", "start_percent", control.start_percent.into())?;
-    patch(graph, "ControlNet", "end_percent", control.end_percent.into())
+    patch(
+        graph,
+        "ControlNet",
+        "start_percent",
+        control.start_percent.into(),
+    )?;
+    patch(
+        graph,
+        "ControlNet",
+        "end_percent",
+        control.end_percent.into(),
+    )
 }
 
 pub fn validate_lineart_resolution(resolution: i32) -> Result<(), String> {
@@ -178,12 +200,22 @@ impl DrawSettings {
 
 pub fn prepare_qwen_draw(settings: &DrawSettings, seed: u64) -> Result<(Value, String), String> {
     settings.validate()?;
-    let mut graph: Value = serde_json::from_str(QWEN_DRAW)
-        .map_err(|e| format!("Invalid Qwen draw workflow: {e}"))?;
+    let mut graph: Value =
+        serde_json::from_str(QWEN_DRAW).map_err(|e| format!("Invalid Qwen draw workflow: {e}"))?;
     patch(&mut graph, "EmptyImage", "width", settings.width.into())?;
     patch(&mut graph, "EmptyImage", "height", settings.height.into())?;
-    patch(&mut graph, "Prompt", "prompt", settings.positive.clone().into())?;
-    patch(&mut graph, "Prompt", "negative_prompt", settings.negative.clone().into())?;
+    patch(
+        &mut graph,
+        "Prompt",
+        "prompt",
+        settings.positive.clone().into(),
+    )?;
+    patch(
+        &mut graph,
+        "Prompt",
+        "negative_prompt",
+        settings.negative.clone().into(),
+    )?;
     patch(&mut graph, "Sampler", "seed", seed.into())?;
     let output = node_id(&graph, "SaveImage")?;
     Ok((graph, output))
@@ -200,10 +232,16 @@ pub fn prepare_draw(settings: &DrawSettings, seed: u64) -> Result<(Value, String
 
 /// Both Anime modes use the same graph; UseEmpty selects the latent source.
 pub fn prepare_anime(
-    filename: Option<&str>, settings: &DrawSettings, denoise: f32, seed: u64,
+    filename: Option<&str>,
+    settings: &DrawSettings,
+    denoise: f32,
+    seed: u64,
 ) -> Result<(Value, String), String> {
-    if filename.is_some() { settings.validate_redraw(denoise)?; }
-    else { settings.validate()?; }
+    if filename.is_some() {
+        settings.validate_redraw(denoise)?;
+    } else {
+        settings.validate()?;
+    }
     let mut graph: Value =
         serde_json::from_str(ANIME).map_err(|e| format!("Invalid anime workflow: {e}"))?;
     patch(&mut graph, "UseEmpty", "switch", filename.is_none().into())?;
@@ -220,10 +258,25 @@ pub fn prepare_anime(
             graph.as_object_mut().unwrap().remove(&id);
         }
     }
-    patch(&mut graph, "Positive", "text", settings.positive.clone().into())?;
-    patch(&mut graph, "Negative", "text", settings.negative.clone().into())?;
+    patch(
+        &mut graph,
+        "Positive",
+        "text",
+        settings.positive.clone().into(),
+    )?;
+    patch(
+        &mut graph,
+        "Negative",
+        "text",
+        settings.negative.clone().into(),
+    )?;
     patch(&mut graph, "Sampler", "seed", seed.into())?;
-    patch(&mut graph, "Sampler", "denoise", if filename.is_some() { denoise } else { 1.0 }.into())?;
+    patch(
+        &mut graph,
+        "Sampler",
+        "denoise",
+        if filename.is_some() { denoise } else { 1.0 }.into(),
+    )?;
     let output = node_id(&graph, "ImageSaveWithFormat (maga)")?;
     Ok((graph, output))
 }
@@ -354,13 +407,22 @@ mod tests {
     #[test]
     fn qwen_draw_patches_prompts_size_seed_and_preserves_workflow() {
         let settings = DrawSettings {
-            positive: "A forest".into(), negative: "blurry".into(),
-            width: 1024, height: 768, ..Default::default()
+            positive: "A forest".into(),
+            negative: "blurry".into(),
+            width: 1024,
+            height: 768,
+            ..Default::default()
         };
         let original: Value = serde_json::from_str(QWEN_DRAW).unwrap();
         let (mut graph, save) = prepare_qwen_draw(&settings, 123).unwrap();
         assert_eq!(save, node_id(&original, "SaveImage").unwrap());
-        assert!(!graph.as_object().unwrap().values().any(|n| n["class_type"] == "LoadImage"));
+        assert!(
+            !graph
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|n| n["class_type"] == "LoadImage")
+        );
         for (title, key, expected) in [
             ("EmptyImage", "width", Value::from(1024)),
             ("EmptyImage", "height", Value::from(768)),
@@ -373,14 +435,26 @@ mod tests {
             graph[&id]["inputs"][key] = original[&id]["inputs"][key].clone();
         }
         assert_eq!(graph, original);
-        assert!(prepare_qwen_draw(&DrawSettings { width: 0, ..settings }, 0).is_err());
+        assert!(
+            prepare_qwen_draw(
+                &DrawSettings {
+                    width: 0,
+                    ..settings
+                },
+                0
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn anime_modes_share_graph_and_switch_latent_source() {
         let settings = DrawSettings {
-            positive: "forest".into(), negative: "blurry".into(),
-            width: 640, height: 768, ..Default::default()
+            positive: "forest".into(),
+            negative: "blurry".into(),
+            width: 640,
+            height: 768,
+            ..Default::default()
         };
         let original: Value = serde_json::from_str(ANIME).unwrap();
         for filename in [None, Some("uploaded/source.png")] {
@@ -388,7 +462,10 @@ mod tests {
             assert_eq!(output, "62");
             assert_eq!(graph["64"]["inputs"]["switch"], filename.is_none());
             assert_eq!(graph["63"]["inputs"]["seed"], 42);
-            assert_eq!(graph["63"]["inputs"]["denoise"], if filename.is_none() { 1.0 } else { 0.5 });
+            assert_eq!(
+                graph["63"]["inputs"]["denoise"],
+                if filename.is_none() { 1.0 } else { 0.5 }
+            );
             assert_eq!(graph["60_11"]["inputs"]["text"], "forest");
             assert_eq!(graph["60_12"]["inputs"]["text"], "blurry");
             for id in ["60_44", "60_45", "60_15", "62"] {
@@ -397,19 +474,39 @@ mod tests {
             if filename.is_none() {
                 assert_eq!(graph["60_28"]["inputs"]["width"], 640);
                 assert_eq!(graph["60_28"]["inputs"]["height"], 768);
-                assert!(!graph.as_object().unwrap().values().any(|n| n["class_type"] == "LoadImage"));
+                assert!(
+                    !graph
+                        .as_object()
+                        .unwrap()
+                        .values()
+                        .any(|n| n["class_type"] == "LoadImage")
+                );
             } else {
                 assert_eq!(graph["65"]["inputs"]["image"], "uploaded/source.png");
-                assert_eq!(graph["64"]["inputs"]["on_false"], original["64"]["inputs"]["on_false"]);
+                assert_eq!(
+                    graph["64"]["inputs"]["on_false"],
+                    original["64"]["inputs"]["on_false"]
+                );
                 assert_eq!(graph["66"], original["66"]);
             }
             for node in graph.as_object().unwrap().values() {
-                for value in node["inputs"].as_object().unwrap().values().filter(|v| v.is_array()) {
-                    assert!(graph.get(value[0].as_str().unwrap()).is_some(), "dangling link: {value}");
+                for value in node["inputs"]
+                    .as_object()
+                    .unwrap()
+                    .values()
+                    .filter(|v| v.is_array())
+                {
+                    assert!(
+                        graph.get(value[0].as_str().unwrap()).is_some(),
+                        "dangling link: {value}"
+                    );
                 }
             }
         }
-        let invalid_size = DrawSettings { width: 0, ..settings };
+        let invalid_size = DrawSettings {
+            width: 0,
+            ..settings
+        };
         assert!(prepare_anime(None, &invalid_size, 1.0, 0).is_err());
         assert!(prepare_anime(Some("input.png"), &invalid_size, 0.5, 0).is_ok());
         for denoise in [f32::NAN, -0.1, 1.1] {
@@ -422,43 +519,82 @@ mod tests {
         let original: Value = serde_json::from_str(UPSCALE).unwrap();
         for mask in 0..8 {
             let mut settings = DrawSettings {
-                model: Some("chosen".into()), positive: "forest".into(), negative: "text".into(),
-                width: -1, height: 0, ..Default::default()
+                model: Some("chosen".into()),
+                positive: "forest".into(),
+                negative: "text".into(),
+                width: -1,
+                height: 0,
+                ..Default::default()
             };
             for (i, lora) in settings.loras.iter_mut().enumerate() {
-                if mask & (1 << i) != 0 { lora.name = Some(format!("lora{i}")); }
+                if mask & (1 << i) != 0 {
+                    lora.name = Some(format!("lora{i}"));
+                }
             }
             let upscale = UpscaleSettings {
-                scale_by: 2.5, denoise: 0.5,
-                control: ControlNetSettings { strength: 0.5, start_percent: 0.25, end_percent: 0.75 },
+                scale_by: 2.5,
+                denoise: 0.5,
+                control: ControlNetSettings {
+                    strength: 0.5,
+                    start_percent: 0.25,
+                    end_percent: 0.75,
+                },
             };
-            let (graph, save) = prepare_upscale("folder/input.png", &settings, upscale, 42).unwrap();
+            let (graph, save) =
+                prepare_upscale("folder/input.png", &settings, upscale, 42).unwrap();
             assert_eq!(graph[&save], original[&save]);
-            for title in ["Depth Anything V2 - Relative", "VAE Encode", "Get Image Size", "ResizeAndPadImage", "Load ControlNet Model"] {
+            for title in [
+                "Depth Anything V2 - Relative",
+                "VAE Encode",
+                "Get Image Size",
+                "ResizeAndPadImage",
+                "Load ControlNet Model",
+            ] {
                 let id = node_id(&graph, title).unwrap();
                 assert_eq!(graph[&id], original[&id]);
             }
-            assert_eq!(graph[node_id(&graph, "ReferenceImage").unwrap()]["inputs"]["image"], "folder/input.png");
-            assert_eq!(graph[node_id(&graph, "Upscale").unwrap()]["inputs"]["scale_by"], 2.5);
+            assert_eq!(
+                graph[node_id(&graph, "ReferenceImage").unwrap()]["inputs"]["image"],
+                "folder/input.png"
+            );
+            assert_eq!(
+                graph[node_id(&graph, "Upscale").unwrap()]["inputs"]["scale_by"],
+                2.5
+            );
             let sampler = node_id(&graph, "Sampler").unwrap();
             assert_eq!(graph[&sampler]["inputs"]["denoise"], 0.5);
             assert_eq!(graph[&sampler]["inputs"]["seed"], 42);
             for key in ["positive", "negative", "latent_image"] {
-                assert_eq!(graph[&sampler]["inputs"][key], original[&sampler]["inputs"][key]);
+                assert_eq!(
+                    graph[&sampler]["inputs"][key],
+                    original[&sampler]["inputs"][key]
+                );
             }
             let control = node_id(&graph, "ControlNet").unwrap();
-            for (key, value) in [("strength", 0.5), ("start_percent", 0.25), ("end_percent", 0.75)] {
+            for (key, value) in [
+                ("strength", 0.5),
+                ("start_percent", 0.25),
+                ("end_percent", 0.75),
+            ] {
                 assert_eq!(graph[&control]["inputs"][key], value);
             }
-            assert_eq!(graph[node_id(&graph, "Model").unwrap()]["inputs"]["ckpt_name"], "chosen");
+            assert_eq!(
+                graph[node_id(&graph, "Model").unwrap()]["inputs"]["ckpt_name"],
+                "chosen"
+            );
             for (title, text) in [("Positive", "forest"), ("Negative", "text")] {
-                assert_eq!(graph[node_id(&graph, title).unwrap()]["inputs"]["text"], text);
+                assert_eq!(
+                    graph[node_id(&graph, title).unwrap()]["inputs"]["text"],
+                    text
+                );
             }
             for (i, lora) in settings.loras.iter().enumerate() {
                 let id = node_id(&graph, &format!("Lora{}", i + 1));
                 if let Some(name) = &lora.name {
                     assert_eq!(graph[id.unwrap()]["inputs"]["lora_name"], *name);
-                } else { assert!(id.is_err()); }
+                } else {
+                    assert!(id.is_err());
+                }
             }
             // Every remaining connection must refer to an existing node after LoRA bypass.
             for node in graph.as_object().unwrap().values() {
@@ -470,22 +606,51 @@ mod tests {
             }
         }
         for scale_by in [0.0, 0.5, f32::NAN, f32::INFINITY] {
-            assert!(prepare_upscale("i", &DrawSettings::default(), UpscaleSettings { scale_by, ..Default::default() }, 0).is_err());
+            assert!(
+                prepare_upscale(
+                    "i",
+                    &DrawSettings::default(),
+                    UpscaleSettings {
+                        scale_by,
+                        ..Default::default()
+                    },
+                    0
+                )
+                .is_err()
+            );
         }
         for denoise in [-0.1, 1.1, f32::NAN] {
-            assert!(prepare_upscale("i", &DrawSettings::default(), UpscaleSettings { denoise, ..Default::default() }, 0).is_err());
+            assert!(
+                prepare_upscale(
+                    "i",
+                    &DrawSettings::default(),
+                    UpscaleSettings {
+                        denoise,
+                        ..Default::default()
+                    },
+                    0
+                )
+                .is_err()
+            );
         }
     }
 
     #[test]
     fn draw_cn_uses_reference_size_control_settings_and_lora_chain() {
         let original: Value = serde_json::from_str(DRAW_CN).unwrap();
-        let control = ControlNetSettings { strength: 0.5, start_percent: 0.25, end_percent: 0.75 };
+        let control = ControlNetSettings {
+            strength: 0.5,
+            start_percent: 0.25,
+            end_percent: 0.75,
+        };
         for mask in 0..8 {
             let mut settings = DrawSettings {
                 model: Some("chosen.safetensors".into()),
-                positive: "forest".into(), negative: "text".into(),
-                width: -1, height: 0, ..Default::default()
+                positive: "forest".into(),
+                negative: "text".into(),
+                width: -1,
+                height: 0,
+                ..Default::default()
             };
             for (i, lora) in settings.loras.iter_mut().enumerate() {
                 if mask & (1 << i) != 0 {
@@ -493,13 +658,17 @@ mod tests {
                     lora.strength = 0.5;
                 }
             }
-            let (graph, save) = prepare_draw_cn("test/reference.png", &settings, control, 42).unwrap();
+            let (graph, save) =
+                prepare_draw_cn("test/reference.png", &settings, control, 42).unwrap();
             assert_eq!(graph[&save], original[&save]);
             for title in ["Image", "Get Image Size", "Load ControlNet Model"] {
                 let id = node_id(&graph, title).unwrap();
                 assert_eq!(graph[&id], original[&id]);
             }
-            assert_eq!(graph[node_id(&graph, "ReferenceImage").unwrap()]["inputs"]["image"], "test/reference.png");
+            assert_eq!(
+                graph[node_id(&graph, "ReferenceImage").unwrap()]["inputs"]["image"],
+                "test/reference.png"
+            );
             let cn = node_id(&graph, "ControlNet").unwrap();
             assert_eq!(graph[&cn]["inputs"]["strength"], 0.5);
             assert_eq!(graph[&cn]["inputs"]["start_percent"], 0.25);
@@ -507,10 +676,16 @@ mod tests {
             let sampler = node_id(&graph, "Sampler").unwrap();
             assert_eq!(graph[&sampler]["inputs"]["seed"], 42);
             for key in ["positive", "negative", "latent_image", "denoise"] {
-                assert_eq!(graph[&sampler]["inputs"][key], original[&sampler]["inputs"][key]);
+                assert_eq!(
+                    graph[&sampler]["inputs"][key],
+                    original[&sampler]["inputs"][key]
+                );
             }
             let mut upstream = node_id(&graph, "Model").unwrap();
-            assert_eq!(graph[&upstream]["inputs"]["ckpt_name"], "chosen.safetensors");
+            assert_eq!(
+                graph[&upstream]["inputs"]["ckpt_name"],
+                "chosen.safetensors"
+            );
             for (i, lora) in settings.loras.iter().enumerate() {
                 let id = node_id(&graph, &format!("Lora{}", i + 1));
                 if let Some(name) = &lora.name {
@@ -518,26 +693,61 @@ mod tests {
                     assert_eq!(graph[&id]["inputs"]["lora_name"], *name);
                     assert_eq!(graph[&id]["inputs"]["strength_model"], 0.5);
                     assert_eq!(graph[&id]["inputs"]["strength_clip"], 0.5);
-                    assert_eq!(graph[&id]["inputs"]["model"], serde_json::json!([upstream, 0]));
-                    assert_eq!(graph[&id]["inputs"]["clip"], serde_json::json!([upstream, 1]));
+                    assert_eq!(
+                        graph[&id]["inputs"]["model"],
+                        serde_json::json!([upstream, 0])
+                    );
+                    assert_eq!(
+                        graph[&id]["inputs"]["clip"],
+                        serde_json::json!([upstream, 1])
+                    );
                     upstream = id;
-                } else { assert!(id.is_err()); }
+                } else {
+                    assert!(id.is_err());
+                }
             }
-            assert_eq!(graph[&sampler]["inputs"]["model"], serde_json::json!([upstream, 0]));
+            assert_eq!(
+                graph[&sampler]["inputs"]["model"],
+                serde_json::json!([upstream, 0])
+            );
             for (title, text) in [("Positive", "forest"), ("Negative", "text")] {
                 let id = node_id(&graph, title).unwrap();
                 assert_eq!(graph[&id]["inputs"]["text"], text);
-                assert_eq!(graph[&id]["inputs"]["clip"], serde_json::json!([upstream, 1]));
+                assert_eq!(
+                    graph[&id]["inputs"]["clip"],
+                    serde_json::json!([upstream, 1])
+                );
             }
         }
         for invalid in [
-            ControlNetSettings { strength: -1.0, ..control },
-            ControlNetSettings { strength: f32::NAN, ..control },
-            ControlNetSettings { strength: 1.01, ..control },
-            ControlNetSettings { start_percent: -0.1, ..control },
-            ControlNetSettings { start_percent: 0.8, ..control },
-            ControlNetSettings { end_percent: 1.1, ..control },
-            ControlNetSettings { end_percent: f32::INFINITY, ..control },
+            ControlNetSettings {
+                strength: -1.0,
+                ..control
+            },
+            ControlNetSettings {
+                strength: f32::NAN,
+                ..control
+            },
+            ControlNetSettings {
+                strength: 1.01,
+                ..control
+            },
+            ControlNetSettings {
+                start_percent: -0.1,
+                ..control
+            },
+            ControlNetSettings {
+                start_percent: 0.8,
+                ..control
+            },
+            ControlNetSettings {
+                end_percent: 1.1,
+                ..control
+            },
+            ControlNetSettings {
+                end_percent: f32::INFINITY,
+                ..control
+            },
         ] {
             assert!(prepare_draw_cn("ref.png", &DrawSettings::default(), invalid, 0).is_err());
         }
@@ -554,7 +764,8 @@ mod tests {
             assert_eq!(graph[&image]["inputs"]["image"], "folder/source.png");
             assert_eq!(graph[&lineart]["inputs"]["resolution"], resolution);
             graph[&image]["inputs"]["image"] = original[&image]["inputs"]["image"].clone();
-            graph[&lineart]["inputs"]["resolution"] = original[&lineart]["inputs"]["resolution"].clone();
+            graph[&lineart]["inputs"]["resolution"] =
+                original[&lineart]["inputs"]["resolution"].clone();
             assert_eq!(graph, original);
         }
         for resolution in [-64, 0, 63, 513, 2112, i32::MAX] {

@@ -13,7 +13,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         if ui.menu_item("save", "Save Project").clicked() {
             app.save_project(ui);
         }
-        if ui.menu_item_enabled("optimize", "Optimize", app.workspace.path.is_some()).clicked() {
+        if ui
+            .menu_item_enabled("optimize", "Optimize", app.workspace.path.is_some())
+            .clicked()
+        {
             app.optimize_project(ui);
         }
         ui.separator();
@@ -39,12 +42,18 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         ui.menu("layer", "Layer", |ui| {
             let index = app.project().active_layer;
             let can_merge = index > 0 && index < app.project().layers.len();
-            if ui.menu_item_enabled("merge_down", "Merge Down", can_merge).clicked() {
+            if ui
+                .menu_item_enabled("merge_down", "Merge Down", can_merge)
+                .clicked()
+            {
                 app.merge_layer_down();
             }
         });
         ui.menu("mask", "Mask", |ui| {
-            if ui.menu_item_enabled("invert", "Invert", app.session.selection.is_some()).clicked() {
+            if ui
+                .menu_item_enabled("invert", "Invert", app.session.selection.is_some())
+                .clicked()
+            {
                 app.invert_selection();
             }
         });
@@ -67,10 +76,20 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     });
 
     ui.menu("filter", "Filter", |ui| {
-        if ui.menu_item_enabled("invert_colors", "Invert", !app.project().layers.is_empty()).clicked() {
+        if ui
+            .menu_item_enabled("invert_colors", "Invert", !app.project().layers.is_empty())
+            .clicked()
+        {
             app.invert_layer();
         }
-        if ui.menu_item_enabled("hsv_adjustment","HSV Adjustment…",!app.project().layers.is_empty()).clicked() {
+        if ui
+            .menu_item_enabled(
+                "hsv_adjustment",
+                "HSV Adjustment…",
+                !app.project().layers.is_empty(),
+            )
+            .clicked()
+        {
             app.open_hsv();
         }
     });
@@ -85,7 +104,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             if ui.menu_item("anime_draw", "Draw...").clicked() {
                 app.open_ai_anime_draw();
             }
-            if ui.menu_item_enabled("anime_redraw", "Redraw...", app.image_size.is_some()).clicked() {
+            if ui
+                .menu_item_enabled("anime_redraw", "Redraw...", app.image_size.is_some())
+                .clicked()
+            {
                 app.open_ai_anime_redraw();
             }
         });
@@ -93,7 +115,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             if ui.menu_item("qwen_draw", "Draw...").clicked() {
                 app.open_ai_qwen_draw();
             }
-            if ui.menu_item_enabled("qwen_redraw", "Redraw...", app.image_size.is_some()).clicked() {
+            if ui
+                .menu_item_enabled("qwen_redraw", "Redraw...", app.image_size.is_some())
+                .clicked()
+            {
                 app.open_ai();
             }
         });

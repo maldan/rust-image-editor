@@ -60,6 +60,10 @@ impl Client {
         self.upload_named(bytes, "mega-image-editor-mask.png")
     }
 
+    pub fn upload_video_end(&self, bytes: Vec<u8>) -> Result<String, String> {
+        self.upload_named(bytes, "mega-image-editor-video-end.png")
+    }
+
     fn upload_named(&self, bytes: Vec<u8>, name: &'static str) -> Result<String, String> {
         let part = multipart::Part::bytes(bytes)
             .file_name(name)
@@ -126,22 +130,33 @@ impl Client {
         self.download_limited(output, 1024 * 1024 * 1024, Duration::from_secs(600))
     }
 
-    fn download_limited(&self, output: &Value, limit: u64, timeout: Duration) -> Result<Vec<u8>, String> {
+    fn download_limited(
+        &self,
+        output: &Value,
+        limit: u64,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, String> {
         let filename = output["filename"]
             .as_str()
             .ok_or("Output has no filename")?;
-        let request = self.request(reqwest::Method::GET, "/view").timeout(timeout).query(&[
-            ("filename", filename),
-            ("subfolder", output["subfolder"].as_str().unwrap_or("")),
-            ("type", output["type"].as_str().unwrap_or("output")),
-        ]);
+        let request = self
+            .request(reqwest::Method::GET, "/view")
+            .timeout(timeout)
+            .query(&[
+                ("filename", filename),
+                ("subfolder", output["subfolder"].as_str().unwrap_or("")),
+                ("type", output["type"].as_str().unwrap_or("output")),
+            ]);
         let mut bytes = Vec::new();
         self.send(request)?
             .take(limit + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| "Cannot download output".to_string())?;
         if bytes.len() as u64 > limit {
-            return Err(format!("ComfyUI output exceeds {} MiB", limit / 1024 / 1024));
+            return Err(format!(
+                "ComfyUI output exceeds {} MiB",
+                limit / 1024 / 1024
+            ));
         }
         Ok(bytes)
     }
@@ -223,7 +238,12 @@ pub fn output_from_history(
     output_from_history_kind(history, id, save_node, false)
 }
 
-pub fn output_from_history_kind(history: &Value, id: &str, save_node: &str, video: bool) -> Result<Option<Value>, String> {
+pub fn output_from_history_kind(
+    history: &Value,
+    id: &str,
+    save_node: &str,
+    video: bool,
+) -> Result<Option<Value>, String> {
     let Some(item) = history.get(id) else {
         return Ok(None);
     };
@@ -244,13 +264,27 @@ pub fn output_from_history_kind(history: &Value, id: &str, save_node: &str, vide
         return Err(error);
     }
     let output = if video {
-        ["gifs", "videos", "images"].iter().filter_map(|key| item["outputs"][save_node][key].as_array())
-            .flatten().find(|v| v["filename"].as_str().is_some_and(|s| s.to_ascii_lowercase().ends_with(".mp4"))).cloned()
+        ["gifs", "videos", "images"]
+            .iter()
+            .filter_map(|key| item["outputs"][save_node][key].as_array())
+            .flatten()
+            .find(|v| {
+                v["filename"]
+                    .as_str()
+                    .is_some_and(|s| s.to_ascii_lowercase().ends_with(".mp4"))
+            })
+            .cloned()
     } else {
-        item["outputs"][save_node]["images"].as_array().and_then(|images| images.first()).cloned()
+        item["outputs"][save_node]["images"]
+            .as_array()
+            .and_then(|images| images.first())
+            .cloned()
     };
     if output.is_none() && item["status"]["completed"] == true {
-        return Err(format!("ComfyUI finished without a {} result", if video { "MP4 video" } else { "SaveImage" }));
+        return Err(format!(
+            "ComfyUI finished without a {} result",
+            if video { "MP4 video" } else { "SaveImage" }
+        ));
     }
     Ok(output)
 }
@@ -264,10 +298,20 @@ mod video_tests {
             "preview": {"gifs": [{"filename": "wrong.mp4"}]},
             "save": {"gifs": [{"filename": "preview.png"}, {"filename": "right.mp4", "subfolder": "ltx", "type": "output"}]}
         }, "status": {"completed": true}}});
-        let output = output_from_history_kind(&history, "job", "save", true).unwrap().unwrap();
+        let output = output_from_history_kind(&history, "job", "save", true)
+            .unwrap()
+            .unwrap();
         assert_eq!(output["filename"], "right.mp4");
         assert_eq!(output["subfolder"], "ltx");
-        assert!(output_from_history_kind(&history, "job", "missing", true).unwrap_err().contains("MP4"));
-        assert!(output_from_history_kind(&history, "pending", "save", true).unwrap().is_none());
+        assert!(
+            output_from_history_kind(&history, "job", "missing", true)
+                .unwrap_err()
+                .contains("MP4")
+        );
+        assert!(
+            output_from_history_kind(&history, "pending", "save", true)
+                .unwrap()
+                .is_none()
+        );
     }
 }

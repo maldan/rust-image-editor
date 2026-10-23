@@ -1,7 +1,9 @@
 use glam::Vec2;
 use mega_ui::Rect;
 
-use crate::editing::{FloatingTransform, SelectMode, Selection, Tool, TransformCursor, TransformHit};
+use crate::editing::{
+    FloatingTransform, SelectMode, Selection, Tool, TransformCursor, TransformHit,
+};
 
 /// View, tool, selection, and transform state for the document on screen.
 /// Dock panels edit this session instead of the whole editor.
@@ -97,7 +99,9 @@ impl DocumentSession {
 
     /// Returns whether a selection was inverted.
     pub(crate) fn invert_selection(&mut self) -> bool {
-        let Some(selection) = self.selection.as_mut() else { return false; };
+        let Some(selection) = self.selection.as_mut() else {
+            return false;
+        };
         selection.invert();
         self.selection_mask_dirty = true;
         true

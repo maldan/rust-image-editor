@@ -29,6 +29,28 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                         app.ai.video_layer = source.checked_sub(1);
                     }
                 }
+                ui.label("End frame document (optional)");
+                let mut end_names = vec!["None".to_string()];
+                end_names.extend(app.workspace.documents.iter().map(|d| d.name.clone()));
+                let end_options: Vec<_> = end_names.iter().map(String::as_str).collect();
+                let mut end_doc = app.ai.video_end_document.as_ref()
+                    .and_then(|id| app.workspace.documents.iter().position(|d| &d.id == id))
+                    .map_or(0, |i| i + 1);
+                if ui.select("video_end_document", &mut end_doc, &end_options).changed() {
+                    app.ai.video_end_document = end_doc.checked_sub(1)
+                        .map(|i| app.workspace.documents[i].id.clone());
+                    app.ai.video_end_layer = None;
+                }
+                if let Some(doc) = end_doc.checked_sub(1).and_then(|i| app.workspace.documents.get(i)) {
+                    ui.label(&format!("End canvas: {} x {} px", doc.project.width, doc.project.height));
+                    let mut sources = vec!["Whole document".to_string()];
+                    sources.extend(doc.project.layers.iter().map(|l| format!("Layer: {}", l.name)));
+                    let options: Vec<_> = sources.iter().map(String::as_str).collect();
+                    let mut source = app.ai.video_end_layer.map_or(0, |i| i + 1).min(options.len() - 1);
+                    if ui.select("video_end_source", &mut source, &options).changed() {
+                        app.ai.video_end_layer = source.checked_sub(1);
+                    }
+                }
                 ui.label("Layers use the full document canvas. Input is center-cropped to video size.");
                 ui.horizontal(|ui| {
                     ui.label("Width");
@@ -70,7 +92,12 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             let source_valid = app.workspace.documents.iter().find(|d| d.id == app.ai.document_id)
                 .is_some_and(|d| d.project.width > 0 && d.project.height > 0
                     && app.ai.video_layer.is_none_or(|i| i < d.project.layers.len()));
-            ui.add_enabled(source_valid && app.ai.config.is_some() && app.ai.video_settings.validate().is_ok(), |ui| {
+            let end_valid = app.ai.video_end_document.as_ref().is_none_or(|id| {
+                app.workspace.documents.iter().find(|d| &d.id == id)
+                    .is_some_and(|d| d.project.width > 0 && d.project.height > 0
+                        && app.ai.video_end_layer.is_none_or(|i| i < d.project.layers.len()))
+            });
+            ui.add_enabled(source_valid && end_valid && app.ai.config.is_some() && app.ai.video_settings.validate().is_ok(), |ui| {
                 run = ui.button("video_run", "Generate MP4").clicked();
             });
         }

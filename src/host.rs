@@ -12,8 +12,8 @@ use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::canvas_gpu::{CanvasOverlay, CanvasRenderer};
-use crate::view::CanvasView;
 use crate::editing::TransformCursor;
+use crate::view::CanvasView;
 
 pub const CANVAS_TEXTURE: u32 = 1;
 /// Slot 2 is `mega_ui::TEX_SLOT_COLOR_SV` (the color-picker square).
@@ -23,33 +23,41 @@ pub const THUMB_ATLAS: u32 = 4;
 
 /// Small outlined circular arrow for rotation (there is no native Rotate cursor).
 /// Generate once at startup; the native cursor follows the mouse without redraws.
-fn rotation_cursor_image() -> (Vec<u8>,u16) {
+fn rotation_cursor_image() -> (Vec<u8>, u16) {
     let size = 32u16;
     let center = Vec2::splat(15.5);
-    let start = 0.2*std::f32::consts::PI;
-    let end = 1.85*std::f32::consts::PI;
-    let point = |angle:f32| center+Vec2::new(angle.cos(),angle.sin())*9.0;
+    let start = 0.2 * std::f32::consts::PI;
+    let end = 1.85 * std::f32::consts::PI;
+    let point = |angle: f32| center + Vec2::new(angle.cos(), angle.sin()) * 9.0;
     let mut lines = Vec::new();
     for i in 0..40 {
-        lines.push((point(start+(end-start)*i as f32/40.0),point(start+(end-start)*(i+1) as f32/40.0)));
+        lines.push((
+            point(start + (end - start) * i as f32 / 40.0),
+            point(start + (end - start) * (i + 1) as f32 / 40.0),
+        ));
     }
     let tip = point(end);
-    let tangent = Vec2::new(-end.sin(),end.cos());
-    let normal = Vec2::new(end.cos(),end.sin());
-    lines.push((tip,tip-tangent*5.0+normal*4.0));
-    lines.push((tip,tip-tangent*5.0-normal*4.0));
-    let mut pixels = Vec::with_capacity(size as usize*size as usize*4);
-    for y in 0..size { for x in 0..size {
-        let p = Vec2::new(x as f32+0.5,y as f32+0.5);
-        let distance = lines.iter().map(|&(a,b)| {
-            let t = ((p-a).dot(b-a)/(b-a).length_squared()).clamp(0.0,1.0);
-            (p-a-(b-a)*t).length()
-        }).fold(f32::INFINITY,f32::min);
-        let alpha = (3.0-distance).clamp(0.0,1.0);
-        let color = ((1.5-distance).clamp(0.0,1.0)*255.0).round() as u8;
-        pixels.extend_from_slice(&[color,color,color,(alpha*255.0).round() as u8]);
-    } }
-    (pixels,size)
+    let tangent = Vec2::new(-end.sin(), end.cos());
+    let normal = Vec2::new(end.cos(), end.sin());
+    lines.push((tip, tip - tangent * 5.0 + normal * 4.0));
+    lines.push((tip, tip - tangent * 5.0 - normal * 4.0));
+    let mut pixels = Vec::with_capacity(size as usize * size as usize * 4);
+    for y in 0..size {
+        for x in 0..size {
+            let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+            let distance = lines
+                .iter()
+                .map(|&(a, b)| {
+                    let t = ((p - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+                    (p - a - (b - a) * t).length()
+                })
+                .fold(f32::INFINITY, f32::min);
+            let alpha = (3.0 - distance).clamp(0.0, 1.0);
+            let color = ((1.5 - distance).clamp(0.0, 1.0) * 255.0).round() as u8;
+            pixels.extend_from_slice(&[color, color, color, (alpha * 255.0).round() as u8]);
+        }
+    }
+    (pixels, size)
 }
 
 /// Eyedropper pointing down-left. Hotspot is the glass tip, in pixels.
@@ -145,7 +153,9 @@ impl FrameInput {
             Key::Named(NamedKey::End) => self.key_end = true,
             _ => {}
         }
-        if !self.shortcut_mod() { return; }
+        if !self.shortcut_mod() {
+            return;
+        }
         // Physical keys keep editing shortcuts working with Cyrillic layouts too.
         let code = match physical {
             PhysicalKey::Code(code) => Some(code),
@@ -262,17 +272,36 @@ pub trait Scene {
         canvas: &mut CanvasRenderer,
     );
     fn canvas_present(&self) -> Option<(Rect, CanvasView, CanvasOverlay)>;
-    fn canvas_cursor(&self) -> Option<TransformCursor> { None }
-    fn sync_ui_textures(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut UiRenderer);
+    fn canvas_cursor(&self) -> Option<TransformCursor> {
+        None
+    }
+    fn sync_ui_textures(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut UiRenderer,
+    );
     /// Return false while outstanding work is being cancelled before exit.
     fn request_close(&mut self) -> bool;
 }
 
-fn canvas_target(device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
+fn canvas_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("canvas composition target"),
-        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
-        mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format,
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     })
@@ -370,7 +399,11 @@ impl<S: Scene> Host<S> {
         let canvas = CanvasRenderer::new(&device, format);
         let canvas_target = canvas_target(&device, config.width, config.height, format);
         let canvas_target_view = canvas_target.create_view(&Default::default());
-        renderer.bind_texture_view(&device, CANVAS_TEXTURE, canvas_target.create_view(&Default::default()));
+        renderer.bind_texture_view(
+            &device,
+            CANVAS_TEXTURE,
+            canvas_target.create_view(&Default::default()),
+        );
         self.gpu = Some(Gpu {
             device,
             queue,
@@ -394,7 +427,11 @@ impl<S: Scene> Host<S> {
             gpu.surface.configure(&gpu.device, &gpu.config);
             gpu.canvas_target = canvas_target(&gpu.device, width, height, gpu.config.format);
             gpu.canvas_target_view = gpu.canvas_target.create_view(&Default::default());
-            gpu.renderer.bind_texture_view(&gpu.device, CANVAS_TEXTURE, gpu.canvas_target.create_view(&Default::default()));
+            gpu.renderer.bind_texture_view(
+                &gpu.device,
+                CANVAS_TEXTURE,
+                gpu.canvas_target.create_view(&Default::default()),
+            );
             gpu.renderer
                 .set_viewport(&gpu.queue, width as f32, height as f32);
         }
@@ -418,7 +455,9 @@ impl<S: Scene> Host<S> {
         self.scene.begin_frame(&frame_input);
         let mut ui_input = self.input.to_ui(viewport, dt);
         if ui_input.key_paste {
-            ui_input.clipboard = arboard::Clipboard::new().and_then(|mut c| c.get_text()).unwrap_or_default();
+            ui_input.clipboard = arboard::Clipboard::new()
+                .and_then(|mut c| c.get_text())
+                .unwrap_or_default();
         }
         self.ui.begin_frame(ui_input);
         let keep_redrawing = self.scene.build(&mut self.ui, viewport, self.draw_stats);
@@ -434,7 +473,8 @@ impl<S: Scene> Host<S> {
         let Some(gpu) = self.gpu.as_mut() else { return };
         self.scene
             .sync_canvas(&gpu.device, &gpu.queue, &mut gpu.canvas);
-        self.scene.sync_ui_textures(&gpu.device, &gpu.queue, &mut gpu.renderer);
+        self.scene
+            .sync_ui_textures(&gpu.device, &gpu.queue, &mut gpu.renderer);
         gpu.renderer
             .sync_atlases(&gpu.device, &gpu.queue, &mut self.ui);
 
@@ -461,13 +501,29 @@ impl<S: Scene> Host<S> {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("canvas offscreen"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &gpu.canvas_target_view, resolve_target: None, depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    view: &gpu.canvas_target_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
-                depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
             });
             if let Some((canvas_rect, canvas_view, overlay)) = canvas_present {
-                gpu.canvas.render(&gpu.queue, &mut pass, viewport, canvas_rect, canvas_view, overlay, self.elapsed);
+                gpu.canvas.render(
+                    &gpu.queue,
+                    &mut pass,
+                    viewport,
+                    canvas_rect,
+                    canvas_view,
+                    overlay,
+                    self.elapsed,
+                );
             }
         }
         {
@@ -499,12 +555,22 @@ impl<S: Scene> Host<S> {
         gpu.queue.present(frame);
         self.input.clear_edges();
 
-        let transform_cursor = if output.cursor == CursorIcon::Default { self.scene.canvas_cursor() } else { None };
+        let transform_cursor = if output.cursor == CursorIcon::Default {
+            self.scene.canvas_cursor()
+        } else {
+            None
+        };
         let cursor = if let Some(cursor) = transform_cursor {
             match cursor {
-                TransformCursor::Rotate => self.rotate_cursor.clone().map(winit::window::Cursor::Custom)
+                TransformCursor::Rotate => self
+                    .rotate_cursor
+                    .clone()
+                    .map(winit::window::Cursor::Custom)
                     .unwrap_or(winit::window::CursorIcon::Crosshair.into()),
-                TransformCursor::Eyedropper => self.dropper_cursor.clone().map(winit::window::Cursor::Custom)
+                TransformCursor::Eyedropper => self
+                    .dropper_cursor
+                    .clone()
+                    .map(winit::window::Cursor::Custom)
                     .unwrap_or(winit::window::CursorIcon::Crosshair.into()),
                 TransformCursor::Move => winit::window::CursorIcon::Move.into(),
                 TransformCursor::Pivot => winit::window::CursorIcon::Crosshair.into(),
@@ -544,12 +610,15 @@ impl<S: Scene> ApplicationHandler for Host<S> {
             .with_title(S::title())
             .with_inner_size(LogicalSize::new(1280.0, 800.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        let (pixels,size) = rotation_cursor_image();
-        if let Ok(source) = winit::window::CustomCursor::from_rgba(pixels,size,size,size/2,size/2) {
+        let (pixels, size) = rotation_cursor_image();
+        if let Ok(source) =
+            winit::window::CustomCursor::from_rgba(pixels, size, size, size / 2, size / 2)
+        {
             self.rotate_cursor = Some(event_loop.create_custom_cursor(source));
         }
         let (pixels, size, hot_x, hot_y) = eyedropper_cursor_image();
-        if let Ok(source) = winit::window::CustomCursor::from_rgba(pixels, size, size, hot_x, hot_y) {
+        if let Ok(source) = winit::window::CustomCursor::from_rgba(pixels, size, size, hot_x, hot_y)
+        {
             self.dropper_cursor = Some(event_loop.create_custom_cursor(source));
         }
         self.init_gpu(window.clone());
@@ -559,10 +628,13 @@ impl<S: Scene> ApplicationHandler for Host<S> {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
-                if self.scene.request_close() { event_loop.exit(); }
-                else {
+                if self.scene.request_close() {
+                    event_loop.exit();
+                } else {
                     self.closing = true;
-                    if let Some(window) = &self.window { window.request_redraw(); }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
             }
             WindowEvent::Resized(size) => {
@@ -573,7 +645,9 @@ impl<S: Scene> ApplicationHandler for Host<S> {
             }
             WindowEvent::RedrawRequested => {
                 self.redraw();
-                if self.closing && self.scene.request_close() { event_loop.exit(); }
+                if self.closing && self.scene.request_close() {
+                    event_loop.exit();
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let pos = Vec2::new(position.x as f32, position.y as f32);
@@ -681,8 +755,14 @@ mod text_edit_tests {
     #[test]
     fn navigation_shortcuts_reach_text_fields_and_edges_reset() {
         let mut input = FrameInput::default();
-        for key in [NamedKey::ArrowLeft, NamedKey::ArrowRight, NamedKey::ArrowUp,
-            NamedKey::ArrowDown, NamedKey::Home, NamedKey::End] {
+        for key in [
+            NamedKey::ArrowLeft,
+            NamedKey::ArrowRight,
+            NamedKey::ArrowUp,
+            NamedKey::ArrowDown,
+            NamedKey::Home,
+            NamedKey::End,
+        ] {
             input.press_key(&Key::Named(key), PhysicalKey::Code(KeyCode::Space));
         }
         input.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
@@ -694,18 +774,36 @@ mod text_edit_tests {
         let ui_input = input.to_ui(Vec2::splat(400.0), 0.016);
         assert!(ui_input.key_left && ui_input.key_right && ui_input.key_up && ui_input.key_down);
         assert!(ui_input.key_home && ui_input.key_end && ui_input.key_shift);
-        assert!(ui_input.key_select_all && ui_input.key_copy && ui_input.key_cut && ui_input.key_paste);
+        assert!(
+            ui_input.key_select_all && ui_input.key_copy && ui_input.key_cut && ui_input.key_paste
+        );
         input.key_undo = true;
         input.key_redo = true;
         input.key_enter = true;
         input.key_delete = true;
         let scene = input.for_scene(true);
-        assert!(!scene.key_copy && !scene.key_cut && !scene.key_paste && !scene.key_delete && !scene.key_undo && !scene.key_redo && !scene.key_enter);
+        assert!(
+            !scene.key_copy
+                && !scene.key_cut
+                && !scene.key_paste
+                && !scene.key_delete
+                && !scene.key_undo
+                && !scene.key_redo
+                && !scene.key_enter
+        );
         assert!(input.for_scene(false).key_paste);
         input.clear_edges();
         let ui_input = input.to_ui(Vec2::splat(400.0), 0.016);
-        assert!(!ui_input.key_left && !ui_input.key_right && !ui_input.key_up && !ui_input.key_down);
-        assert!(!ui_input.key_home && !ui_input.key_end && !ui_input.key_copy && !ui_input.key_cut && !ui_input.key_select_all);
+        assert!(
+            !ui_input.key_left && !ui_input.key_right && !ui_input.key_up && !ui_input.key_down
+        );
+        assert!(
+            !ui_input.key_home
+                && !ui_input.key_end
+                && !ui_input.key_copy
+                && !ui_input.key_cut
+                && !ui_input.key_select_all
+        );
         assert!(ui_input.key_shift && ui_input.key_ctrl);
     }
 

@@ -26,13 +26,7 @@ impl CanvasRenderer {
         self.layers.iter().any(|l| l.is_some())
     }
 
-    pub fn ensure_layers(
-        &mut self,
-        device: &wgpu::Device,
-        count: usize,
-        width: u32,
-        height: u32,
-    ) {
+    pub fn ensure_layers(&mut self, device: &wgpu::Device, count: usize, width: u32, height: u32) {
         let width = width.max(1);
         let height = height.max(1);
         let size_changed = self.size != (width, height);
@@ -72,8 +66,10 @@ impl CanvasRenderer {
             });
             let view = texture.create_view(&Default::default());
             let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("layer uniforms"), size: std::mem::size_of::<ViewUniforms>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+                label: Some("layer uniforms"),
+                size: std::mem::size_of::<ViewUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             });
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("canvas layer bg"),
@@ -119,7 +115,12 @@ impl CanvasRenderer {
         if width == 0 || height == 0 {
             return;
         }
-        self.ensure_layers(device, self.layers.len().max(layer_index + 1), width, height);
+        self.ensure_layers(
+            device,
+            self.layers.len().max(layer_index + 1),
+            width,
+            height,
+        );
         let Some(Some(layer)) = self.layers.get(layer_index) else {
             return;
         };
@@ -155,18 +156,33 @@ impl CanvasRenderer {
     }
 
     /// A decoded video frame changes every pixel. Keep the texture and upload in one write.
-    pub fn upload_video_frame(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &image::RgbaImage) {
+    pub fn upload_video_frame(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frame: &image::RgbaImage,
+    ) {
         let (width, height) = frame.dimensions();
         self.ensure_layers(device, 1, width, height);
         let layer = self.layers[0].as_ref().unwrap();
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &layer.texture, mip_level: 0, origin: wgpu::Origin3d::ZERO,
+                texture: &layer.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             frame.as_raw(),
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(height) },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
         );
     }
 
@@ -187,13 +203,19 @@ impl CanvasRenderer {
         }
     }
 
-    pub fn upload_sparse_layers(&mut self, device: &wgpu::Device, queue: &wgpu::Queue,
-        layers: &[&SparsePixels], width: u32, height: u32) {
+    pub fn upload_sparse_layers(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layers: &[&SparsePixels],
+        width: u32,
+        height: u32,
+    ) {
         self.ensure_layers(device, layers.len(), width, height);
         for (i, pixels) in layers.iter().enumerate() {
             let mut dirty = DirtyTiles::default();
-            dirty.resize(width,height);
-            self.upload_layer_dirty(device,queue,i,*pixels,width,height,&mut dirty);
+            dirty.resize(width, height);
+            self.upload_layer_dirty(device, queue, i, *pixels, width, height, &mut dirty);
         }
     }
 }

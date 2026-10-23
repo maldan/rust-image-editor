@@ -1,19 +1,19 @@
 mod video;
 pub use video::VideoSettings;
-mod client;
 mod catalog;
+mod client;
 mod config;
 mod job;
 mod workflow;
 mod ws;
 
-pub use config::HostConfig;
 pub use catalog::{Catalog, CatalogLoad};
-pub use workflow::DrawSettings;
+pub use config::HostConfig;
+pub use job::{Job, JobResult};
 pub use workflow::ControlNetSettings;
+pub use workflow::DrawSettings;
 pub use workflow::UpscaleSettings;
 pub use workflow::validate_lineart_resolution;
-pub use job::{Job, JobResult};
 
 /// Shared by input size feedback and worker-side resizing.
 pub fn scaled_size(width: u32, height: u32, scale: f32) -> Result<(u32, u32), String> {

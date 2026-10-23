@@ -69,17 +69,18 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         ui.label("Playback FPS");
         ui.horizontal(|ui| {
             let mut fps = player.fps_override.unwrap_or(info.fps) as f32;
-            ui.flex(1.0, |ui| {
+            let field_width = (ui.available_size().x - 36.0 * ui.scale()).max(1.0);
+            ui.flex_width(field_width, |ui| {
                 if ui.drag_float("video_playback_fps", &mut fps, 0.1).changed() {
                     player.set_fps(Some(fps as f64));
                 }
             });
-            if ui.icon_button("video_fps_reset", "refresh", false) {
+            if ui.icon_button("video_fps_reset", "reset", false) {
                 player.set_fps(None);
             }
         });
         ui.label(&format!("Original: {:.3} FPS", info.fps));
-        ui.label("FPS changes playback speed.");
+        ui.label("Lower FPS skips frames at original speed.");
     });
 }
 

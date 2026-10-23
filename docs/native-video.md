@@ -51,8 +51,16 @@ development libraries through the discovery mechanisms supported by
 
 - Existing videos, thumbnails and project format remain compatible.
 - Decode and color conversion run on a background worker, with two codec threads.
-- The presentation buffer retains only the latest frame, a reusable spare buffer,
-  and the currently displayed frame. It does not predecode the entire video.
+- Each active preview has a 2 GiB LRU cache of presented RGBA frames, populated
+  during playback and seeking. Memory is allocated on demand, not reserved upfront.
+  The canvas and cache share pixel buffers; cache hits do not copy pixels. Decoder
+  buffers and the current/pending presentation frames are additional to this limit.
+  Closing or switching the video releases its cache. It does not predecode the
+  entire video.
+- Cached seeks show the retained frame immediately. On pause they skip decoding;
+  during playback the decoder catches up in the background to continue from there.
+  Uncached seeks decode from a keyframe but skip RGBA conversion and copying for
+  all preroll frames. New seek requests cancel obsolete preroll between frames.
 - The worker reads at most one presentation frame ahead and follows source frame
   timestamps. There is no fixed 25 FPS conversion.
 - Preview size remains capped at 1920×1080, preserving aspect ratio. Posters use
@@ -75,7 +83,8 @@ source dimensions, file size, duration, timeline position and playback controls.
 
 Play/pause and seeking are transient preview settings. Seeking on pause displays
 that frame without resuming playback, and newer scrub requests supersede older
-ones. FPS defaults to the original stream rate; an override changes preview speed
-relative to that rate, and the refresh icon resets it. The MP4 is not modified.
+ones. FPS defaults to the original stream rate; lowering it skips frames while
+preserving source timing and duration. Values above the source rate have no effect.
+The reset icon restores the original FPS. The MP4 is not modified.
 Paused playback waits on a condition variable and does not keep decoding or
 requesting canvas redraws. Source timestamps still govern default playback.

@@ -16,11 +16,18 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         if viewport.x > 0.0 && viewport.y > 0.0 {
             let min = app.session.canvas_rect.min / viewport;
             let max = app.session.canvas_rect.max / viewport;
-            ui.texture_rect(crate::host::CANVAS_TEXTURE, app.session.canvas_rect, min.to_array(), max.to_array());
+            ui.texture_rect(
+                crate::host::CANVAS_TEXTURE,
+                app.session.canvas_rect,
+                min.to_array(),
+                max.to_array(),
+            );
         }
     }
 
-    if app.ai.open || app.hsv.open { return; }
+    if app.ai.open || app.hsv.open || app.rename.is_some() {
+        return;
+    }
 
     if app.session.fit_image {
         app.fit_to_canvas();
@@ -43,9 +50,13 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             ui.request_repaint();
         }
     } else {
-        let message = if app.session.preview_asset.is_some() { app.status.as_str() }
-            else { "Place an asset or resize canvas to begin" };
-        let pos = app.session.canvas_rect.min + rect_size(app.session.canvas_rect) * 0.5 - Vec2::new(130.0, 8.0);
+        let message = if app.session.preview_asset.is_some() {
+            app.status.as_str()
+        } else {
+            "Place an asset or resize canvas to begin"
+        };
+        let pos = app.session.canvas_rect.min + rect_size(app.session.canvas_rect) * 0.5
+            - Vec2::new(130.0, 8.0);
         ui.text_at(pos, message);
     }
 }

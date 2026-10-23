@@ -90,15 +90,37 @@ impl CanvasRenderer {
         );
         let mip_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("transform mip bind"),
-            entries: &[texture_entry(0,true),texture_entry(1,true),sampler_entry(2,true)],
+            entries: &[
+                texture_entry(0, true),
+                texture_entry(1, true),
+                sampler_entry(2, true),
+            ],
         });
         let mip_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("transform mip layout"),bind_group_layouts:&[Some(&mip_bind_layout)],immediate_size:0,
+            label: Some("transform mip layout"),
+            bind_group_layouts: &[Some(&mip_bind_layout)],
+            immediate_size: 0,
         });
-        let mip_init_pipeline = make_pipeline(device,&mip_layout,&shader,"vs_mip","fs_mip_init",
-            wgpu::TextureFormat::Rgba8UnormSrgb,wgpu::BlendState::REPLACE,&[]);
-        let mip_down_pipeline = make_pipeline(device,&mip_layout,&shader,"vs_mip","fs_mip_down",
-            wgpu::TextureFormat::Rgba8UnormSrgb,wgpu::BlendState::REPLACE,&[]);
+        let mip_init_pipeline = make_pipeline(
+            device,
+            &mip_layout,
+            &shader,
+            "vs_mip",
+            "fs_mip_init",
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::BlendState::REPLACE,
+            &[],
+        );
+        let mip_down_pipeline = make_pipeline(
+            device,
+            &mip_layout,
+            &shader,
+            "vs_mip",
+            "fs_mip_down",
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::BlendState::REPLACE,
+            &[],
+        );
         let punch_pipeline = make_pipeline(
             device,
             &float_layout,

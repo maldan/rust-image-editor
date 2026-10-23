@@ -1,5 +1,5 @@
-use std::fs;
 use crate::raster::SparsePixels;
+use std::fs;
 use std::path::Path;
 
 use image::{DynamicImage, ImageFormat, RgbaImage};
@@ -65,9 +65,17 @@ impl Project {
 
     /// Insert into the existing canvas. Fit uses the original input bounds;
     /// native-size insertion preserves the complete image beyond the canvas.
-    pub fn add_raster_layer(&mut self, image: &image::RgbaImage, name: String, region: impl Into<crate::raster::RasterRect>, fit: bool) -> Result<(), String> {
+    pub fn add_raster_layer(
+        &mut self,
+        image: &image::RgbaImage,
+        name: String,
+        region: impl Into<crate::raster::RasterRect>,
+        fit: bool,
+    ) -> Result<(), String> {
         let region = region.into();
-        if image.width() == 0 || image.height() == 0 { return Err("Result image is empty".into()); }
+        if image.width() == 0 || image.height() == 0 {
+            return Err("Result image is empty".into());
+        }
         if region.is_empty() {
             return Err("Result destination is empty".into());
         }
@@ -75,10 +83,19 @@ impl Project {
         let image = if fit {
             let size = region.size();
             if image.dimensions() != size {
-                resized = image::imageops::resize(image, size.0, size.1, image::imageops::FilterType::Lanczos3);
+                resized = image::imageops::resize(
+                    image,
+                    size.0,
+                    size.1,
+                    image::imageops::FilterType::Lanczos3,
+                );
                 &resized
-            } else { image }
-        } else { image };
+            } else {
+                image
+            }
+        } else {
+            image
+        };
         let (w, h) = image.dimensions();
         self.add_layer();
         let target = &mut self.layers[self.active_layer].pixels;
@@ -113,14 +130,27 @@ impl Project {
     /// and selection. Normal alpha-over compositing cannot cancel source alpha.
     pub fn visible_content_bounds(&self) -> Option<crate::raster::RasterRect> {
         use crate::raster::RasterRect;
-        let frame = RasterRect {min_x:0,min_y:0,max_x:self.width as i32,max_y:self.height as i32};
+        let frame = RasterRect {
+            min_x: 0,
+            min_y: 0,
+            max_x: self.width as i32,
+            max_y: self.height as i32,
+        };
         let mut bounds: Option<RasterRect> = None;
         for layer in &self.layers {
-            if !layer.visible || layer.opacity <= 0.0 { continue; }
-            let Some(b) = layer.pixels.bounds_in(frame) else { continue; };
+            if !layer.visible || layer.opacity <= 0.0 {
+                continue;
+            }
+            let Some(b) = layer.pixels.bounds_in(frame) else {
+                continue;
+            };
             bounds = Some(match bounds {
-                Some(a) => RasterRect {min_x:a.min_x.min(b.min_x),min_y:a.min_y.min(b.min_y),
-                    max_x:a.max_x.max(b.max_x),max_y:a.max_y.max(b.max_y)},
+                Some(a) => RasterRect {
+                    min_x: a.min_x.min(b.min_x),
+                    min_y: a.min_y.min(b.min_y),
+                    max_x: a.max_x.max(b.max_x),
+                    max_y: a.max_y.max(b.max_y),
+                },
                 None => b,
             });
         }
@@ -128,7 +158,9 @@ impl Project {
     }
 
     pub fn delete_layer(&mut self, index: usize) -> Option<Layer> {
-        if index >= self.layers.len() { return None; }
+        if index >= self.layers.len() {
+            return None;
+        }
         let layer = self.layers.remove(index);
         if self.layers.is_empty() {
             self.width = 0;
@@ -159,7 +191,9 @@ impl Project {
     }
 
     pub fn active_pixels(&self) -> Option<&SparsePixels> {
-        self.layers.get(self.active_layer).map(|layer| &layer.pixels)
+        self.layers
+            .get(self.active_layer)
+            .map(|layer| &layer.pixels)
     }
 
     pub fn active_pixels_mut(&mut self) -> Option<&mut SparsePixels> {
@@ -188,7 +222,8 @@ impl Project {
             .decoded_rgba()?
             .ok_or_else(|| "Document is empty".to_string())?;
         let image = RgbaImage::from_raw(width, height, pixels).ok_or("Invalid document raster")?;
-        DynamicImage::ImageRgba8(image).save_with_format(path, format)
+        DynamicImage::ImageRgba8(image)
+            .save_with_format(path, format)
             .map_err(|e| format!("Cannot export image: {e}"))
     }
 }
@@ -201,7 +236,9 @@ pub fn encode_png_rgba(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>
 
 /// VP8L lossless WebP. Partial alpha is preserved; this is not the lossy encoder.
 pub fn encode_webp_rgba(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let expected = (width as usize).checked_mul(height as usize).and_then(|n| n.checked_mul(4))
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
         .ok_or_else(|| "Invalid image size".to_string())?;
     if pixels.len() != expected || width == 0 || height == 0 {
         return Err("Invalid image size".into());
@@ -228,20 +265,37 @@ mod tests {
 
     #[test]
     fn trim_canvas_bounds_combine_visible_layers_and_clip_partial_off_canvas_content() {
-        use crate::raster::{Raster,RasterRect};
+        use crate::raster::{Raster, RasterRect};
         let mut project = Project::default();
-        project.resize_canvas(20,15).unwrap();
-        project.layers[0].pixels = SparsePixels::from_rgba(&[100,120,140,255].repeat(8*8),8,8);
-        project.layers[0].pixels.offset = (-6,5);
+        project.resize_canvas(20, 15).unwrap();
+        project.layers[0].pixels =
+            SparsePixels::from_rgba(&[100, 120, 140, 255].repeat(8 * 8), 8, 8);
+        project.layers[0].pixels.offset = (-6, 5);
         project.add_layer();
         project.layers[1].opacity = 0.5;
-        project.layers[1].pixels.write(0,19,14,[255,0,0,1]);
+        project.layers[1].pixels.write(0, 19, 14, [255, 0, 0, 1]);
         project.add_layer();
         project.layers[2].visible = false;
-        project.layers[2].pixels.write(0,0,0,[255,0,0,255]);
-        assert_eq!(project.visible_content_bounds(),Some(RasterRect {min_x:0,min_y:5,max_x:20,max_y:15}));
-        project.layers[1].pixels.offset = (1,0);
-        assert_eq!(project.visible_content_bounds(),Some(RasterRect {min_x:0,min_y:5,max_x:2,max_y:13}));
+        project.layers[2].pixels.write(0, 0, 0, [255, 0, 0, 255]);
+        assert_eq!(
+            project.visible_content_bounds(),
+            Some(RasterRect {
+                min_x: 0,
+                min_y: 5,
+                max_x: 20,
+                max_y: 15
+            })
+        );
+        project.layers[1].pixels.offset = (1, 0);
+        assert_eq!(
+            project.visible_content_bounds(),
+            Some(RasterRect {
+                min_x: 0,
+                min_y: 5,
+                max_x: 2,
+                max_y: 13
+            })
+        );
         project.layers[0].visible = false;
         assert!(project.visible_content_bounds().is_none());
     }
@@ -267,15 +321,50 @@ mod tests {
         let original = vec![10, 20, 30, 255].repeat(4);
         project.import_rgba(&original, 2, 2).unwrap();
         let result = RgbaImage::from_fn(3, 3, |x, y| Rgba([x as u8, y as u8, 60, 255]));
-        let region = crate::editing::PixelRect { min_x: 0, min_y: 0, max_x: 2, max_y: 2 };
-        project.add_raster_layer(&result, "AI Edit".into(), region, false).unwrap();
+        let region = crate::editing::PixelRect {
+            min_x: 0,
+            min_y: 0,
+            max_x: 2,
+            max_y: 2,
+        };
+        project
+            .add_raster_layer(&result, "AI Edit".into(), region, false)
+            .unwrap();
         assert_eq!((project.width, project.height), (2, 2));
-        assert_eq!(project.layers[0].pixels.to_rgba(project.width, project.height), original);
-        assert_eq!(project.layers[1].pixels.to_rgba(project.width, project.height), [0, 0, 60, 255, 1, 0, 60, 255, 0, 1, 60, 255, 1, 1, 60, 255]);
+        assert_eq!(
+            project.layers[0]
+                .pixels
+                .to_rgba(project.width, project.height),
+            original
+        );
+        assert_eq!(
+            project.layers[1]
+                .pixels
+                .to_rgba(project.width, project.height),
+            [0, 0, 60, 255, 1, 0, 60, 255, 0, 1, 60, 255, 1, 1, 60, 255]
+        );
         assert_eq!(project.layers[1].pixels.region(2, 2, 1, 1), [2, 2, 60, 255]);
-        project.add_raster_layer(&RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 255])), "small".into(), region, false).unwrap();
-        assert_eq!(&project.layers[2].pixels.to_rgba(project.width, project.height)[..4], &[1, 2, 3, 255]);
-        assert!(project.layers[2].pixels.to_rgba(project.width, project.height)[4..].iter().all(|b| *b == 0));
+        project
+            .add_raster_layer(
+                &RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 255])),
+                "small".into(),
+                region,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            &project.layers[2]
+                .pixels
+                .to_rgba(project.width, project.height)[..4],
+            &[1, 2, 3, 255]
+        );
+        assert!(
+            project.layers[2]
+                .pixels
+                .to_rgba(project.width, project.height)[4..]
+                .iter()
+                .all(|b| *b == 0)
+        );
     }
 
     #[test]
@@ -283,15 +372,43 @@ mod tests {
         for side in [1, 4] {
             let mut project = Project::default();
             project.import_rgba(&vec![0; 5 * 4 * 4], 5, 4).unwrap();
-            let region = crate::editing::PixelRect { min_x: 2, min_y: 1, max_x: 4, max_y: 3 };
+            let region = crate::editing::PixelRect {
+                min_x: 2,
+                min_y: 1,
+                max_x: 4,
+                max_y: 3,
+            };
             let result = RgbaImage::from_pixel(side, side, Rgba([40, 50, 60, 128]));
-            project.add_raster_layer(&result, "Fit".into(), region, true).unwrap();
+            project
+                .add_raster_layer(&result, "Fit".into(), region, true)
+                .unwrap();
             assert_eq!((project.width, project.height), (5, 4));
-            let actual = RgbaImage::from_raw(5, 4, project.layers[1].pixels.to_rgba(project.width, project.height).clone()).unwrap();
+            let actual = RgbaImage::from_raw(
+                5,
+                4,
+                project.layers[1]
+                    .pixels
+                    .to_rgba(project.width, project.height)
+                    .clone(),
+            )
+            .unwrap();
             for (x, y, pixel) in actual.enumerate_pixels() {
-                assert_eq!(*pixel, if (2..4).contains(&x) && (1..3).contains(&y) { Rgba([40, 50, 60, 128]) } else { Rgba([0; 4]) });
+                assert_eq!(
+                    *pixel,
+                    if (2..4).contains(&x) && (1..3).contains(&y) {
+                        Rgba([40, 50, 60, 128])
+                    } else {
+                        Rgba([0; 4])
+                    }
+                );
             }
-            assert!(project.layers[0].pixels.to_rgba(project.width, project.height).iter().all(|b| *b == 0));
+            assert!(
+                project.layers[0]
+                    .pixels
+                    .to_rgba(project.width, project.height)
+                    .iter()
+                    .all(|b| *b == 0)
+            );
         }
     }
 

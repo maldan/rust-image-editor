@@ -76,8 +76,11 @@ pub fn fill_bucket(
                 continue;
             }
             let mut pixel = pixels.read(width, x as i32, y as i32);
-            if erase { erase_pixel(&mut pixel, opacity); }
-            else { paint_color(&mut pixel, opacity, color); }
+            if erase {
+                erase_pixel(&mut pixel, opacity);
+            } else {
+                paint_color(&mut pixel, opacity, color);
+            }
             pixels.write(width, x as i32, y as i32, pixel);
             changed = true;
         }
