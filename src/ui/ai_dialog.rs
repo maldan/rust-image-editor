@@ -141,6 +141,7 @@ impl PreviewView {
 }
 
 pub struct AiDialog {
+    pub presets: super::prompt_presets::PromptPresets,
     pub open: bool,
     pub mode: AiMode,
     pub video_settings: crate::comfyui::VideoSettings,
@@ -199,6 +200,7 @@ pub struct AiDialog {
 impl Default for AiDialog {
     fn default() -> Self {
         Self {
+            presets: Default::default(),
             open: false,
             mode: AiMode::Edit,
             video_settings: Default::default(),
@@ -287,7 +289,11 @@ impl AiDialog {
 
 pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     if !app.ai.open {
+        app.ai.presets.close();
         return;
+    }
+    if app.ai.presets.open && app.input.key_escape {
+        app.input.key_escape = false;
     }
     if let Some(load) = &app.ai.catalog_load {
         if let Some(result) = load.poll() {
@@ -333,7 +339,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                             || app.ai.mode.is_anime()
                             || app.ai.mode == AiMode::QwenDraw
                         {
-                            draw_controls(ui, &mut app.ai, width, height);
+                            draw_controls(ui, &mut app.ai, width, height, &mut app.workspace.prompt_presets, &mut app.dirty);
                         } else {
                             source_controls(ui, &mut app.ai, width, height);
                             if app.ai.mode == AiMode::Lineart {
@@ -349,7 +355,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                                     ui.label(&error);
                                 }
                             } else {
-                                ui.label("Prompt");
+                                ui.separator();
+                                app.dirty |= app.ai.presets.draw(ui, "Prompt", &mut app.workspace.prompt_presets, &mut app.ai.prompt, None);
                                 ui.text_area(
                                     "ai_prompt",
                                     &mut app.ai.prompt,
@@ -521,7 +528,7 @@ pub(super) fn choose(
     }
 }
 
-fn draw_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
+fn draw_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32, presets: &mut Vec<crate::prompt_preset::PromptPreset>, dirty: &mut bool) {
     let form_height = (ui.available_size().y - 165.0 * ui.scale()).max(180.0 * ui.scale());
     ui.scroll_area(
         "draw_settings",
@@ -606,7 +613,8 @@ fn draw_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
                     });
                 }
             }
-            ui.label("Positive prompt");
+            ui.separator();
+            *dirty |= ai.presets.draw(ui, "Positive prompt", presets, &mut ai.draw_settings.positive, Some(&mut ai.draw_settings.negative));
             ui.text_area(
                 "draw_positive",
                 &mut ai.draw_settings.positive,
@@ -818,7 +826,7 @@ mod tests {
             viewport: Vec2::new(600.0, 1400.0),
             ..Default::default()
         });
-        ui.horizontal(|ui| ui.flex_width(400.0, |ui| draw_controls(ui, ai, 128, 128)));
+        ui.horizontal(|ui| ui.flex_width(400.0, |ui| draw_controls(ui, ai, 128, 128, &mut Vec::new(), &mut false)));
         ui.end_frame().draw_list.len()
     }
 

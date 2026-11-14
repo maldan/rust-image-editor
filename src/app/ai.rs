@@ -106,7 +106,7 @@ impl EditorApp {
         self.ai.anim_shown = 0;
         self.ai.preview_dirty = false;
         self.ai.fraction = None;
-        match crate::comfyui::HostConfig::from_env() {
+        match crate::comfyui::HostConfig::load() {
             Ok(config) => {
                 if mode.uses_sd() || mode.uses_video() {
                     self.ai.catalog_load =

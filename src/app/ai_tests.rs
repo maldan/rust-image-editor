@@ -2,6 +2,66 @@ use super::*;
 use crate::raster::SparsePixels;
 
 #[test]
+fn create_document_from_asset_preview_uses_one_layer_and_preserves_source() {
+    let mut app = EditorApp::default();
+    app.project_mut().import_rgba(&[255, 0, 0, 255], 1, 1).unwrap();
+    app.refresh_image().unwrap();
+    let original_pixels = app.project().layers[0].pixels.clone();
+    let pixels = [10, 20, 30, 128, 90, 80, 70, 255];
+    let asset = app.workspace.import_asset_rgba("Reference".into(), &pixels, 2, 1).unwrap();
+    app.show_asset_preview(asset);
+    app.dirty = false;
+    let count = app.workspace.documents.len();
+    let mut ui = Ui::new();
+    app.create_document_from_asset(asset, &mut ui);
+    assert!(app.session.preview_asset.is_none());
+    assert_eq!(app.workspace.documents.len(), count + 1);
+    assert_eq!(app.workspace.active_document, count);
+    assert_eq!(app.workspace.active_doc().name, "Reference");
+    assert_eq!(app.image_size, Some((2, 1)));
+    assert_eq!(app.project().layers.len(), 1);
+    assert_eq!(app.project().active_layer, 0);
+    assert_eq!(app.project().layers[0].pixels.to_rgba(2, 1), pixels);
+    assert_eq!(app.workspace.documents[0].project.layers[0].pixels, original_pixels);
+    assert_eq!(app.workspace.assets[asset].pixels, pixels);
+    assert!(app.dirty);
+}
+
+#[test]
+fn prompt_presets_save_with_ctrl_s_inside_ai_and_follow_opened_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("presets.mgimg");
+    let mut app = EditorApp::default();
+    app.project_mut().import_rgba(&[20, 40, 60, 255], 1, 1).unwrap();
+    app.refresh_image().unwrap();
+    app.workspace.save(&path).unwrap();
+    let preset = crate::prompt_preset::PromptPreset::new("Style".into(), "positive".into(), "negative".into());
+    app.workspace.prompt_presets.push(preset.clone());
+    app.dirty = true;
+    app.ai.open = true;
+    let mut input = FrameInput::default();
+    input.key_save = true;
+    input.key_delete = true;
+    app.begin_frame(&input);
+    assert!(app.input.key_save && !app.input.key_delete);
+    let mut ui = Ui::new();
+    EditorApp::init(&mut ui);
+    let viewport = Vec2::new(1280.0, 800.0);
+    ui.begin_frame(mega_ui::UiInput { viewport, ..Default::default() });
+    app.build(&mut ui, viewport, DrawStats::default());
+    ui.end_frame();
+    assert!(!app.dirty);
+    assert_eq!(Workspace::open(&path).unwrap().prompt_presets, vec![preset.clone()]);
+    app.ai.presets.open = true;
+    app.open_path(&path).unwrap();
+    assert!(!app.ai.presets.open);
+    assert_eq!(app.workspace.prompt_presets, vec![preset]);
+    app.new_project(&mut ui);
+    assert!(app.workspace.prompt_presets.is_empty());
+    assert_eq!(Workspace::open(&path).unwrap().prompt_presets.len(), 1);
+}
+
+#[test]
 fn invert_selection_complements_mask_and_does_nothing_without_selection() {
     let mut app = EditorApp::default();
     app.session.selection_mask_dirty = false;
@@ -1097,7 +1157,7 @@ fn hung_generation_does_not_prevent_application_exit() {
     let (job, _sender) = crate::comfyui::Job::pending();
     app.ai.job = Some(job);
     assert!(
-        app.request_close(),
+        matches!(app.request_close(), crate::host::ClosePoll::Exit),
         "window close must not wait for a stalled worker"
     );
     assert!(app.ai.job.is_none());

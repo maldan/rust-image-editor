@@ -20,6 +20,7 @@ use crate::view::CanvasView;
 use crate::workspace::Workspace;
 
 mod ai;
+mod ai_settings;
 mod animation;
 mod documents;
 mod history;
@@ -45,6 +46,13 @@ mod loading_tests;
 mod sparse_layer_tests;
 #[cfg(test)]
 mod transform_interaction_tests;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum UnsavedAction {
+    Close,
+    NewProject,
+    OpenProject,
+}
 
 pub struct EditorApp {
     animation_clock: Option<(String, f64)>,
@@ -77,8 +85,12 @@ pub struct EditorApp {
     pub resize_w: u32,
     pub resize_h: u32,
     pub ai: ui::ai_dialog::AiDialog,
+    pub ai_settings: Option<ui::ai_settings::AiSettings>,
     pub hsv: ui::hsv_dialog::HsvDialog,
     pub rename: Option<ui::rename_dialog::RenameDialog>,
+    pub unsaved: Option<UnsavedAction>,
+    close_ready: bool,
+    close_aborted: bool,
     video_preview: Option<crate::video::Playback>,
     video_poster: Option<crate::video::PosterJob>,
 }
@@ -119,8 +131,12 @@ impl EditorApp {
             resize_w: 512,
             resize_h: 512,
             ai: ui::ai_dialog::AiDialog::default(),
+            ai_settings: None,
             hsv: Default::default(),
             rename: None,
+            unsaved: None,
+            close_ready: false,
+            close_aborted: false,
             video_preview: None,
             video_poster: None,
         };

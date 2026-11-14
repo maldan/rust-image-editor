@@ -2,12 +2,20 @@ use super::*;
 use crate::raster::Raster;
 
 impl EditorApp {
+    pub fn request_new_project(&mut self, ui: &mut Ui) {
+        if self.prompt_if_unsaved(UnsavedAction::NewProject) {
+            return;
+        }
+        self.new_project(ui);
+    }
+
     pub fn new_project(&mut self, ui: &mut Ui) {
         self.animation_clock = None;
         self.close_asset_preview();
         self.video_poster = None;
         self.cancel_transform();
         self.workspace = Workspace::default();
+        self.ai.presets = Default::default();
         self.image_size = None;
         self.dirty_tiles.clear();
         self.dirty_layer = None;
@@ -19,7 +27,7 @@ impl EditorApp {
         self.session.pan = Vec2::ZERO;
         self.session.zoom = 1.0;
         self.session.rotation = 0.0;
-        self.dirty = true;
+        self.dirty = false;
         self.status = "New project created".into();
         ui.notify_success("New project created");
     }
@@ -283,6 +291,11 @@ impl EditorApp {
     }
 
     pub fn save_project(&mut self, ui: &mut Ui) {
+        let _ = self.try_save_project(ui);
+    }
+
+    /// Returns `true` when the project was written and `dirty` cleared.
+    pub fn try_save_project(&mut self, ui: &mut Ui) -> bool {
         let path = self.workspace.path.clone().or_else(|| {
             rfd::FileDialog::new()
                 .add_filter("Mega Image Project", &["mgimg"])
@@ -290,15 +303,21 @@ impl EditorApp {
                 .save_file()
                 .map(ensure_project_extension)
         });
-        let Some(path) = path else { return };
+        let Some(path) = path else {
+            return false;
+        };
         self.commit_transform();
         match self.workspace.save(&path) {
             Ok(()) => {
                 self.dirty = false;
                 self.status = format!("Saved {}", file_name(&path));
                 ui.notify_success("Project saved");
+                true
             }
-            Err(error) => self.show_error(ui, error),
+            Err(error) => {
+                self.show_error(ui, error);
+                false
+            }
         }
     }
 
@@ -323,10 +342,18 @@ impl EditorApp {
         self.video_poster = None;
         self.cancel_transform();
         self.workspace = workspace;
+        self.ai.presets = Default::default();
         self.refresh_image()?;
         self.dirty = false;
         self.status = format!("Opened {}", file_name(path));
         Ok(())
+    }
+
+    pub fn request_open_project(&mut self, ui: &mut Ui) {
+        if self.prompt_if_unsaved(UnsavedAction::OpenProject) {
+            return;
+        }
+        self.open_project(ui);
     }
 
     pub fn open_project(&mut self, ui: &mut Ui) {
@@ -339,6 +366,34 @@ impl EditorApp {
         match self.open_path(&path) {
             Ok(()) => ui.notify_success("Project opened"),
             Err(error) => self.show_error(ui, error),
+        }
+    }
+
+    fn prompt_if_unsaved(&mut self, action: UnsavedAction) -> bool {
+        if !self.dirty {
+            return false;
+        }
+        if self.unsaved.is_none() {
+            self.unsaved = Some(action);
+        }
+        true
+    }
+
+    pub fn cancel_unsaved_prompt(&mut self) {
+        if self.unsaved == Some(UnsavedAction::Close) {
+            self.close_aborted = true;
+        }
+        self.unsaved = None;
+    }
+
+    pub fn finish_unsaved_prompt(&mut self, action: UnsavedAction, ui: &mut Ui) {
+        self.unsaved = None;
+        match action {
+            UnsavedAction::Close => {
+                self.close_ready = true;
+            }
+            UnsavedAction::NewProject => self.new_project(ui),
+            UnsavedAction::OpenProject => self.open_project(ui),
         }
     }
 
@@ -429,6 +484,21 @@ impl EditorApp {
                 let _ = self.reload_active_view();
                 self.status = "Asset placed on document".into();
                 ui.notify_success("Asset placed as layer");
+            }
+            Err(error) => self.show_error(ui, error),
+        }
+    }
+
+    pub fn create_document_from_asset(&mut self, asset_index: usize, ui: &mut Ui) {
+        self.cancel_transform();
+        match self.workspace.create_document_from_asset(asset_index) {
+            Ok(_) => {
+                self.animation_clock = None;
+                self.close_asset_preview();
+                self.history.discard_project_edits();
+                let _ = self.reload_active_view();
+                self.dirty = true;
+                self.status = format!("Document: {}", self.workspace.active_doc().name);
             }
             Err(error) => self.show_error(ui, error),
         }

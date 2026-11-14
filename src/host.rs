@@ -129,6 +129,7 @@ pub struct FrameInput {
     pub key_cut: bool,
     pub key_select_all: bool,
     pub key_paste: bool,
+    pub key_save: bool,
     pub key_undo: bool,
     pub key_redo: bool,
     pub key_tool_brush: bool,
@@ -184,6 +185,7 @@ impl FrameInput {
             (Some(KeyCode::KeyC), _) | (_, "c") => self.key_copy = true,
             (Some(KeyCode::KeyX), _) | (_, "x") => self.key_cut = true,
             (Some(KeyCode::KeyV), _) | (_, "v") => self.key_paste = true,
+            (Some(KeyCode::KeyS), _) | (_, "s") => self.key_save = true,
             (Some(KeyCode::KeyZ), _) | (_, "z") if self.key_shift => self.key_redo = true,
             (Some(KeyCode::KeyZ), _) | (_, "z") => self.key_undo = true,
             (Some(KeyCode::KeyY), _) | (_, "y") => self.key_redo = true,
@@ -199,6 +201,7 @@ impl FrameInput {
             input.key_copy = false;
             input.key_cut = false;
             input.key_paste = false;
+            input.key_save = false;
             input.key_delete = false;
             input.key_undo = false;
             input.key_redo = false;
@@ -230,6 +233,7 @@ impl FrameInput {
             key_backspace: self.key_backspace,
             key_delete: self.key_delete,
             key_enter: self.key_enter,
+            key_escape: self.key_escape,
             key_left: self.key_left,
             key_right: self.key_right,
             key_up: self.key_up,
@@ -275,6 +279,7 @@ impl FrameInput {
         self.key_cut = false;
         self.key_select_all = false;
         self.key_paste = false;
+        self.key_save = false;
         self.key_undo = false;
         self.key_redo = false;
         self.key_tool_brush = false;
@@ -308,8 +313,15 @@ pub trait Scene {
         queue: &wgpu::Queue,
         renderer: &mut UiRenderer,
     );
-    /// Return false while outstanding work is being cancelled before exit.
-    fn request_close(&mut self) -> bool;
+    /// Poll a pending close: exit when ready, wait for cleanup/dialog, or abort.
+    fn request_close(&mut self) -> ClosePoll;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ClosePoll {
+    Exit,
+    Wait,
+    Abort,
 }
 
 fn canvas_target(
@@ -721,16 +733,18 @@ impl<S: Scene> ApplicationHandler for Host<S> {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => {
-                if self.scene.request_close() {
-                    event_loop.exit();
-                } else {
+            WindowEvent::CloseRequested => match self.scene.request_close() {
+                ClosePoll::Exit => event_loop.exit(),
+                ClosePoll::Wait => {
                     self.closing = true;
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
                 }
-            }
+                ClosePoll::Abort => {
+                    self.closing = false;
+                }
+            },
             WindowEvent::Resized(size) => {
                 self.resize(size.width, size.height);
                 if let Some(window) = &self.window {
@@ -739,8 +753,14 @@ impl<S: Scene> ApplicationHandler for Host<S> {
             }
             WindowEvent::RedrawRequested => {
                 self.redraw();
-                if self.closing && self.scene.request_close() {
-                    event_loop.exit();
+                if self.closing {
+                    match self.scene.request_close() {
+                        ClosePoll::Exit => event_loop.exit(),
+                        ClosePoll::Wait => {}
+                        ClosePoll::Abort => {
+                            self.closing = false;
+                        }
+                    }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -899,7 +919,13 @@ mod text_edit_tests {
         input.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
         input.key_ctrl = true;
         input.key_shift = true;
-        for code in [KeyCode::KeyA, KeyCode::KeyC, KeyCode::KeyX, KeyCode::KeyV] {
+        for code in [
+            KeyCode::KeyA,
+            KeyCode::KeyC,
+            KeyCode::KeyX,
+            KeyCode::KeyV,
+            KeyCode::KeyS,
+        ] {
             input.press_key(&Key::Character("я".into()), PhysicalKey::Code(code));
         }
         let ui_input = input.to_ui(Vec2::splat(400.0), 0.016);
@@ -908,8 +934,10 @@ mod text_edit_tests {
         assert!(
             ui_input.key_select_all && ui_input.key_copy && ui_input.key_cut && ui_input.key_paste
         );
+        assert!(input.key_save);
         input.key_undo = true;
         input.key_redo = true;
+        input.key_save = true;
         input.key_enter = true;
         input.key_delete = true;
         input.key_tool_brush = true;
@@ -921,6 +949,7 @@ mod text_edit_tests {
             !scene.key_copy
                 && !scene.key_cut
                 && !scene.key_paste
+                && !scene.key_save
                 && !scene.key_delete
                 && !scene.key_undo
                 && !scene.key_redo

@@ -1,6 +1,8 @@
 //! Editor chrome: menus, dock tabs, status bar.
 
 pub mod ai_dialog;
+mod prompt_presets;
+pub mod ai_settings;
 mod animation_dialog;
 mod asset_properties;
 mod assets_panel;
@@ -11,6 +13,7 @@ pub mod hsv_dialog;
 mod menu_bar;
 mod project_panel;
 pub mod rename_dialog;
+mod unsaved_dialog;
 mod tool_options;
 mod tools_panel;
 mod timeline;
@@ -86,12 +89,55 @@ fn camera_dock(node: &mut DockNode, enabled: bool) {
     update(node, enabled, &mut add);
 }
 
+// Hide Canvas only for this render; keep its original dock location in app.dock.
+fn hide_canvas_tabs(node: &mut DockNode) -> Vec<(Vec<bool>, usize)> {
+    fn visit(node: &mut DockNode, path: &mut Vec<bool>, hidden: &mut Vec<(Vec<bool>, usize)>) {
+        match node {
+            DockNode::Leaf { tabs, active } => {
+                if let Some(index) = tabs.iter().position(|tab| tab == "Canvas") {
+                    tabs.remove(index);
+                    if *active > index { *active -= 1; }
+                    *active = (*active).min(tabs.len().saturating_sub(1));
+                    hidden.push((path.clone(), index));
+                }
+            }
+            DockNode::Split { first, second, .. } => {
+                path.push(false); visit(first, path, hidden); path.pop();
+                path.push(true); visit(second, path, hidden); path.pop();
+            }
+        }
+    }
+    let mut hidden = Vec::new();
+    visit(node, &mut Vec::new(), &mut hidden);
+    hidden
+}
+
+fn restore_canvas_tabs(node: &mut DockNode, hidden: Vec<(Vec<bool>, usize)>) {
+    for (path, index) in hidden {
+        let mut target = &mut *node;
+        for second in path {
+            match target {
+                DockNode::Split { first, second: other, .. } => { target = if second { other } else { first }; }
+                DockNode::Leaf { .. } => break,
+            }
+        }
+        // If docking split this leaf while previewing, keep Canvas with its first child.
+        while let DockNode::Split { first, .. } = target { target = first; }
+        if let DockNode::Leaf { tabs, active } = target {
+            let index = index.min(tabs.len());
+            if !tabs.is_empty() && *active >= index { *active += 1; }
+            tabs.insert(index, "Canvas".into());
+        }
+    }
+}
+
 pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     let scale = ui.scale();
     let menu_h = 28.0 * scale;
     let status_h = 24.0 * scale;
 
-    let modal_open = app.ai.open || app.hsv.open || app.rename.is_some();
+    let modal_open =
+        app.ai.open || app.ai_settings.is_some() || app.hsv.open || app.rename.is_some() || app.unsaved.is_some();
     ui.add_enabled(!modal_open, |ui| {
         ui.menu_bar(|ui| {
             menu_bar::draw(ui, app);
@@ -102,6 +148,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
         let preview = app.session.preview_asset.is_some();
         context_panel(&mut dock.root, preview);
         camera_dock(&mut dock.root, !preview && app.project().animation.is_some());
+        let hidden_canvas = if preview { hide_canvas_tabs(&mut dock.root) } else { Vec::new() };
         ui.dock_space("main", dock_size, &mut dock, |ui, tab| {
             if tab == "Workspace" {
                 canvas::draw(ui, app);
@@ -135,20 +182,23 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                 _ => {}
             });
         });
+        restore_canvas_tabs(&mut dock.root, hidden_canvas);
         app.dock = dock;
         if preview != app.session.preview_asset.is_some() { ui.request_repaint(); }
 
         ui.status_bar(|ui| {
             ui.label(&app.status.clone());
             ui.spacer();
-            ui.label("Middle drag: pan · Wheel: zoom · Ctrl+Z/Y: undo/redo · Ctrl+X/C/V: cut/copy/paste · Delete: erase selection");
+            ui.label("Middle drag: pan · Wheel: zoom · Ctrl+S: save · Ctrl+Z/Y: undo/redo · Ctrl+X/C/V: cut/copy/paste · Delete: erase selection");
             let fps = if app.fps > 0.0 { format!("{:.0} FPS", app.fps) } else { "— FPS".into() };
             ui.label(&fps);
         });
     });
     ai_dialog::draw(ui, app);
+    ai_settings::draw(ui, app);
     hsv_dialog::draw(ui, app);
     rename_dialog::draw(ui, app);
+    unsaved_dialog::draw(ui, app);
 }
 
 fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
@@ -219,13 +269,15 @@ mod context_tests {
         assert_eq!(original.iter().filter(|tab| *tab == "Workspace").count(), 1);
         assert_eq!(original.iter().filter(|tab| *tab == "Canvas").count(), 1);
         context_panel(&mut dock.root, true);
+        let hidden = hide_canvas_tabs(&mut dock.root);
         let preview = tabs(&dock.root);
-        assert!(preview.iter().any(|tab| tab == "Canvas"));
+        assert!(!preview.iter().any(|tab| tab == "Canvas"));
         assert!(!preview.iter().any(|tab| tab == "Layers"));
         assert_eq!(preview.iter().filter(|tab| *tab == "Properties").count(), 1);
         if let DockNode::Split { ratio, .. } = &mut dock.root {
             *ratio = 0.27;
         }
+        restore_canvas_tabs(&mut dock.root, hidden);
         context_panel(&mut dock.root, false);
         assert_eq!(tabs(&dock.root), original);
         if let DockNode::Split { ratio, .. } = &dock.root {

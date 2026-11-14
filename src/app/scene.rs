@@ -1,11 +1,30 @@
 use super::*;
 
 impl Scene for EditorApp {
-    fn request_close(&mut self) -> bool {
+    fn request_close(&mut self) -> crate::host::ClosePoll {
+        use crate::host::ClosePoll;
+        if self.close_aborted {
+            self.close_aborted = false;
+            return ClosePoll::Abort;
+        }
+        if self.close_ready {
+            self.close_ready = false;
+            self.cancel_ai();
+            self.close_asset_preview();
+            self.video_poster = None;
+            return ClosePoll::Exit;
+        }
+        if self.unsaved == Some(UnsavedAction::Close) {
+            return ClosePoll::Wait;
+        }
+        if self.dirty {
+            self.unsaved = Some(UnsavedAction::Close);
+            return ClosePoll::Wait;
+        }
         self.cancel_ai();
         self.close_asset_preview();
         self.video_poster = None;
-        true
+        ClosePoll::Exit
     }
 
     fn title() -> &'static str {
@@ -13,10 +32,15 @@ impl Scene for EditorApp {
     }
 
     fn window_title(&self) -> String {
-        match self.workspace.path.as_deref().map(file_name) {
-            Some(name) => format!("{} | {name}", Self::title()),
-            None => Self::title().into(),
+        let mut title = Self::title().to_string();
+        if let Some(name) = self.workspace.path.as_deref().map(file_name) {
+            title.push_str(" | ");
+            title.push_str(name);
         }
+        if self.dirty {
+            title.push_str(" | Unsaved");
+        }
+        title
     }
 
     fn init(ui: &mut Ui) {
@@ -27,9 +51,15 @@ impl Scene for EditorApp {
     fn begin_frame(&mut self, input: &FrameInput) {
         self.session.canvas_cursor = None;
         self.ai.preview_input = input.clone();
-        self.input = if self.ai.open || self.hsv.open || self.rename.is_some() {
+        self.input = if self.ai.open
+            || self.ai_settings.is_some()
+            || self.hsv.open
+            || self.rename.is_some()
+            || self.unsaved.is_some()
+        {
             let mut blocked = FrameInput::default();
             blocked.key_escape = input.key_escape;
+            blocked.key_save = self.ai.open && self.unsaved.is_none() && input.key_save;
             blocked.dt = input.dt;
             if self.hsv.open || self.rename.is_some() {
                 blocked.key_enter = input.key_enter;
@@ -54,6 +84,9 @@ impl Scene for EditorApp {
         }
         if self.input.key_redo {
             self.redo();
+        }
+        if self.input.key_save {
+            self.save_project(ui);
         }
         if self.rename.is_none() && self.input.key_escape && self.session.floating.is_some() {
             self.cancel_transform();
@@ -86,9 +119,11 @@ impl Scene for EditorApp {
         // Static tools follow the pointer via mouse events. Only animated
         // overlays and unfinished uploads need another frame on their own.
         self.ai.open
+            || self.ai_settings.is_some()
             || self.animation_playing()
             || self.hsv.open
             || self.rename.is_some()
+            || self.unsaved.is_some()
             || self
                 .video_preview
                 .as_ref()

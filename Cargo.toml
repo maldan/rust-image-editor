@@ -34,6 +34,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
     "Win32_System_Console",
+    "Win32_Security_Cryptography",
 ] }
 
 [build-dependencies]

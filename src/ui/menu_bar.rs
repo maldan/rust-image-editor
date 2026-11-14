@@ -5,12 +5,12 @@ use crate::app::EditorApp;
 pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     ui.menu("file", "File", |ui| {
         if ui.menu_item("new", "New Project").clicked() {
-            app.new_project(ui);
+            app.request_new_project(ui);
         }
         if ui.menu_item("open", "Open Project…").clicked() {
-            app.open_project(ui);
+            app.request_open_project(ui);
         }
-        if ui.menu_item("save", "Save Project").clicked() {
+        if ui.menu_item("save", "Save Project (Ctrl+S)").clicked() {
             app.save_project(ui);
         }
         if ui
@@ -140,29 +140,37 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                 app.open_ai_minimax_redraw();
             }
         });
-        ui.add_enabled(app.image_size.is_some(), |ui| {
-            if ui.menu_item("redraw_image", "Redraw Image...").clicked() {
-                app.open_ai_redraw();
-            }
-            if ui.menu_item("inpaint_image", "Inpaint Image...").clicked() {
-                app.open_ai_inpaint();
-            }
-            if ui.menu_item("to_lineart", "To Lineart...").clicked() {
-                app.open_ai_lineart();
-            }
-            if ui.menu_item("draw_cn", "Draw with ControlNet...").clicked() {
-                app.open_ai_draw_cn();
-            }
-            if ui.menu_item("upscale_image", "Upscale Image...").clicked() {
-                app.open_ai_upscale();
-            }
-            ui.separator();
-            if ui.menu_item("fix_alpha", "Fix Alpha").clicked() {
-                app.fix_alpha();
+        ui.menu("sdxl", "SDXL", |ui| {
+            ui.add_enabled(app.image_size.is_some(), |ui| {
+                if ui.menu_item("redraw_image", "Redraw Image...").clicked() {
+                    app.open_ai_redraw();
+                }
+                if ui.menu_item("inpaint_image", "Inpaint Image...").clicked() {
+                    app.open_ai_inpaint();
+                }
+                if ui.menu_item("to_lineart", "To Lineart...").clicked() {
+                    app.open_ai_lineart();
+                }
+                if ui.menu_item("draw_cn", "Draw with ControlNet...").clicked() {
+                    app.open_ai_draw_cn();
+                }
+                if ui.menu_item("upscale_image", "Upscale Image...").clicked() {
+                    app.open_ai_upscale();
+                }
+            });
+            if ui.menu_item("draw_image", "Draw Image...").clicked() {
+                app.open_ai_draw();
             }
         });
-        if ui.menu_item("draw_image", "Draw Image...").clicked() {
-            app.open_ai_draw();
+        if ui
+            .menu_item_enabled("fix_alpha", "Fix Alpha", app.image_size.is_some())
+            .clicked()
+        {
+            app.fix_alpha();
+        }
+        ui.separator();
+        if ui.menu_item("ai_settings", "Settings...").clicked() {
+            app.open_ai_settings();
         }
     });
 }

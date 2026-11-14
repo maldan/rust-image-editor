@@ -11,6 +11,7 @@ mod host;
 mod hsv;
 mod layer_clipboard;
 mod project;
+mod prompt_preset;
 mod safe_save;
 mod tiles;
 mod ui;

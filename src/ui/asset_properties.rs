@@ -8,7 +8,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     let Some(id) = app.session.preview_asset.as_deref() else {
         return;
     };
-    if let Some(image) = app.workspace.assets.iter().find(|a| a.id == id) {
+    if let Some(index) = app.workspace.assets.iter().position(|a| a.id == id) {
+        let image = &app.workspace.assets[index];
         ui.label(&image.name);
         ui.label("Image");
         ui.space(8.0);
@@ -22,6 +23,11 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             format_bytes(image.width as u64 * image.height as u64 * 4)
         ));
         ui.label(&format!("Zoom: {:.0}%", app.session.zoom * 100.0));
+        ui.space(8.0);
+        ui.separator();
+        if ui.button("asset_create_document", "Create Image Document").clicked() {
+            app.create_document_from_asset(index, ui);
+        }
         return;
     }
     let Some(video) = app.workspace.videos.iter().find(|v| v.id == id) else {

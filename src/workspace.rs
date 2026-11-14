@@ -1,4 +1,5 @@
 use crate::raster::SparsePixels;
+use crate::prompt_preset::PromptPreset;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ use crate::project::{Layer, Project, encode_webp_rgba};
 const MANIFEST_PATH: &str = "/manifest.json";
 const MANIFEST_KIND: &str = "mega-image-editor/manifest+json";
 const IMAGE_KIND: &str = "image/webp";
-const FORMAT_VERSION: u32 = 8;
+const FORMAT_VERSION: u32 = 9;
 pub const THUMB_SIZE: u32 = 84;
 const THUMB_ATLAS_COLS: u32 = 16;
 /// On-screen library thumb size (logical px before UI scale).
@@ -307,6 +308,8 @@ enum DocumentKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkspaceManifest {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    prompt_presets: Vec<PromptPreset>,
     format: String,
     version: u32,
     #[serde(default)]
@@ -389,6 +392,7 @@ fn empty_thumb() -> Vec<u8> {
 
 #[derive(Debug, Clone)]
 pub struct Workspace {
+    pub prompt_presets: Vec<PromptPreset>,
     pub assets: Vec<ImageAsset>,
     pub videos: Vec<VideoAsset>,
     pub documents: Vec<Document>,
@@ -425,6 +429,7 @@ struct SavedResources {
 impl Default for Workspace {
     fn default() -> Self {
         let mut ws = Self {
+            prompt_presets: Vec::new(),
             assets: Vec::new(),
             videos: Vec::new(),
             documents: Vec::new(),
@@ -811,6 +816,20 @@ impl Workspace {
         }
     }
 
+    /// Create an independent image document without changing the source asset.
+    pub fn create_document_from_asset(&mut self, asset_index: usize) -> Result<usize, String> {
+        self.ensure_asset_loaded(asset_index)?;
+        let asset = self.assets.get(asset_index).ok_or("Asset not found")?;
+        let mut project = Project::default();
+        project.import_rgba(&asset.pixels, asset.width, asset.height)?;
+        let name = asset.name.clone();
+        project.layers[0].name = name.clone();
+        let index = self.create_document(&name);
+        self.documents[index].project = project;
+        self.rebuild_active_thumb_now();
+        Ok(index)
+    }
+
     /// Place asset pixels as a new layer on the active document (or create canvas).
     pub fn place_asset_on_active(&mut self, asset_index: usize) -> Result<(), String> {
         self.ensure_asset_loaded(asset_index)?;
@@ -1021,6 +1040,7 @@ impl Workspace {
             });
         }
         let manifest = WorkspaceManifest {
+            prompt_presets: self.prompt_presets.clone(),
             format: "mega-image-editor".into(),
             version: FORMAT_VERSION,
             active_document: self
@@ -1363,6 +1383,7 @@ impl Workspace {
             })
             .collect::<Result<Vec<_>, String>>()?;
         let mut workspace = Self {
+            prompt_presets: manifest.prompt_presets.clone(),
             assets,
             videos,
             active_document,
@@ -1425,7 +1446,7 @@ impl Workspace {
 }
 
 fn check_manifest(manifest: &WorkspaceManifest) -> Result<(), String> {
-    if manifest.format == "mega-image-editor" && matches!(manifest.version, 5 | 6 | 7 | 8) {
+    if manifest.format == "mega-image-editor" && matches!(manifest.version, 5 | 6 | 7 | 8 | 9) {
         for doc in &manifest.documents {
             if doc.layers.iter().any(|l| !l.z.is_finite() || !(-10.0..=10.0).contains(&l.z)) {
                 return Err("Invalid layer depth".into());
@@ -1487,6 +1508,90 @@ pub fn make_thumb(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::raster::Raster;
+
+    #[test]
+    fn document_from_deferred_asset_keeps_original_document_lazy_and_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("asset.mgimg");
+        saved_workspace(&path);
+        let mut workspace = Workspace::open(&path).unwrap();
+        assert!(workspace.assets[0].deferred.is_some());
+        let original_count = workspace.documents.len();
+        let original_active = workspace.active_document;
+        assert!(workspace.create_document_from_asset(usize::MAX).is_err());
+        assert_eq!(workspace.documents.len(), original_count);
+        assert_eq!(workspace.active_document, original_active);
+        let index = workspace.create_document_from_asset(0).unwrap();
+        assert!(workspace.documents[0].deferred.is_some());
+        assert_eq!(workspace.documents[index].project.layers.len(), 1);
+        assert_eq!((workspace.active().width, workspace.active().height), (4, 4));
+        assert_eq!(workspace.assets.len(), 1);
+        workspace.save(&path).unwrap();
+        let loaded = open_loaded(&path).unwrap();
+        assert_eq!(loaded.active_document, index);
+        assert_eq!(loaded.active().layers.len(), 1);
+        assert_eq!(loaded.active().layers[0].pixels.read(0, 0, 0), [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn prompt_presets_roundtrip_incremental_save_as_optimize_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("presets.mgimg");
+        let copy = dir.path().join("copy.mgimg");
+        let mut workspace = saved_workspace(&path);
+        assert!(workspace.prompt_presets.is_empty());
+        let archive = MegaFile::open(&path).unwrap();
+        let old_manifest: serde_json::Value = serde_json::from_slice(&archive.read_all(MANIFEST_PATH).unwrap()).unwrap();
+        assert!(old_manifest.get("prompt_presets").is_none());
+        for version in [5, 6, 7, 8] {
+            let mut legacy = old_manifest.clone();
+            legacy["version"] = version.into();
+            let decoded: WorkspaceManifest = serde_json::from_value(legacy).unwrap();
+            check_manifest(&decoded).unwrap();
+            assert!(decoded.prompt_presets.is_empty());
+        }
+        drop(archive);
+        assert!(Workspace::open(&path).unwrap().prompt_presets.is_empty());
+        let original = fs::read(&path).unwrap();
+        let preset = PromptPreset::new("My style".into(), "positive\nsecond line".into(), "negative".into());
+        workspace.prompt_presets.push(preset.clone());
+        workspace.save(&path).unwrap();
+        assert!(fs::read(&path).unwrap().starts_with(&original));
+        let archive = MegaFile::open(&path).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&archive.read_all(MANIFEST_PATH).unwrap()).unwrap();
+        assert_eq!(manifest["prompt_presets"][0]["id"], preset.id);
+        assert_eq!(manifest["prompt_presets"][0]["negative"], "negative");
+        assert_eq!(manifest["version"], 9);
+        drop(archive);
+        let unchanged = fs::read(&path).unwrap();
+        workspace.save(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), unchanged);
+        let mut loaded = Workspace::open(&path).unwrap();
+        assert_eq!(loaded.prompt_presets, vec![preset.clone()]);
+        loaded.save(&copy).unwrap();
+        loaded.optimize().unwrap();
+        let mut copied = Workspace::open(&copy).unwrap();
+        assert_eq!(copied.prompt_presets, vec![preset]);
+        copied.prompt_presets.clear();
+        copied.save(&copy).unwrap();
+        assert!(Workspace::open(&copy).unwrap().prompt_presets.is_empty());
+        assert_eq!(Workspace::open(&path).unwrap().prompt_presets.len(), 1);
+        copied.ensure_document_loaded(0).unwrap();
+        assert_eq!(copied.active().layers[0].pixels.read(0, 0, 0), [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn optimize_does_not_commit_unsaved_prompt_presets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("presets.mgimg");
+        let mut workspace = saved_workspace(&path);
+        workspace.prompt_presets.push(PromptPreset::new("Unsaved".into(), "text".into(), String::new()));
+        workspace.optimize().unwrap();
+        assert!(Workspace::open(&path).unwrap().prompt_presets.is_empty());
+        assert_eq!(workspace.prompt_presets.len(), 1);
+        workspace.save(&path).unwrap();
+        assert_eq!(Workspace::open(&path).unwrap().prompt_presets, workspace.prompt_presets);
+    }
 
     #[test]
     fn camera_and_depth_survive_deferred_save_as_and_old_files_default_to_neutral() {
