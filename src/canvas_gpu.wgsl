@@ -64,6 +64,9 @@ struct ViewUniforms {
     camera_fade: f32,
     camera_enabled: f32,
     _camera_pad: f32,
+    brightness: f32,
+    contrast: f32,
+    _bc_pad: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> vu: ViewUniforms;
@@ -109,6 +112,9 @@ fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
     }
     let tex = textureSampleLevel(img, samp_near, in.uv, 0.0);
     let a = tex.a * vu.opacity;
+    if (vu.brightness != 0.0 || vu.contrast != 0.0) {
+        return vec4<f32>(adjust_brightness_contrast(tex.rgb) * (1.0-vu.camera_fade), a);
+    }
     if (vu.hue == 0.0 && vu.saturation == 0.0 && vu.value == 0.0) { return vec4<f32>(tex.rgb * (1.0-vu.camera_fade),a); }
     return vec4<f32>(adjust_hsv(tex.rgb) * (1.0-vu.camera_fade),a);
 }
@@ -121,6 +127,14 @@ fn hsv_srgb(linear:vec3<f32>) -> vec3<f32> {
 fn hsv_linear(srgb:vec3<f32>) -> vec3<f32> {
     return select(pow((srgb+vec3<f32>(0.055))/1.055,vec3<f32>(2.4)),
         srgb/12.92,srgb<=vec3<f32>(0.04045));
+}
+
+fn adjust_brightness_contrast(linear:vec3<f32>) -> vec3<f32> {
+    let rgb = round(clamp(hsv_srgb(linear),vec3<f32>(0.0),vec3<f32>(1.0))*255.0)/255.0;
+    let gain = 1.0 + clamp(vu.contrast,-100.0,100.0)/100.0;
+    let contrasted = clamp((rgb-vec3<f32>(0.5))*gain*gain+vec3<f32>(0.5),vec3<f32>(0.0),vec3<f32>(1.0));
+    let adjusted = clamp(contrasted+vec3<f32>(clamp(vu.brightness,-100.0,100.0)/100.0),vec3<f32>(0.0),vec3<f32>(1.0));
+    return hsv_linear(round(adjusted*255.0)/255.0);
 }
 
 fn adjust_hsv(linear:vec3<f32>) -> vec3<f32> {

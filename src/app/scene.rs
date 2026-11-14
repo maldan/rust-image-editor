@@ -337,7 +337,11 @@ impl Scene for EditorApp {
             && self.hsv.preview
             && self.hsv.document_id == self.workspace.active_doc().id
         {
-            overlay.hsv = Some((self.hsv.layer, self.hsv.adjustment));
+            if let Some(adjustment) = self.hsv.brightness_contrast {
+                overlay.brightness_contrast = Some((self.hsv.layer, adjustment));
+            } else {
+                overlay.hsv = Some((self.hsv.layer, self.hsv.adjustment));
+            }
         }
         if matches!(self.session.tool, Tool::Brush | Tool::SelectionBrush)
             && !self.eyedropper_armed()

@@ -2,6 +2,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod brightness_contrast;
 mod camera;
 mod canvas_gpu;
 mod comfyui;

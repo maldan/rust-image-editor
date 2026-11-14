@@ -81,6 +81,7 @@ pub struct EditorApp {
     stroke_capture: Option<EditCapture>,
     history: History,
     pub layer_drag: Option<usize>,
+    pub library_drag: Option<ui::LibraryDrag>,
     canvas_cleared: bool,
     pub resize_w: u32,
     pub resize_h: u32,
@@ -127,6 +128,7 @@ impl EditorApp {
             stroke_capture: None,
             history: History::default(),
             layer_drag: None,
+            library_drag: None,
             canvas_cleared: true,
             resize_w: 512,
             resize_h: 512,
@@ -149,6 +151,14 @@ impl EditorApp {
     }
 
     pub fn open_hsv(&mut self) {
+        self.open_color_adjustment(None);
+    }
+
+    pub fn open_brightness_contrast(&mut self) {
+        self.open_color_adjustment(Some(Default::default()));
+    }
+
+    fn open_color_adjustment(&mut self, brightness_contrast: Option<crate::brightness_contrast::BrightnessContrast>) {
         if self.camera_visible() { return; }
         if self.ai.open || self.hsv.open || self.project().layers.is_empty() {
             return;
@@ -156,6 +166,7 @@ impl EditorApp {
         self.close_asset_preview();
         self.commit_transform();
         self.hsv = ui::hsv_dialog::HsvDialog {
+            brightness_contrast,
             open: true,
             layer: self.project().active_layer,
             document_id: self.workspace.active_doc().id.clone(),
@@ -163,7 +174,7 @@ impl EditorApp {
         };
     }
 
-    pub fn apply_hsv(&mut self) {
+    pub fn apply_color_adjustment(&mut self) {
         if !self.hsv.open {
             return;
         }
@@ -177,7 +188,12 @@ impl EditorApp {
             return;
         };
         let before = layer.pixels.clone();
-        if !adjustment.apply(&mut layer.pixels) {
+        let changed = if let Some(adjustment) = self.hsv.brightness_contrast {
+            adjustment.apply(&mut layer.pixels)
+        } else {
+            adjustment.apply(&mut layer.pixels)
+        };
+        if !changed {
             return;
         }
         let edit = crate::history::HistoryEdit::from_diff(index, &before, &layer.pixels);
@@ -187,7 +203,7 @@ impl EditorApp {
         self.layers_reload = true;
         self.dirty = true;
         self.workspace.mark_active_thumb_dirty();
-        self.status = "HSV adjustment applied".into();
+        self.status = if self.hsv.brightness_contrast.is_some() { "Brightness / Contrast applied" } else { "HSV adjustment applied" }.into();
     }
     pub fn project(&self) -> &Project {
         self.workspace.active()
@@ -436,6 +452,56 @@ mod hsv_tests {
     }
 
     #[test]
+    fn brightness_contrast_preview_and_apply_are_one_undoable_layer_edit() {
+        let mut app = document();
+        let before: Vec<_> = app.project().layers.iter().map(|layer| layer.pixels.clone()).collect();
+        app.open_brightness_contrast();
+        let adjustment = crate::brightness_contrast::BrightnessContrast { brightness: -25.0, contrast: -30.0 };
+        app.hsv.brightness_contrast = Some(adjustment);
+        assert!(app.canvas_present().unwrap().2.brightness_contrast.is_some());
+        assert!(app.canvas_present().unwrap().2.hsv.is_none());
+        assert_eq!(app.project().layers[1].pixels, before[1]);
+        assert!(!app.dirty);
+        app.hsv.preview = false;
+        assert!(app.canvas_present().unwrap().2.brightness_contrast.is_none());
+        app.apply_color_adjustment();
+        assert_eq!(app.project().layers[0].pixels, before[0]);
+        assert_eq!(app.project().layers[1].pixels.read(0, -20, 30), adjustment.pixel([255, 0, 0, 128]));
+        assert_eq!(app.project().layers[1].opacity, 0.7);
+        assert!(app.dirty && !app.hsv.open);
+        app.undo();
+        assert_eq!(app.project().layers[1].pixels, before[1]);
+        app.redo();
+        assert_eq!(app.project().layers[1].pixels.read(0, -20, 30), adjustment.pixel([255, 0, 0, 128]));
+        app.open_brightness_contrast();
+        assert!(app.hsv.brightness_contrast.unwrap().is_identity());
+        app.apply_color_adjustment();
+        app.undo();
+        assert_eq!(app.project().layers[1].pixels, before[1]);
+    }
+
+    #[test]
+    fn brightness_contrast_cancel_keeps_pixels_and_blocks_editor_shortcuts() {
+        let mut app = document();
+        let original = app.project().layers[1].pixels.clone();
+        app.open_brightness_contrast();
+        app.hsv.brightness_contrast.as_mut().unwrap().brightness = 50.0;
+        let mut input = FrameInput::default();
+        input.key_escape = true;
+        input.key_delete = true;
+        input.key_paste = true;
+        app.begin_frame(&input);
+        assert!(!app.input.key_delete && !app.input.key_paste);
+        let mut ui = Ui::new();
+        ui.begin_frame(mega_ui::UiInput { viewport: Vec2::new(900.0, 700.0), ..Default::default() });
+        ui::hsv_dialog::draw(&mut ui, &mut app);
+        ui.end_frame();
+        assert!(!app.hsv.open && !app.dirty);
+        assert_eq!(app.project().layers[1].pixels, original);
+        assert!(app.history.undo(app.workspace.active_mut()).is_none());
+    }
+
+    #[test]
     fn hsv_preview_does_not_edit_pixels_and_apply_is_one_undoable_active_layer_edit() {
         let mut app = document();
         let before: Vec<_> = app
@@ -454,7 +520,7 @@ mod hsv_tests {
         assert!(!app.dirty);
         app.hsv.preview = false;
         assert!(app.canvas_present().unwrap().2.hsv.is_none());
-        app.apply_hsv();
+        app.apply_color_adjustment();
         assert!(!app.hsv.open);
         assert_eq!(app.project().layers[0].pixels, before[0]);
         assert_eq!(
@@ -472,7 +538,7 @@ mod hsv_tests {
         );
         app.open_hsv();
         assert!(app.hsv.adjustment.is_identity());
-        app.apply_hsv();
+        app.apply_color_adjustment();
         app.undo();
         assert_eq!(
             app.project().layers[1].pixels,

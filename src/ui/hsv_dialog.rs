@@ -3,6 +3,8 @@ use glam::Vec2;
 use mega_ui::{Ui, Window};
 
 pub struct HsvDialog {
+    /// Selects Brightness / Contrast when present; otherwise this is HSV.
+    pub brightness_contrast: Option<crate::brightness_contrast::BrightnessContrast>,
     pub open: bool,
     pub adjustment: HsvAdjustment,
     pub preview: bool,
@@ -13,6 +15,7 @@ pub struct HsvDialog {
 impl Default for HsvDialog {
     fn default() -> Self {
         Self {
+            brightness_contrast: None,
             open: false,
             adjustment: Default::default(),
             preview: true,
@@ -54,41 +57,77 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     let dim = ui.theme().window.modal_dim;
     ui.theme_mut().window.modal_dim = [0.0; 4];
     ui.modal(
-        Window::new("hsv_adjustment", "HSV Adjustment")
-            .size(Vec2::new(540.0, 390.0))
-            .open(&mut open),
+        Window::new(
+            "hsv_adjustment",
+            if app.hsv.brightness_contrast.is_some() {
+                "Brightness / Contrast"
+            } else {
+                "HSV Adjustment"
+            },
+        )
+        .size(Vec2::new(
+            540.0,
+            if app.hsv.brightness_contrast.is_some() {
+                310.0
+            } else {
+                390.0
+            },
+        ))
+        .open(&mut open),
         |ui| {
             ui.label(&format!("Entire active layer: {layer}"));
             ui.space(8.0);
-            row(
-                ui,
-                "hsv_hue",
-                "Hue (degrees)",
-                &mut app.hsv.adjustment.hue,
-                -180.0,
-                180.0,
-            );
-            row(
-                ui,
-                "hsv_saturation",
-                "Saturation (%)",
-                &mut app.hsv.adjustment.saturation,
-                -100.0,
-                100.0,
-            );
-            row(
-                ui,
-                "hsv_value",
-                "Value (%)",
-                &mut app.hsv.adjustment.value,
-                -100.0,
-                100.0,
-            );
+            if let Some(adjustment) = &mut app.hsv.brightness_contrast {
+                row(
+                    ui,
+                    "bc_brightness",
+                    "Brightness (%)",
+                    &mut adjustment.brightness,
+                    -100.0,
+                    100.0,
+                );
+                row(
+                    ui,
+                    "bc_contrast",
+                    "Contrast (%)",
+                    &mut adjustment.contrast,
+                    -100.0,
+                    100.0,
+                );
+            } else {
+                row(
+                    ui,
+                    "hsv_hue",
+                    "Hue (degrees)",
+                    &mut app.hsv.adjustment.hue,
+                    -180.0,
+                    180.0,
+                );
+                row(
+                    ui,
+                    "hsv_saturation",
+                    "Saturation (%)",
+                    &mut app.hsv.adjustment.saturation,
+                    -100.0,
+                    100.0,
+                );
+                row(
+                    ui,
+                    "hsv_value",
+                    "Value (%)",
+                    &mut app.hsv.adjustment.value,
+                    -100.0,
+                    100.0,
+                );
+            }
             ui.space(8.0);
             ui.horizontal(|ui| {
                 ui.checkbox("hsv_preview", "Preview", &mut app.hsv.preview);
                 if ui.button("hsv_reset", "Reset").clicked() {
                     app.hsv.adjustment = Default::default();
+                    if let Some(adjustment) = &mut app.hsv.brightness_contrast {
+                        *adjustment = Default::default();
+                    }
                 }
                 ui.spacer();
                 apply = ui.button("hsv_apply", "Apply").clicked();
@@ -100,6 +139,6 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     if !open || cancel || app.input.key_escape {
         app.hsv.open = false;
     } else if apply || app.input.key_enter {
-        app.apply_hsv();
+        app.apply_color_adjustment();
     }
 }

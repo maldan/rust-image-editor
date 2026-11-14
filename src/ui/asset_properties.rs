@@ -72,6 +72,14 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             player.set_paused(!player.paused);
         }
         ui.space(12.0);
+        ui.label(&format!("Volume: {:.0}%", player.volume * 100.0));
+        ui.add_enabled(player.has_audio && player.audio_error.is_none(), |ui| {
+            let mut volume = player.volume;
+            if ui.slider("video_volume", &mut volume, 0.0..=1.0).changed() {
+                player.set_volume(volume);
+            }
+        });
+        ui.space(12.0);
         ui.label("Playback FPS");
         ui.horizontal(|ui| {
             let mut fps = player.fps_override.unwrap_or(info.fps) as f32;

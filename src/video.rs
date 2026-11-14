@@ -12,6 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod audio;
+
 #[derive(Clone, Default)]
 struct Transport {
     revision: u64,
@@ -22,6 +24,7 @@ struct Transport {
 
 #[derive(Default)]
 struct DecoderControl {
+    audio: Option<Arc<audio::AudioControl>>,
     stopped: AtomicBool,
     finished: AtomicBool,
     transport: Mutex<Transport>,
@@ -31,6 +34,7 @@ impl DecoderControl {
     fn stop(&self) {
         let _transport = self.transport.lock().unwrap();
         self.stopped.store(true, Ordering::Relaxed);
+        if let Some(audio) = &self.audio { audio.stop(); }
         self.wake.notify_all();
     }
     fn unchanged(&self, revision: u64) -> bool {
@@ -443,6 +447,9 @@ pub struct Playback {
     pub position: f64,
     pub paused: bool,
     pub fps_override: Option<f64>,
+    pub has_audio: bool,
+    pub volume: f32,
+    pub audio_error: Option<String>,
     pending_update: bool,
 }
 
@@ -467,6 +474,9 @@ fn play(
         if request.paused && request.seek.is_none() && output.lock().unwrap().has_frame {
             worker.wait_for_change(revision);
             continue;
+        }
+        if !request.paused {
+            if let Some(audio) = &worker.audio { audio.prepare(revision, target); }
         }
         if let Some((image, position)) = cache.get(target, decoder.info.duration) {
             if !publish(worker, output, revision, image, position) {
@@ -525,7 +535,16 @@ fn play(
             if found && position + 0.000_001 < next_presentation {
                 continue;
             }
+            let new_clock = clock.is_none();
+            if new_clock && !request.paused {
+                if let Some(audio) = &worker.audio {
+                    if !audio.wait_ready(revision) { break; }
+                }
+            }
             let (start, origin) = *clock.get_or_insert((Instant::now(), position));
+            if new_clock && !request.paused {
+                if let Some(audio) = &worker.audio { audio.start_clock(revision, start, origin); }
+            }
             if !worker.wait_until(
                 start + Duration::from_secs_f64((position - origin).max(0.0)),
                 revision,
@@ -582,7 +601,7 @@ fn publish(
 
 impl Playback {
     pub fn start(asset: VideoAsset) -> Self {
-        let control = Arc::new(DecoderControl::default());
+        let control = Arc::new(DecoderControl { audio: Some(audio::start(asset.clone())), ..Default::default() });
         let state = Arc::new(Mutex::new(PlaybackState::default()));
         let worker = control.clone();
         let output = state.clone();
@@ -590,6 +609,7 @@ impl Playback {
             let result = play(&asset, &worker, &output);
             if !worker.stopped.load(Ordering::Relaxed) {
                 if let Err(error) = result {
+                    if let Some(audio) = &worker.audio { audio.stop(); }
                     output.lock().unwrap().error = Some(error);
                 }
             }
@@ -605,12 +625,16 @@ impl Playback {
             position: 0.0,
             paused: false,
             fps_override: None,
+            has_audio: false,
+            volume: 1.0,
+            audio_error: None,
             pending_update: true,
         }
     }
     fn command(&mut self, seek: Option<f64>) {
         let mut transport = self.control.transport.lock().unwrap();
         transport.revision = transport.revision.wrapping_add(1);
+        if let Some(audio) = &self.control.audio { audio.pause(transport.revision); }
         transport.paused = self.paused;
         transport.fps = self.fps_override;
         if seek.is_some() || !self.pending_update {
@@ -629,6 +653,11 @@ impl Playback {
             self.paused = paused;
             self.command(None);
         }
+    }
+    pub fn set_volume(&mut self, volume: f32) {
+        if !volume.is_finite() { return; }
+        self.volume = volume.clamp(0.0, 1.0);
+        if let Some(audio) = &self.control.audio { audio.set_volume(self.volume); }
     }
     pub fn set_fps(&mut self, fps: Option<f64>) {
         let fps = fps
@@ -670,6 +699,15 @@ impl Playback {
         if error.is_some() {
             self.failed = true;
             self.pending_update = false;
+        }
+        drop(state);
+        if let Some(audio) = &self.control.audio {
+            let (has_audio, audio_error) = audio.poll();
+            self.has_audio = has_audio;
+            if let Some(audio_error) = audio_error {
+                self.audio_error = Some(audio_error.clone());
+                if error.is_none() { return Some(audio_error); }
+            }
         }
         error
     }

@@ -92,6 +92,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         {
             app.open_hsv();
         }
+        if ui.menu_item_enabled("brightness_contrast", "Brightness / Contrast...", !app.project().layers.is_empty()).clicked() {
+            app.open_brightness_contrast();
+        }
     });
 
     ui.menu("ai", "AI", |ui| {

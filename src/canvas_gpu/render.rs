@@ -122,6 +122,9 @@ impl CanvasRenderer {
             camera_fade: overlay.camera.as_ref().map_or(0.0, |(k, _)| k.fade),
             camera_enabled: if overlay.camera.is_some() { 1.0 } else { 0.0 },
             _camera_pad: 0.0,
+            brightness: 0.0,
+            contrast: 0.0,
+            _bc_pad: [0.0; 2],
         };
         queue.write_buffer(&self.view_uniform_buf, 0, bytemuck::bytes_of(&view_u));
 
@@ -275,6 +278,9 @@ impl CanvasRenderer {
                     u.saturation = adjustment.saturation;
                     u.value = adjustment.value;
                 }
+            }
+            if let Some((index, adjustment)) = overlay.brightness_contrast {
+                if index == i { u.brightness = adjustment.brightness; u.contrast = adjustment.contrast; }
             }
             queue.write_buffer(&gpu.uniform, 0, bytemuck::bytes_of(&u));
             pass.set_bind_group(0, &gpu.bind_group, &[]);

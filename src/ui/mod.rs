@@ -24,6 +24,7 @@ use mega_ui::{DockNode, DockState, Ui};
 
 use crate::app::EditorApp;
 use assets_panel::LibraryAction;
+pub(crate) use assets_panel::LibraryDrag;
 
 pub fn default_dock() -> DockState {
     DockState::new(DockNode::split_h(
@@ -170,7 +171,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                     }
                 }
                 "Library" => {
-                    let action = assets_panel::draw(ui, &mut app.workspace, &app.input, app.session.canvas_rect);
+                    let action = assets_panel::draw(ui, &mut app.workspace, &app.input, app.session.canvas_rect, &mut app.library_drag);
                     apply_library(ui, app, action);
                 }
                 "Camera" => camera_panel::draw(ui, app),
@@ -202,6 +203,13 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
 }
 
 fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
+    if let Some((kind, id, slot)) = action.reorder {
+        if app.workspace.reorder_library(kind, &id, slot) {
+            app.dirty = true;
+            ui.request_repaint();
+        }
+        return;
+    }
     if let Some(target) = action.rename {
         app.open_rename(target);
         return;

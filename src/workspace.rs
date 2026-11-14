@@ -20,6 +20,18 @@ const THUMB_ATLAS_COLS: u32 = 16;
 /// On-screen library thumb size (logical px before UI scale).
 pub const THUMB_VIEW: f32 = 73.0;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryKind { Image, Video, Document }
+
+fn move_item<T>(items: &mut Vec<T>, from: usize, slot: usize) -> bool {
+    if from >= items.len() || slot > items.len() { return false; }
+    let to = slot.saturating_sub(usize::from(slot > from));
+    if from == to { return false; }
+    let item = items.remove(from);
+    items.insert(to, item);
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VideoMeta {
     id: String,
@@ -454,6 +466,31 @@ impl Default for Workspace {
 }
 
 impl Workspace {
+    /// `slot` is an insertion boundary in the original list (0..=len).
+    pub fn reorder_library(&mut self, kind: LibraryKind, id: &str, slot: usize) -> bool {
+        let changed = match kind {
+            LibraryKind::Image => {
+                let Some(from) = self.assets.iter().position(|item| item.id == id) else { return false; };
+                let changed = move_item(&mut self.assets, from, slot);
+                if changed { self.clear_asset_drag(); }
+                changed
+            }
+            LibraryKind::Video => {
+                let Some(from) = self.videos.iter().position(|item| item.id == id) else { return false; };
+                move_item(&mut self.videos, from, slot)
+            }
+            LibraryKind::Document => {
+                let Some(from) = self.documents.iter().position(|item| item.id == id) else { return false; };
+                let active_id = self.active_doc().id.clone();
+                let changed = move_item(&mut self.documents, from, slot);
+                if changed { self.active_document = self.documents.iter().position(|doc| doc.id == active_id).unwrap(); }
+                changed
+            }
+        };
+        if changed { self.invalidate_thumb_atlas(); }
+        changed
+    }
+
     pub fn add_video(&mut self, bytes: Vec<u8>) -> Result<usize, String> {
         if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
             return Err("ComfyUI returned invalid MP4 data".into());
@@ -1508,6 +1545,42 @@ pub fn make_thumb(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::raster::Raster;
+
+    #[test]
+    fn library_reorder_preserves_active_document_and_survives_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("order.mgimg");
+        let mut workspace = saved_workspace(&path);
+        workspace.import_asset_rgba("Second image".into(), &[90, 80, 70, 255], 1, 1).unwrap();
+        let image = workspace.assets[1].id.clone();
+        let bytes = include_bytes!("../tests/fixtures/video-preview.mp4").to_vec();
+        workspace.add_video(bytes.clone()).unwrap();
+        workspace.add_video(bytes).unwrap();
+        let video = workspace.videos[1].id.clone();
+        workspace.create_document("Second document");
+        let active = workspace.active_doc().id.clone();
+        let selection = workspace.tree_selected.clone();
+        workspace.create_document("Third document");
+        let document = workspace.active_doc().id.clone();
+        workspace.set_active_document(1);
+        workspace.tree_selected = selection.clone();
+        assert!(workspace.reorder_library(LibraryKind::Image, &image, 0));
+        assert!(workspace.reorder_library(LibraryKind::Video, &video, 0));
+        assert!(workspace.reorder_library(LibraryKind::Document, &document, 0));
+        assert_eq!(workspace.active_doc().id, active);
+        assert_eq!(workspace.tree_selected, selection);
+        assert!(!workspace.reorder_library(LibraryKind::Document, &document, 1));
+        assert!(!workspace.reorder_library(LibraryKind::Document, "missing", 0));
+        workspace.save(&path).unwrap();
+        let loaded = Workspace::open(&path).unwrap();
+        assert_eq!(loaded.documents[0].id, document);
+        assert_eq!(loaded.assets[0].id, image);
+        assert_eq!(loaded.videos[0].id, video);
+        assert_eq!(loaded.active_doc().id, active);
+        assert_eq!(loaded.documents.len(), 3);
+        assert_eq!(loaded.assets.len(), 2);
+        assert_eq!(loaded.videos.len(), 2);
+    }
 
     #[test]
     fn document_from_deferred_asset_keeps_original_document_lazy_and_saves() {

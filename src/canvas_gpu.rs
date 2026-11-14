@@ -39,6 +39,9 @@ struct ViewUniforms {
     camera_fade: f32,
     camera_enabled: f32,
     _camera_pad: f32,
+    brightness: f32,
+    contrast: f32,
+    _bc_pad: [f32; 2],
 }
 
 #[repr(C)]
@@ -109,6 +112,7 @@ pub struct CanvasOverlay {
     pub camera: Option<(crate::camera::CameraKey, Vec<f32>)>,
     pub deformation: Option<usize>,
     pub hsv: Option<(usize, crate::hsv::HsvAdjustment)>,
+    pub brightness_contrast: Option<(usize, crate::brightness_contrast::BrightnessContrast)>,
     pub brush_center: Option<Vec2>,
     pub brush_radius: f32,
     pub selection_rect: Option<[Vec2; 4]>,
@@ -375,7 +379,7 @@ mod gpu_tests {
 
     #[test]
     #[ignore = "requires a GPU adapter; verifies live HSV preview against committed pixels"]
-    fn hsv_preview_matches_cpu_filter_and_only_targets_the_requested_layer() {
+    fn color_previews_match_cpu_filters_and_only_target_requested_layer() {
         use crate::hsv::HsvAdjustment;
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -417,7 +421,7 @@ mod gpu_tests {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        for (index, adjustment) in [
+        for (index, adjustment, brightness_contrast) in [
             (0, HsvAdjustment::default()),
             (
                 0,
@@ -451,7 +455,15 @@ mod gpu_tests {
                     value: 50.0,
                 },
             ),
-        ] {
+        ].into_iter().map(|(index, adjustment)| (index, adjustment, None)).chain([
+            (0, crate::brightness_contrast::BrightnessContrast::default()),
+            (0, crate::brightness_contrast::BrightnessContrast { brightness: 25.0, contrast: 0.0 }),
+            (0, crate::brightness_contrast::BrightnessContrast { brightness: -20.0, contrast: 35.0 }),
+            (0, crate::brightness_contrast::BrightnessContrast { brightness: 0.0, contrast: -100.0 }),
+            (0, crate::brightness_contrast::BrightnessContrast { brightness: 100.0, contrast: 100.0 }),
+            (0, crate::brightness_contrast::BrightnessContrast { brightness: -100.0, contrast: 100.0 }),
+            (1, crate::brightness_contrast::BrightnessContrast { brightness: 75.0, contrast: 80.0 }),
+        ].into_iter().map(|(index, adjustment)| (index, HsvAdjustment::default(), Some(adjustment)))) {
             let view = target.create_view(&Default::default());
             let mut encoder = device.create_command_encoder(&Default::default());
             {
@@ -485,6 +497,7 @@ mod gpu_tests {
                     },
                     CanvasOverlay {
                         hsv: Some((index, adjustment)),
+                        brightness_contrast: brightness_contrast.map(|adjustment| (index, adjustment)),
                         layers: vec![LayerDraw {
                             visible: true,
                             opacity: 1.0,
@@ -526,14 +539,14 @@ mod gpu_tests {
             for (pixel, got) in pixels.chunks_exact(4).zip(data.chunks_exact(4)) {
                 let original = pixel.try_into().unwrap();
                 let expected = if index == 0 {
-                    adjustment.pixel(original)
+                    brightness_contrast.map_or_else(|| adjustment.pixel(original), |adjustment| adjustment.pixel(original))
                 } else {
                     original
                 };
                 for c in 0..4 {
                     assert!(
                         (expected[c] as i32 - got[c] as i32).abs() <= 1,
-                        "{adjustment:?} layer={index}, original={pixel:?}, expected={expected:?}, got={got:?}"
+                        "{adjustment:?} bc={brightness_contrast:?} layer={index}, original={pixel:?}, expected={expected:?}, got={got:?}"
                     );
                 }
             }

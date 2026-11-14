@@ -24,7 +24,7 @@ impl EditorApp {
             if let Some(error) = player.poll() {
                 self.status = error;
             } else if !had_frame && player.frame.is_some() {
-                self.status = "Video preview · original timing · loop · no audio".into();
+                self.status = "Video preview · original timing · loop".into();
             }
             if !had_frame && player.frame.is_some() {
                 self.session.fit_image = true;
