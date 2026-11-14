@@ -316,6 +316,19 @@ impl EditorApp {
         }
     }
 
+    pub fn open_path(&mut self, path: &Path) -> Result<(), String> {
+        let mut workspace = Workspace::open(path)?;
+        workspace.ensure_document_loaded(workspace.active_document)?;
+        self.close_asset_preview();
+        self.video_poster = None;
+        self.cancel_transform();
+        self.workspace = workspace;
+        self.refresh_image()?;
+        self.dirty = false;
+        self.status = format!("Opened {}", file_name(path));
+        Ok(())
+    }
+
     pub fn open_project(&mut self, ui: &mut Ui) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Mega Image Project", &["mgimg"])
@@ -323,25 +336,8 @@ impl EditorApp {
         else {
             return;
         };
-        match Workspace::open(&path) {
-            Ok(mut workspace) => {
-                if let Err(error) = workspace.ensure_document_loaded(workspace.active_document) {
-                    self.show_error(ui, error);
-                    return;
-                }
-                self.close_asset_preview();
-                self.video_poster = None;
-                self.cancel_transform();
-                self.workspace = workspace;
-                match self.refresh_image() {
-                    Ok(()) => {
-                        self.dirty = false;
-                        self.status = format!("Opened {}", file_name(&path));
-                        ui.notify_success("Project opened");
-                    }
-                    Err(error) => self.show_error(ui, error),
-                }
-            }
+        match self.open_path(&path) {
+            Ok(()) => ui.notify_success("Project opened"),
             Err(error) => self.show_error(ui, error),
         }
     }

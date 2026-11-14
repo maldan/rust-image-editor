@@ -14,7 +14,7 @@ env_logger = "0.11"
 log = "0.4"
 rfd = "0.15"
 arboard = "3"
-image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg", "ico"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "json", "rustls-tls"] }
 tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 dotenvy = "0.15"
@@ -26,3 +26,15 @@ bytemuck = { version = "1", features = ["derive"] }
 tempfile = "3"
 zstd = "0.13"
 ffmpeg-next = { version = "9.0", default-features = false, features = ["format", "software-scaling"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_System_Console",
+] }
+
+[build-dependencies]
+winresource = "0.1"

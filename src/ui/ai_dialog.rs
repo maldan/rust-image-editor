@@ -10,6 +10,7 @@ use crate::{
 pub enum AiMode {
     #[default]
     Edit,
+    MinimaxRedraw,
     Draw,
     QwenDraw,
     AnimeDraw,
@@ -44,6 +45,7 @@ impl AiMode {
             Self::Video => "Ltx 2.3 I2V",
             Self::Animation => "Ltx 2.3",
             Self::Edit => "Qwen 2.1 Redraw",
+            Self::MinimaxRedraw => "Minimax H3 Redraw",
             Self::QwenDraw => "Qwen 2.1 Draw",
             Self::Draw => "Draw Image",
             Self::AnimeDraw => "Anime Draw",
@@ -60,6 +62,7 @@ impl AiMode {
             Self::Video => "AI Video",
             Self::Animation => "Ltx 2.3",
             Self::Edit => "AI Qwen 2.1 Redraw",
+            Self::MinimaxRedraw => "AI Minimax H3 Redraw",
             Self::QwenDraw => "AI Qwen 2.1 Draw",
             Self::Draw => "AI Draw",
             Self::AnimeDraw => "AI Anime Draw",
@@ -157,6 +160,7 @@ pub struct AiDialog {
     pub anim_shown: usize,
     pub denoise: f32,
     pub mask_softness: f32,
+    pub megapixels: f32,
     pub lineart_resolution: i32,
     pub draw_settings: crate::comfyui::DrawSettings,
     pub control_net: crate::comfyui::ControlNetSettings,
@@ -211,6 +215,7 @@ impl Default for AiDialog {
             anim_shown: 0,
             denoise: 1.0,
             mask_softness: 0.0,
+            megapixels: 4.0,
             lineart_resolution: 512,
             draw_settings: Default::default(),
             control_net: Default::default(),
@@ -350,6 +355,18 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                                     &mut app.ai.prompt,
                                     Vec2::new(0.0, 110.0),
                                 );
+                                if app.ai.mode == AiMode::MinimaxRedraw {
+                                    ui.label(&format!(
+                                        "Megapixels: {:.0}",
+                                        app.ai.megapixels
+                                    ));
+                                    ui.slider_stepped(
+                                        "minimax_megapixels",
+                                        &mut app.ai.megapixels,
+                                        1.0..=16.0,
+                                        1.0,
+                                    );
+                                }
                             }
                         }
                         ui.checkbox("ai_fit_image", "Fit Image", &mut app.ai.fit_image);
@@ -397,6 +414,12 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                                 AiMode::Video | AiMode::Animation => false,
                                 AiMode::Edit => {
                                     !app.ai.prompt.trim().is_empty()
+                                        && input_valid(app, width, height)
+                                }
+                                AiMode::MinimaxRedraw => {
+                                    !app.ai.prompt.trim().is_empty()
+                                        && crate::comfyui::validate_megapixels(app.ai.megapixels)
+                                            .is_ok()
                                         && input_valid(app, width, height)
                                 }
                             };

@@ -14,6 +14,7 @@ pub use workflow::ControlNetSettings;
 pub use workflow::DrawSettings;
 pub use workflow::UpscaleSettings;
 pub use workflow::validate_lineart_resolution;
+pub use workflow::validate_megapixels;
 
 /// Shared by input size feedback and worker-side resizing.
 pub fn scaled_size(width: u32, height: u32, scale: f32) -> Result<(u32, u32), String> {

@@ -132,6 +132,14 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                 app.open_ai();
             }
         });
+        ui.menu("minimax", "Minimax", |ui| {
+            if ui
+                .menu_item_enabled("minimax_redraw", "Redraw...", app.image_size.is_some())
+                .clicked()
+            {
+                app.open_ai_minimax_redraw();
+            }
+        });
         ui.add_enabled(app.image_size.is_some(), |ui| {
             if ui.menu_item("redraw_image", "Redraw Image...").clicked() {
                 app.open_ai_redraw();

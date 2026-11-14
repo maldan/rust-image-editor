@@ -9,7 +9,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Icon, Window, WindowId};
 
 use crate::canvas_gpu::{CanvasOverlay, CanvasRenderer};
 use crate::editing::TransformCursor;
@@ -131,6 +131,10 @@ pub struct FrameInput {
     pub key_paste: bool,
     pub key_undo: bool,
     pub key_redo: bool,
+    pub key_tool_brush: bool,
+    pub key_tool_fill: bool,
+    pub key_tool_transform: bool,
+    pub key_toggle_erase: bool,
     pub key_ctrl: bool,
     pub key_shift: bool,
     /// Seconds since the previous presented frame. Large values are idle gaps.
@@ -153,10 +157,7 @@ impl FrameInput {
             Key::Named(NamedKey::End) => self.key_end = true,
             _ => {}
         }
-        if !self.shortcut_mod() {
-            return;
-        }
-        // Physical keys keep editing shortcuts working with Cyrillic layouts too.
+        // Physical keys keep shortcuts working with Cyrillic layouts too.
         let code = match physical {
             PhysicalKey::Code(code) => Some(code),
             _ => None,
@@ -165,6 +166,19 @@ impl FrameInput {
             Key::Character(c) => c.to_lowercase(),
             _ => String::new(),
         };
+        if !self.shortcut_mod() {
+            if self.modifiers.shift_key() || self.modifiers.alt_key() {
+                return;
+            }
+            match (code, character.as_str()) {
+                (Some(KeyCode::KeyB), _) | (_, "b") => self.key_tool_brush = true,
+                (Some(KeyCode::KeyF), _) | (_, "f") => self.key_tool_fill = true,
+                (Some(KeyCode::KeyT), _) | (_, "t") => self.key_tool_transform = true,
+                (Some(KeyCode::KeyE), _) | (_, "e") => self.key_toggle_erase = true,
+                _ => {}
+            }
+            return;
+        }
         match (code, character.as_str()) {
             (Some(KeyCode::KeyA), _) | (_, "a") => self.key_select_all = true,
             (Some(KeyCode::KeyC), _) | (_, "c") => self.key_copy = true,
@@ -189,6 +203,10 @@ impl FrameInput {
             input.key_undo = false;
             input.key_redo = false;
             input.key_enter = false;
+            input.key_tool_brush = false;
+            input.key_tool_fill = false;
+            input.key_tool_transform = false;
+            input.key_toggle_erase = false;
         }
         input
     }
@@ -259,11 +277,18 @@ impl FrameInput {
         self.key_paste = false;
         self.key_undo = false;
         self.key_redo = false;
+        self.key_tool_brush = false;
+        self.key_tool_fill = false;
+        self.key_tool_transform = false;
+        self.key_toggle_erase = false;
     }
 }
 
 pub trait Scene {
     fn title() -> &'static str;
+    fn window_title(&self) -> String {
+        Self::title().into()
+    }
     fn init(ui: &mut Ui);
     fn begin_frame(&mut self, input: &FrameInput);
     fn build(&mut self, ui: &mut Ui, viewport: Vec2, stats: DrawStats) -> bool;
@@ -447,6 +472,10 @@ impl<S: Scene> Host<S> {
         if size.width == 0 || size.height == 0 {
             return;
         }
+        let title = self.scene.window_title();
+        if window.title() != title {
+            window.set_title(&title);
+        }
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
@@ -608,23 +637,86 @@ impl<S: Scene> ApplicationHandler for Host<S> {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title(S::title())
-            .with_inner_size(LogicalSize::new(1280.0, 800.0));
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        let (pixels, size) = rotation_cursor_image();
-        if let Ok(source) =
-            winit::window::CustomCursor::from_rgba(pixels, size, size, size / 2, size / 2)
+        let mut attrs = Window::default_attributes()
+            .with_title(self.scene.window_title())
+            .with_inner_size(LogicalSize::new(1280.0, 800.0))
+            // Avoid registering a taskbar button before icons are applied.
+            .with_visible(false);
+        #[cfg(windows)]
         {
-            self.rotate_cursor = Some(event_loop.create_custom_cursor(source));
+            use winit::dpi::PhysicalSize;
+            use winit::platform::windows::{IconExtWindows, WindowAttributesExtWindows};
+
+            // Prefer the icon embedded by winresource (ordinal 1).
+            let small = Icon::from_resource(1, Some(PhysicalSize::new(32, 32)))
+                .ok()
+                .or_else(|| load_window_icon(32));
+            let big = Icon::from_resource(1, Some(PhysicalSize::new(256, 256)))
+                .ok()
+                .or_else(|| Icon::from_resource(1, Some(PhysicalSize::new(48, 48))).ok())
+                .or_else(|| load_window_icon(256));
+            if let Some(icon) = small.clone() {
+                attrs = attrs.with_window_icon(Some(icon));
+            }
+            if let Some(icon) = big.clone() {
+                attrs = attrs.with_taskbar_icon(Some(icon));
+            }
+
+            let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+            {
+                use winit::platform::windows::WindowExtWindows;
+                use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(handle) = window.as_ref().window_handle() {
+                    if let RawWindowHandle::Win32(h) = handle.as_raw() {
+                        crate::win_assoc::apply_hwnd_icons(h.hwnd.get() as _);
+                    }
+                }
+                if let Some(icon) = big {
+                    window.set_taskbar_icon(Some(icon));
+                }
+                if let Some(icon) = small {
+                    window.set_window_icon(Some(icon));
+                }
+            }
+            window.set_visible(true);
+            let (pixels, size) = rotation_cursor_image();
+            if let Ok(source) =
+                winit::window::CustomCursor::from_rgba(pixels, size, size, size / 2, size / 2)
+            {
+                self.rotate_cursor = Some(event_loop.create_custom_cursor(source));
+            }
+            let (pixels, size, hot_x, hot_y) = eyedropper_cursor_image();
+            if let Ok(source) =
+                winit::window::CustomCursor::from_rgba(pixels, size, size, hot_x, hot_y)
+            {
+                self.dropper_cursor = Some(event_loop.create_custom_cursor(source));
+            }
+            self.init_gpu(window.clone());
+            window.request_redraw();
+            return;
         }
-        let (pixels, size, hot_x, hot_y) = eyedropper_cursor_image();
-        if let Ok(source) = winit::window::CustomCursor::from_rgba(pixels, size, size, hot_x, hot_y)
+        #[cfg(not(windows))]
         {
-            self.dropper_cursor = Some(event_loop.create_custom_cursor(source));
+            if let Some(icon) = load_window_icon(32) {
+                attrs = attrs.with_window_icon(Some(icon));
+            }
+            let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+            window.set_visible(true);
+            let (pixels, size) = rotation_cursor_image();
+            if let Ok(source) =
+                winit::window::CustomCursor::from_rgba(pixels, size, size, size / 2, size / 2)
+            {
+                self.rotate_cursor = Some(event_loop.create_custom_cursor(source));
+            }
+            let (pixels, size, hot_x, hot_y) = eyedropper_cursor_image();
+            if let Ok(source) =
+                winit::window::CustomCursor::from_rgba(pixels, size, size, hot_x, hot_y)
+            {
+                self.dropper_cursor = Some(event_loop.create_custom_cursor(source));
+            }
+            self.init_gpu(window.clone());
+            window.request_redraw();
         }
-        self.init_gpu(window.clone());
-        window.request_redraw();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
@@ -740,6 +832,23 @@ impl<S: Scene> ApplicationHandler for Host<S> {
     }
 }
 
+fn load_window_icon(max_edge: u32) -> Option<Icon> {
+    let bytes = include_bytes!("../assets/icon.ico");
+    let img = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let img = if img.width() > max_edge || img.height() > max_edge {
+        image::imageops::resize(
+            &img,
+            max_edge,
+            max_edge,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        img
+    };
+    let (w, h) = img.dimensions();
+    Icon::from_rgba(img.into_raw(), w, h).ok()
+}
+
 #[cfg(test)]
 mod texture_slot_tests {
     #[test]
@@ -753,6 +862,26 @@ mod texture_slot_tests {
 #[cfg(test)]
 mod text_edit_tests {
     use super::*;
+
+    #[test]
+    fn tool_hotkeys_use_physical_keys_and_ignore_modifiers() {
+        let mut input = FrameInput::default();
+        input.press_key(&Key::Character("и".into()), PhysicalKey::Code(KeyCode::KeyB));
+        assert!(input.key_tool_brush);
+        input = FrameInput::default();
+        input.press_key(&Key::Character("f".into()), PhysicalKey::Code(KeyCode::KeyF));
+        assert!(input.key_tool_fill);
+        input = FrameInput::default();
+        input.modifiers = ModifiersState::SHIFT;
+        input.key_shift = true;
+        input.press_key(&Key::Character("b".into()), PhysicalKey::Code(KeyCode::KeyB));
+        assert!(!input.key_tool_brush);
+        input = FrameInput::default();
+        input.modifiers = ModifiersState::CONTROL;
+        input.key_ctrl = true;
+        input.press_key(&Key::Character("b".into()), PhysicalKey::Code(KeyCode::KeyB));
+        assert!(!input.key_tool_brush);
+    }
 
     #[test]
     fn navigation_shortcuts_reach_text_fields_and_edges_reset() {
@@ -783,6 +912,10 @@ mod text_edit_tests {
         input.key_redo = true;
         input.key_enter = true;
         input.key_delete = true;
+        input.key_tool_brush = true;
+        input.key_tool_fill = true;
+        input.key_tool_transform = true;
+        input.key_toggle_erase = true;
         let scene = input.for_scene(true);
         assert!(
             !scene.key_copy
@@ -794,6 +927,10 @@ mod text_edit_tests {
                 && !scene.key_enter
                 && !scene.key_left
                 && !scene.key_right
+                && !scene.key_tool_brush
+                && !scene.key_tool_fill
+                && !scene.key_tool_transform
+                && !scene.key_toggle_erase
         );
         assert!(input.for_scene(false).key_paste);
         input.clear_edges();

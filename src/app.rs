@@ -63,6 +63,8 @@ pub struct EditorApp {
     pub fps: f32,
     pub dock: DockState,
     brush_last: Option<(f32, f32)>,
+    /// Shift+drag brush resize: (press origin in screen space, size at press).
+    brush_size_drag: Option<(Vec2, f32)>,
     brush_dirty: bool,
     deformation: Option<deform::DeformStroke>,
     stroke_marks: Vec<u32>,
@@ -83,7 +85,13 @@ pub struct EditorApp {
 
 impl Default for EditorApp {
     fn default() -> Self {
-        Self {
+        Self::new(None)
+    }
+}
+
+impl EditorApp {
+    pub fn new(initial: Option<PathBuf>) -> Self {
+        let mut app = Self {
             animation_clock: None,
             workspace: Workspace::default(),
             input: FrameInput::default(),
@@ -98,6 +106,7 @@ impl Default for EditorApp {
             fps: 0.0,
             dock: ui::default_dock(),
             brush_last: None,
+            brush_size_drag: None,
             brush_dirty: false,
             deformation: None,
             stroke_marks: Vec::new(),
@@ -114,11 +123,15 @@ impl Default for EditorApp {
             rename: None,
             video_preview: None,
             video_poster: None,
+        };
+        if let Some(path) = initial {
+            if let Err(error) = app.open_path(&path) {
+                app.status = error;
+            }
         }
+        app
     }
-}
 
-impl EditorApp {
     pub fn open_hsv(&mut self) {
         if self.camera_visible() { return; }
         if self.ai.open || self.hsv.open || self.project().layers.is_empty() {
@@ -171,6 +184,7 @@ impl EditorApp {
     pub fn brush_last_active(&self) -> bool {
         self.deformation.is_some()
             || self.brush_last.is_some()
+            || self.brush_size_drag.is_some()
             || self.session.transform_drag.is_some()
             || !self.session.lasso_points.is_empty()
             || self.session.selection_brush_last.is_some()
@@ -210,6 +224,7 @@ impl EditorApp {
         self.video_preview = None;
         self.commit_transform();
         self.brush_last = None;
+        self.brush_size_drag = None;
         self.session.lasso_points.clear();
         self.session.selection_brush_last = None;
         self.session.selection_anchor = None;
@@ -321,6 +336,7 @@ impl EditorApp {
         self.session.lasso_points.clear();
         self.session.selection_brush_last = None;
         self.brush_last = None;
+        self.brush_size_drag = None;
         self.session.tool = tool;
         if tool == Tool::Transform && self.session.preview_asset.is_none() {
             self.begin_transform();
@@ -367,12 +383,9 @@ fn screen_to_pixel(point: Vec2, view: CanvasView) -> Option<(u32, u32)> {
     Some((x.floor() as u32, y.floor() as u32))
 }
 
-fn screen_to_pixel_clamped(point: Vec2, view: CanvasView) -> Option<(u32, u32)> {
+fn screen_to_image_pixel(point: Vec2, view: CanvasView) -> (i32, i32) {
     let (x, y) = screen_to_image(point, view);
-    Some((
-        x.floor().clamp(0.0, view.width.saturating_sub(1) as f32) as u32,
-        y.floor().clamp(0.0, view.height.saturating_sub(1) as f32) as u32,
-    ))
+    (x.floor() as i32, y.floor() as i32)
 }
 
 fn brush_overlaps_image(point: Vec2, radius_screen: f32, view: CanvasView) -> bool {

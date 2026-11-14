@@ -16,6 +16,10 @@ impl EditorApp {
         self.open_ai_mode(AiMode::Edit);
     }
 
+    pub fn open_ai_minimax_redraw(&mut self) {
+        self.open_ai_mode(AiMode::MinimaxRedraw);
+    }
+
     pub fn open_ai_qwen_draw(&mut self) {
         self.open_ai_mode(AiMode::QwenDraw);
     }
@@ -201,6 +205,12 @@ impl EditorApp {
                 return;
             }
         }
+        if self.ai.mode == AiMode::MinimaxRedraw {
+            if let Err(error) = crate::comfyui::validate_megapixels(self.ai.megapixels) {
+                self.ai.message = error;
+                return;
+            }
+        }
         let mask = if self.ai.mode == AiMode::Inpaint {
             match self.ai_mask() {
                 Ok(mask) => Some(mask),
@@ -273,6 +283,14 @@ impl EditorApp {
                 self.ai.scale,
                 self.ai.draw_settings.clone(),
                 self.ai.upscale,
+            )
+        } else if self.ai.mode == AiMode::MinimaxRedraw {
+            crate::comfyui::Job::start_minimax_redraw(
+                config,
+                image,
+                self.ai.scale,
+                self.ai.prompt.clone(),
+                self.ai.megapixels,
             )
         } else {
             crate::comfyui::Job::start(config, image, self.ai.scale, self.ai.prompt.clone())

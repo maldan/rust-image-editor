@@ -8,15 +8,34 @@ pub struct PixelRect {
 
 impl PixelRect {
     pub fn from_points(a: (u32, u32), b: (u32, u32), width: u32, height: u32) -> Self {
-        let min_x = a.0.min(b.0).min(width);
-        let min_y = a.1.min(b.1).min(height);
-        let max_x = a.0.max(b.0).saturating_add(1).min(width);
-        let max_y = a.1.max(b.1).saturating_add(1).min(height);
+        Self::from_signed_points(
+            (a.0 as i32, a.1 as i32),
+            (b.0 as i32, b.1 as i32),
+            width,
+            height,
+        )
+    }
+
+    /// Build a document-clamped rect from signed image pixels (drag may start outside).
+    pub fn from_signed_points(
+        a: (i32, i32),
+        b: (i32, i32),
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let raw_min_x = a.0.min(b.0);
+        let raw_min_y = a.1.min(b.1);
+        let raw_max_x = a.0.max(b.0).saturating_add(1);
+        let raw_max_y = a.1.max(b.1).saturating_add(1);
+        let min_x = raw_min_x.max(0) as u32;
+        let min_y = raw_min_y.max(0) as u32;
+        let max_x = raw_max_x.max(0) as u32;
+        let max_y = raw_max_y.max(0) as u32;
         Self {
-            min_x,
-            min_y,
-            max_x,
-            max_y,
+            min_x: min_x.min(width),
+            min_y: min_y.min(height),
+            max_x: max_x.min(width),
+            max_y: max_y.min(height),
         }
     }
 
@@ -229,6 +248,36 @@ pub fn brush_dirty_bounds(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_points_intersect_document_and_empty_when_outside() {
+        let inside = PixelRect::from_signed_points((-4, -2), (3, 5), 10, 8);
+        assert_eq!(
+            inside,
+            PixelRect {
+                min_x: 0,
+                min_y: 0,
+                max_x: 4,
+                max_y: 6,
+            }
+        );
+        let clipped = PixelRect::from_signed_points((7, 2), (20, 20), 10, 8);
+        assert_eq!(
+            clipped,
+            PixelRect {
+                min_x: 7,
+                min_y: 2,
+                max_x: 10,
+                max_y: 8,
+            }
+        );
+        assert!(PixelRect::from_signed_points((-8, -8), (-1, -1), 10, 8).is_empty());
+        assert!(PixelRect::from_signed_points((12, 0), (15, 3), 10, 8).is_empty());
+        assert_eq!(
+            PixelRect::from_points((1, 2), (4, 5), 10, 8),
+            PixelRect::from_signed_points((1, 2), (4, 5), 10, 8)
+        );
+    }
 
     #[test]
     fn lasso_fills_concave_polygon_and_clips_outside_canvas() {

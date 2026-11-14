@@ -127,6 +127,65 @@ fn ctrl_click_picks_the_composite_and_leaves_the_layer_unchanged() {
     assert_eq!(app.project().layers[1].pixels, filled[1].pixels);
 }
 
+#[test]
+fn tool_hotkeys_switch_tools_and_toggle_erase() {
+    let mut app = document();
+    app.input.key_tool_fill = true;
+    app.handle_tool_hotkeys();
+    assert_eq!(app.session.tool, Tool::Fill);
+    app.input = FrameInput::default();
+    app.input.key_toggle_erase = true;
+    app.handle_tool_hotkeys();
+    assert!(app.session.erase_mode);
+    app.input = FrameInput::default();
+    app.input.key_tool_brush = true;
+    app.handle_tool_hotkeys();
+    assert_eq!(app.session.tool, Tool::Brush);
+    assert!(app.session.erase_mode);
+    app.input = FrameInput::default();
+    app.input.key_tool_transform = true;
+    app.handle_tool_hotkeys();
+    assert_eq!(app.session.tool, Tool::Transform);
+    app.input = FrameInput::default();
+    app.ai.open = true;
+    app.input.key_tool_brush = true;
+    app.handle_tool_hotkeys();
+    assert_eq!(app.session.tool, Tool::Transform);
+}
+
+#[test]
+fn shift_drag_resizes_brush_without_painting() {
+    let mut app = document();
+    let before = app.project().layers[0].pixels.clone();
+    app.set_tool(Tool::Brush);
+    app.session.brush_size = 24.0;
+    app.session.brush_color = [1.0, 0.0, 0.0, 1.0];
+    app.session.canvas_rect = Rect::from_min_size(Vec2::ZERO, Vec2::splat(400.0));
+    let view = app.canvas_view().unwrap();
+    let origin = view.image_to_screen(Vec2::new(5.0, 5.0));
+    app.input.mouse_pos = origin;
+    app.input.mouse_pressed = true;
+    app.input.mouse_down = true;
+    app.input.key_shift = true;
+    app.handle_canvas_edit(view);
+    assert!(app.brush_size_drag.is_some());
+    assert!(app.brush_last.is_none());
+    app.input.mouse_pressed = false;
+    app.input.mouse_pos = origin + Vec2::new(40.0, 12.0);
+    app.handle_canvas_edit(view);
+    assert_eq!(app.session.brush_size, 44.0);
+    assert_eq!(app.project().layers[0].pixels, before);
+    app.input.mouse_pos = origin + Vec2::new(-20.0, 0.0);
+    app.handle_canvas_edit(view);
+    assert_eq!(app.session.brush_size, 14.0);
+    app.input.mouse_down = false;
+    app.input.mouse_released = true;
+    app.handle_canvas_edit(view);
+    assert!(app.brush_size_drag.is_none());
+    assert_eq!(app.session.brush_size, 14.0);
+    assert_eq!(app.project().layers[0].pixels, before);
+}
+
 fn document() -> EditorApp {
     let mut app = EditorApp::default();
     app.project_mut().resize_canvas(10, 10).unwrap();

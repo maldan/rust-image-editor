@@ -12,6 +12,13 @@ impl Scene for EditorApp {
         "Mega Image Editor"
     }
 
+    fn window_title(&self) -> String {
+        match self.workspace.path.as_deref().map(file_name) {
+            Some(name) => format!("{} | {name}", Self::title()),
+            None => Self::title().into(),
+        }
+    }
+
     fn init(ui: &mut Ui) {
         ui.set_theme(Theme::dark());
         ui.load_builtin_icons();
@@ -39,6 +46,7 @@ impl Scene for EditorApp {
         if self.input.key_escape { self.finish_deformation(true); }
         self.poll_ai(ui);
         self.poll_video();
+        self.handle_tool_hotkeys();
         self.handle_animation_keys();
         self.tick_animation();
         if self.input.key_undo {
@@ -300,22 +308,26 @@ impl Scene for EditorApp {
             && !self.eyedropper_armed()
         {
             let radius = (self.session.brush_size * self.session.zoom * 0.5).max(2.5);
-            let expanded = Rect {
-                min: self.session.canvas_rect.min - Vec2::splat(radius),
-                max: self.session.canvas_rect.max + Vec2::splat(radius),
-            };
-            if expanded.contains(self.input.mouse_pos) {
-                overlay.brush_center = Some(self.input.mouse_pos);
+            if let Some((origin, _)) = self.brush_size_drag {
+                overlay.brush_center = Some(origin);
                 overlay.brush_radius = radius;
+            } else {
+                let expanded = Rect {
+                    min: self.session.canvas_rect.min - Vec2::splat(radius),
+                    max: self.session.canvas_rect.max + Vec2::splat(radius),
+                };
+                if expanded.contains(self.input.mouse_pos) {
+                    overlay.brush_center = Some(self.input.mouse_pos);
+                    overlay.brush_radius = radius;
+                }
             }
         }
         if let (Some(anchor), Some(current)) = (
             self.session.selection_anchor,
             self.session.selection_current,
         ) {
-            let rect = PixelRect::from_points(anchor, current, view.width, view.height);
-            if !rect.is_empty() {
-                overlay.selection_rect = Some(view.pixel_corners(rect));
+            if anchor != current {
+                overlay.selection_rect = Some(view.signed_pixel_corners(anchor, current));
             }
         }
         if let Some(floating) = self.session.floating.as_ref() {

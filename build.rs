@@ -1,9 +1,21 @@
 use std::{env, fs, path::PathBuf};
 
 fn main() {
+    println!("cargo:rerun-if-changed=assets/icon.ico");
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
+    }
+    {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("assets/icon.ico");
+        res.set("ProductName", "Mega Image Editor");
+        res.set("FileDescription", "Mega Image Editor");
+        res.set("OriginalFilename", "image-editor.exe");
+        if let Err(e) = res.compile() {
+            eprintln!("winresource: {e}");
+            std::process::exit(1);
+        }
     }
     let root = PathBuf::from(
         env::var_os("FFMPEG_DIR")

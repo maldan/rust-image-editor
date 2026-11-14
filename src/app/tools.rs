@@ -50,7 +50,7 @@ impl EditorApp {
             self.session.selection_anchor,
             self.session.selection_current,
         ) {
-            let rect = PixelRect::from_points(anchor, current, width, height);
+            let rect = PixelRect::from_signed_points(anchor, current, width, height);
             let mode = self.session.selection_mode;
             if rect.is_empty() {
                 if mode == SelectMode::Replace {
@@ -66,12 +66,39 @@ impl EditorApp {
         self.session.selection_mode = SelectMode::Replace;
     }
 
+    pub(in crate::app) fn handle_tool_hotkeys(&mut self) {
+        if self.ai.open || self.hsv.open || self.rename.is_some() {
+            return;
+        }
+        if self.input.key_tool_brush {
+            self.set_tool(Tool::Brush);
+            self.status = "Brush".into();
+        } else if self.input.key_tool_fill {
+            self.set_tool(Tool::Fill);
+            self.status = "Fill".into();
+        } else if self.input.key_tool_transform {
+            self.set_tool(Tool::Transform);
+            self.status = "Transform".into();
+        }
+        if self.input.key_toggle_erase {
+            self.session.erase_mode = !self.session.erase_mode;
+            self.status = if self.session.erase_mode {
+                "Erase mode on".into()
+            } else {
+                "Erase mode off".into()
+            };
+        }
+    }
+
     pub fn handle_canvas_edit(&mut self, view: CanvasView) {
         if self.camera_visible() || self.session.preview_asset.is_some() {
             return;
         }
         let (width, height) = (view.width, view.height);
         if width == 0 || height == 0 {
+            return;
+        }
+        if self.handle_brush_size_gesture() {
             return;
         }
         match self.session.tool {
@@ -84,6 +111,32 @@ impl EditorApp {
             Tool::Transform => self.handle_transform(view),
             Tool::Deform => self.handle_deformation(view),
         }
+    }
+
+    /// Krita-style: Shift + drag left/right changes brush size without painting.
+    pub(in crate::app) fn handle_brush_size_gesture(&mut self) -> bool {
+        if let Some((origin, start_size)) = self.brush_size_drag {
+            let dx = self.input.mouse_pos.x - origin.x;
+            self.session.brush_size = (start_size + dx * 0.5).round().clamp(1.0, 256.0);
+            if self.input.mouse_released || !self.input.mouse_down {
+                self.brush_size_drag = None;
+            } else {
+                self.status = format!("Brush size: {:.0} px", self.session.brush_size);
+            }
+            return true;
+        }
+        if !matches!(self.session.tool, Tool::Brush | Tool::SelectionBrush)
+            || !self.input.mouse_pressed
+            || !self.input.key_shift
+            || self.input.key_ctrl
+            || !self.session.canvas_rect.contains(self.input.mouse_pos)
+            || self.brush_last.is_some()
+            || self.session.selection_brush_last.is_some()
+        {
+            return false;
+        }
+        self.brush_size_drag = Some((self.input.mouse_pos, self.session.brush_size));
+        true
     }
 
     pub(in crate::app) fn handle_lasso(&mut self, view: CanvasView) {
@@ -168,48 +221,40 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn handle_rect_select(&mut self, view: CanvasView) {
-        if self.input.mouse_pressed {
+        if self.input.mouse_pressed && self.session.canvas_rect.contains(self.input.mouse_pos) {
             let mode = self.select_mode();
             self.session.selection_mode = mode;
-            if let Some(point) = screen_to_pixel(self.input.mouse_pos, view) {
-                if mode == SelectMode::Replace
-                    && self
-                        .session
-                        .selection
-                        .as_ref()
-                        .is_some_and(|sel| !sel.contains(point.0, point.1))
-                {
-                    self.clear_selection();
-                    self.session.selection_deselect_press = Some(self.input.mouse_pos);
-                } else {
-                    self.session.selection_deselect_press = None;
-                    self.session.selection_anchor = Some(point);
-                    self.session.selection_current = Some(point);
-                }
-            } else if mode == SelectMode::Replace
-                && self.session.canvas_rect.contains(self.input.mouse_pos)
-                && self.session.selection.is_some()
+            let point = screen_to_image_pixel(self.input.mouse_pos, view);
+            let in_document = point.0 >= 0
+                && point.1 >= 0
+                && point.0 < view.width as i32
+                && point.1 < view.height as i32;
+            if mode == SelectMode::Replace
+                && in_document
+                && self.session.selection.as_ref().is_some_and(|sel| {
+                    !sel.contains(point.0 as u32, point.1 as u32)
+                })
             {
                 self.clear_selection();
+                self.session.selection_deselect_press = Some(self.input.mouse_pos);
+            } else {
+                self.session.selection_deselect_press = None;
+                self.session.selection_anchor = Some(point);
+                self.session.selection_current = Some(point);
             }
         }
         if self.input.mouse_down {
             if let Some(origin) = self.session.selection_deselect_press {
                 let drag = self.input.mouse_pos - origin;
-                if drag.length() >= 4.0
-                    && let (Some(anchor), Some(current)) = (
-                        screen_to_pixel_clamped(origin, view),
-                        screen_to_pixel_clamped(self.input.mouse_pos, view),
-                    )
-                {
-                    self.session.selection_anchor = Some(anchor);
-                    self.session.selection_current = Some(current);
+                if drag.length() >= 4.0 {
+                    self.session.selection_anchor = Some(screen_to_image_pixel(origin, view));
+                    self.session.selection_current =
+                        Some(screen_to_image_pixel(self.input.mouse_pos, view));
                     self.session.selection_deselect_press = None;
                 }
-            } else if self.session.selection_anchor.is_some()
-                && let Some(point) = screen_to_pixel_clamped(self.input.mouse_pos, view)
-            {
-                self.session.selection_current = Some(point);
+            } else if self.session.selection_anchor.is_some() {
+                self.session.selection_current =
+                    Some(screen_to_image_pixel(self.input.mouse_pos, view));
             }
         }
         if self.input.mouse_released {

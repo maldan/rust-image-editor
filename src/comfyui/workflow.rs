@@ -2,6 +2,7 @@ use serde_json::Value;
 
 pub const QWEN_DRAW: &str = include_str!("../../comfyui/image.qwen_edit_21_draw.json");
 pub const EMBEDDED: &str = include_str!("../../comfyui/image.qwen_edit_21.json");
+pub const MINIMAX_REDRAW: &str = include_str!("../../comfyui/image.minimax_h3.redraw.json");
 pub const INPAINT: &str = include_str!("../../comfyui/image.sd_inpaint.json");
 pub const REDRAW: &str = include_str!("../../comfyui/image.sd_redraw.json");
 pub const ANIME: &str = include_str!("../../comfyui/image.anima_draw.json");
@@ -384,6 +385,35 @@ pub fn prepare(filename: &str, prompt: &str, seed: u64) -> Result<(Value, String
         serde_json::from_str(EMBEDDED).map_err(|e| format!("Invalid embedded workflow: {e}"))?;
     patch(&mut graph, "LoadImage", "image", filename.into())?;
     patch(&mut graph, "Prompt", "prompt", prompt.into())?;
+    patch(&mut graph, "Sampler", "seed", seed.into())?;
+    let output = node_id(&graph, "SaveImage")?;
+    Ok((graph, output))
+}
+
+pub fn validate_megapixels(megapixels: f32) -> Result<(), String> {
+    if !megapixels.is_finite() || !(1.0..=16.0).contains(&megapixels) {
+        return Err("Megapixels must be between 1 and 16".into());
+    }
+    Ok(())
+}
+
+pub fn prepare_minimax_redraw(
+    filename: &str,
+    prompt: &str,
+    megapixels: f32,
+    seed: u64,
+) -> Result<(Value, String), String> {
+    validate_megapixels(megapixels)?;
+    let mut graph: Value = serde_json::from_str(MINIMAX_REDRAW)
+        .map_err(|e| format!("Invalid Minimax redraw workflow: {e}"))?;
+    patch(&mut graph, "LoadImage", "image", filename.into())?;
+    patch(&mut graph, "Prompt", "value", prompt.into())?;
+    patch(
+        &mut graph,
+        "ResizeMegapixels",
+        "resize_type.megapixels",
+        megapixels.into(),
+    )?;
     patch(&mut graph, "Sampler", "seed", seed.into())?;
     let output = node_id(&graph, "SaveImage")?;
     Ok((graph, output))
@@ -1028,5 +1058,42 @@ mod tests {
         graph[&prompt]["inputs"]["prompt"] = original[&prompt]["inputs"]["prompt"].clone();
         graph[&sampler]["inputs"]["seed"] = original[&sampler]["inputs"]["seed"].clone();
         assert_eq!(graph, original);
+    }
+
+    #[test]
+    fn minimax_redraw_patches_image_prompt_megapixels_and_seed() {
+        let original: Value = serde_json::from_str(MINIMAX_REDRAW).unwrap();
+        let (mut graph, save) =
+            prepare_minimax_redraw("folder/input.png", "Change sky", 8.0, 42).unwrap();
+        assert_eq!(save, node_id(&original, "SaveImage").unwrap());
+        assert_eq!(
+            graph[node_id(&graph, "LoadImage").unwrap()]["inputs"]["image"],
+            "folder/input.png"
+        );
+        assert_eq!(
+            graph[node_id(&graph, "Prompt").unwrap()]["inputs"]["value"],
+            "Change sky"
+        );
+        assert_eq!(
+            graph[node_id(&graph, "ResizeMegapixels").unwrap()]["inputs"]["resize_type.megapixels"],
+            8.0
+        );
+        assert_eq!(
+            graph[node_id(&graph, "Sampler").unwrap()]["inputs"]["seed"].as_u64(),
+            Some(42)
+        );
+        let load = node_id(&graph, "LoadImage").unwrap();
+        let prompt = node_id(&graph, "Prompt").unwrap();
+        let resize = node_id(&graph, "ResizeMegapixels").unwrap();
+        let sampler = node_id(&graph, "Sampler").unwrap();
+        graph[&load]["inputs"]["image"] = original[&load]["inputs"]["image"].clone();
+        graph[&prompt]["inputs"]["value"] = original[&prompt]["inputs"]["value"].clone();
+        graph[&resize]["inputs"]["resize_type.megapixels"] =
+            original[&resize]["inputs"]["resize_type.megapixels"].clone();
+        graph[&sampler]["inputs"]["seed"] = original[&sampler]["inputs"]["seed"].clone();
+        assert_eq!(graph, original);
+        for megapixels in [0.5, 16.5, f32::NAN, f32::INFINITY] {
+            assert!(prepare_minimax_redraw("input.png", "x", megapixels, 0).is_err());
+        }
     }
 }

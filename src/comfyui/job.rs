@@ -24,6 +24,10 @@ pub enum JobResult {
 
 enum InputWorkflow {
     Edit(String),
+    MinimaxRedraw {
+        prompt: String,
+        megapixels: f32,
+    },
     Video {
         settings: super::VideoSettings,
         end_pixels: Option<RgbaImage>,
@@ -126,6 +130,26 @@ impl Job {
                 pixels,
                 scale,
                 workflow: InputWorkflow::Edit(prompt),
+            },
+        )
+    }
+
+    pub fn start_minimax_redraw(
+        config: HostConfig,
+        pixels: RgbaImage,
+        scale: f32,
+        prompt: String,
+        megapixels: f32,
+    ) -> Self {
+        Self::start_request(
+            config,
+            Request::Input {
+                pixels,
+                scale,
+                workflow: InputWorkflow::MinimaxRedraw {
+                    prompt,
+                    megapixels,
+                },
             },
         )
     }
@@ -426,6 +450,9 @@ fn run(
             if let InputWorkflow::Lineart(resolution) = &workflow {
                 super::workflow::validate_lineart_resolution(*resolution)?;
             }
+            if let InputWorkflow::MinimaxRedraw { megapixels, .. } = &workflow {
+                super::workflow::validate_megapixels(*megapixels)?;
+            }
             if let InputWorkflow::DrawCn { settings, control } = &workflow {
                 control.validate(settings)?;
             }
@@ -501,6 +528,15 @@ fn run(
                     super::video::prepare(&filename, end_filename.as_deref(), &settings, seed)?
                 }
                 InputWorkflow::Edit(prompt) => super::workflow::prepare(&filename, &prompt, seed)?,
+                InputWorkflow::MinimaxRedraw {
+                    prompt,
+                    megapixels,
+                } => super::workflow::prepare_minimax_redraw(
+                    &filename,
+                    &prompt,
+                    megapixels,
+                    seed,
+                )?,
                 InputWorkflow::DrawCn { settings, control } => {
                     super::workflow::prepare_draw_cn(&filename, &settings, control, seed)?
                 }

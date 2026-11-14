@@ -63,6 +63,8 @@ pub fn draw(ui: &mut Ui, session: &mut DocumentSession, image_ready: bool) -> Op
             ui.slider("brush_opacity", &mut session.brush_opacity, 0.01..=1.0);
             ui.space(8.0);
             ui.label("Ctrl — eyedropper");
+            ui.label("Shift+drag — size");
+            ui.label("B brush · F fill · T transform · E erase");
         }
         Tool::RectangleSelect | Tool::Lasso => {
             ui.label(if session.tool == Tool::Lasso {
@@ -87,6 +89,8 @@ pub fn draw(ui: &mut Ui, session: &mut DocumentSession, image_ready: bool) -> Op
                 1.0..=256.0,
                 1.0,
             );
+            ui.space(8.0);
+            ui.label("Shift+drag — size");
         }
         Tool::MagicWand => {
             ui.label("Click a pixel to select a connected region.");

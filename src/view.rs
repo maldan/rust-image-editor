@@ -24,12 +24,17 @@ impl CanvasView {
         local + self.image_center()
     }
 
-    pub fn pixel_corners(self, rect: crate::editing::PixelRect) -> [Vec2; 4] {
+    /// Rubber-band corners for a drag that may extend outside the document.
+    pub fn signed_pixel_corners(self, a: (i32, i32), b: (i32, i32)) -> [Vec2; 4] {
+        let min_x = a.0.min(b.0) as f32;
+        let min_y = a.1.min(b.1) as f32;
+        let max_x = a.0.max(b.0).saturating_add(1) as f32;
+        let max_y = a.1.max(b.1).saturating_add(1) as f32;
         [
-            self.image_to_screen(Vec2::new(rect.min_x as f32, rect.min_y as f32)),
-            self.image_to_screen(Vec2::new(rect.max_x as f32, rect.min_y as f32)),
-            self.image_to_screen(Vec2::new(rect.max_x as f32, rect.max_y as f32)),
-            self.image_to_screen(Vec2::new(rect.min_x as f32, rect.max_y as f32)),
+            self.image_to_screen(Vec2::new(min_x, min_y)),
+            self.image_to_screen(Vec2::new(max_x, min_y)),
+            self.image_to_screen(Vec2::new(max_x, max_y)),
+            self.image_to_screen(Vec2::new(min_x, max_y)),
         ]
     }
 }
