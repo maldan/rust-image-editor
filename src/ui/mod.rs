@@ -3,6 +3,7 @@
 pub mod ai_dialog;
 mod prompt_presets;
 pub mod ai_settings;
+pub mod editor_settings;
 mod animation_dialog;
 mod asset_properties;
 mod assets_panel;
@@ -138,7 +139,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     let status_h = 24.0 * scale;
 
     let modal_open =
-        app.ai.open || app.ai_settings.is_some() || app.hsv.open || app.rename.is_some() || app.unsaved.is_some();
+        app.ai.open || app.ai_settings.is_some() || app.settings_dialog.is_some() || app.hsv.open || app.rename.is_some() || app.unsaved.is_some();
     ui.add_enabled(!modal_open, |ui| {
         ui.menu_bar(|ui| {
             menu_bar::draw(ui, app);
@@ -197,6 +198,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     });
     ai_dialog::draw(ui, app);
     ai_settings::draw(ui, app);
+    editor_settings::draw(ui, app);
     hsv_dialog::draw(ui, app);
     rename_dialog::draw(ui, app);
     unsaved_dialog::draw(ui, app);

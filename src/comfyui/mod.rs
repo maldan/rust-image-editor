@@ -1,5 +1,7 @@
 mod video;
-pub use video::{LTX_FPS, MAX_DURATION_SCALE, VideoSettings, frame_sample, generated_seconds};
+pub use video::{
+    LTX_FPS, MAX_DURATION_SCALE, VideoSettings, frame_sample, generated_seconds, validate_minimax_i2v,
+};
 mod catalog;
 mod client;
 mod config;

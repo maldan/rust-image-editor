@@ -28,6 +28,12 @@ enum InputWorkflow {
         prompt: String,
         megapixels: f32,
     },
+    MinimaxI2V {
+        prompt: String,
+        megapixels: f32,
+        seconds: i32,
+        turbo: bool,
+    },
     Video {
         settings: super::VideoSettings,
         end_pixels: Option<RgbaImage>,
@@ -149,6 +155,29 @@ impl Job {
                 workflow: InputWorkflow::MinimaxRedraw {
                     prompt,
                     megapixels,
+                },
+            },
+        )
+    }
+
+    pub fn start_minimax_i2v(
+        config: HostConfig,
+        pixels: RgbaImage,
+        prompt: String,
+        megapixels: f32,
+        seconds: i32,
+        turbo: bool,
+    ) -> Self {
+        Self::start_request(
+            config,
+            Request::Input {
+                pixels,
+                scale: 1.0,
+                workflow: InputWorkflow::MinimaxI2V {
+                    prompt,
+                    megapixels,
+                    seconds,
+                    turbo,
                 },
             },
         )
@@ -424,7 +453,7 @@ fn run(
     let video = matches!(
         &request,
         Request::Input {
-            workflow: InputWorkflow::Video { .. },
+            workflow: InputWorkflow::Video { .. } | InputWorkflow::MinimaxI2V { .. },
             ..
         }
     );
@@ -452,6 +481,15 @@ fn run(
             }
             if let InputWorkflow::MinimaxRedraw { megapixels, .. } = &workflow {
                 super::workflow::validate_megapixels(*megapixels)?;
+            }
+            if let InputWorkflow::MinimaxI2V {
+                prompt,
+                megapixels,
+                seconds,
+                ..
+            } = &workflow
+            {
+                super::video::validate_minimax_i2v(*megapixels, *seconds, prompt)?;
             }
             if let InputWorkflow::DrawCn { settings, control } = &workflow {
                 control.validate(settings)?;
@@ -527,6 +565,14 @@ fn run(
                     };
                     super::video::prepare(&filename, end_filename.as_deref(), &settings, seed)?
                 }
+                InputWorkflow::MinimaxI2V {
+                    prompt,
+                    megapixels,
+                    seconds,
+                    turbo,
+                } => super::video::prepare_minimax_i2v(
+                    &filename, &prompt, megapixels, seconds, turbo, seed,
+                )?,
                 InputWorkflow::Edit(prompt) => super::workflow::prepare(&filename, &prompt, seed)?,
                 InputWorkflow::MinimaxRedraw {
                     prompt,

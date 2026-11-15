@@ -73,6 +73,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         if ui.menu_item("paste_image", "Paste Image").clicked() {
             app.paste_image(ui);
         }
+        ui.separator();
+        if ui.menu_item("editor_settings", "Settings…").clicked() {
+            app.open_editor_settings();
+        }
     });
 
     ui.menu("filter", "Filter", |ui| {
@@ -141,6 +145,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                 .clicked()
             {
                 app.open_ai_minimax_redraw();
+            }
+            if ui.menu_item("minimax_i2v", "I2V...").clicked() {
+                app.open_ai_minimax_i2v();
             }
         });
         ui.menu("sdxl", "SDXL", |ui| {

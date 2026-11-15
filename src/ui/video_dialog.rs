@@ -8,7 +8,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     let mut run = false;
     let mut cancel = false;
     let running = app.ai.job.is_some();
-    ui.modal(Window::new("ltx_i2v_dialog", "Ltx 2.3 I2V").size(Vec2::new(680.0, 760.0)).resizable(true).open(&mut open), |ui| {
+    let minimax = app.ai.mode == super::ai_dialog::AiMode::MinimaxI2V;
+    let window_id = if minimax { "minimax_i2v_dialog" } else { "ltx_i2v_dialog" };
+    ui.modal(Window::new(window_id, app.ai.mode.title()).size(Vec2::new(680.0, 760.0)).resizable(true).open(&mut open), |ui| {
         let height = (ui.available_size().y - 120.0 * ui.scale()).max(160.0 * ui.scale());
         ui.scroll_area("video_settings", Vec2::new(ui.available_size().x, height), ScrollAxes::Vertical, |ui| {
             ui.add_enabled(!running, |ui| {
@@ -20,7 +22,6 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     app.ai.video_layer = None;
                 }
                 if let Some(doc) = app.workspace.documents.get(doc_index) {
-                    ui.label(&format!("Source canvas: {} x {} px", doc.project.width, doc.project.height));
                     let mut sources = vec!["Whole document".to_string()];
                     sources.extend(doc.project.layers.iter().map(|l| format!("Layer: {}", l.name)));
                     let options: Vec<_> = sources.iter().map(String::as_str).collect();
@@ -28,6 +29,30 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     if ui.select("video_source", &mut source, &options).changed() {
                         app.ai.video_layer = source.checked_sub(1);
                     }
+                }
+                if minimax {
+                    ui.label(&format!("Megapixels: {:.1}", app.ai.minimax_i2v_megapixels));
+                    ui.slider_stepped(
+                        "minimax_i2v_megapixels",
+                        &mut app.ai.minimax_i2v_megapixels,
+                        0.2..=1.0,
+                        0.1,
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("Duration (seconds)");
+                        ui.drag_int("video_seconds", &mut app.ai.video_settings.seconds, 1);
+                    });
+                    ui.checkbox("minimax_i2v_turbo", "Turbo", &mut app.ai.minimax_i2v_turbo);
+                    ui.label("Prompt");
+                    ui.text_area("video_prompt", &mut app.ai.video_settings.prompt, Vec2::new(0.0, 130.0));
+                    if let Err(error) = crate::comfyui::validate_minimax_i2v(
+                        app.ai.minimax_i2v_megapixels,
+                        app.ai.video_settings.seconds,
+                        &app.ai.video_settings.prompt,
+                    ) {
+                        ui.label(&error);
+                    }
+                    return;
                 }
                 ui.label("End frame document (optional)");
                 let mut end_names = vec!["None".to_string()];
@@ -51,12 +76,13 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                         app.ai.video_end_layer = source.checked_sub(1);
                     }
                 }
-                ui.label("Layers use the full document canvas. Input is center-cropped to video size.");
                 ui.horizontal(|ui| {
-                    ui.label("Width");
-                    ui.drag_int("video_width", &mut app.ai.video_settings.width, 64);
-                    ui.label("Height");
-                    ui.drag_int("video_height", &mut app.ai.video_settings.height, 64);
+                    ui.label("Scale");
+                    ui.drag_float("video_scale", &mut app.ai.video_scale, 0.01);
+                    match app.video_settings() {
+                        Ok(settings) => ui.label(&format!("{} × {} px", settings.width, settings.height)),
+                        Err(_) => ui.label("—"),
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("FPS");
@@ -84,7 +110,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     }
                 });
                 ui.label(&app.ai.catalog_message);
-                if let Err(error) = app.ai.video_settings.validate() { ui.label(&error); }
+                if let Err(error) = app.video_settings().and_then(|settings| settings.validate()) { ui.label(&error); }
             });
         });
         if running { cancel = ui.button("video_cancel", "Cancel").clicked(); ui.request_repaint(); }
@@ -97,7 +123,17 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     .is_some_and(|d| d.project.width > 0 && d.project.height > 0
                         && app.ai.video_end_layer.is_none_or(|i| i < d.project.layers.len()))
             });
-            ui.add_enabled(source_valid && end_valid && app.ai.config.is_some() && app.ai.video_settings.validate().is_ok(), |ui| {
+            let settings_ok = if minimax {
+                crate::comfyui::validate_minimax_i2v(
+                    app.ai.minimax_i2v_megapixels,
+                    app.ai.video_settings.seconds,
+                    &app.ai.video_settings.prompt,
+                )
+                .is_ok()
+            } else {
+                app.video_settings().and_then(|settings| settings.validate()).is_ok()
+            };
+            ui.add_enabled(source_valid && end_valid && app.ai.config.is_some() && settings_ok, |ui| {
                 run = ui.button("video_run", "Generate MP4").clicked();
             });
         }

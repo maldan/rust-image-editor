@@ -30,12 +30,17 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         }
         return;
     }
-    let Some(video) = app.workspace.videos.iter().find(|v| v.id == id) else {
+    let Some(index) = app.workspace.videos.iter().position(|v| v.id == id) else {
         return;
     };
+    let video = &app.workspace.videos[index];
     ui.label(&video.name);
     ui.label("MP4 video");
     ui.label(&format!("File size: {}", format_bytes(video.byte_size)));
+    ui.space(8.0);
+    if ui.button("video_export", "Export MP4…").clicked() {
+        app.export_video(index, ui);
+    }
     ui.space(8.0);
     let Some(player) = app.video_playback() else {
         return;

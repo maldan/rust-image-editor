@@ -87,6 +87,8 @@ pub struct EditorApp {
     pub resize_h: u32,
     pub ai: ui::ai_dialog::AiDialog,
     pub ai_settings: Option<ui::ai_settings::AiSettings>,
+    pub settings: crate::editor_settings::EditorSettings,
+    pub settings_dialog: Option<ui::editor_settings::SettingsDialog>,
     pub hsv: ui::hsv_dialog::HsvDialog,
     pub rename: Option<ui::rename_dialog::RenameDialog>,
     pub unsaved: Option<UnsavedAction>,
@@ -134,6 +136,8 @@ impl EditorApp {
             resize_h: 512,
             ai: ui::ai_dialog::AiDialog::default(),
             ai_settings: None,
+            settings: Default::default(),
+            settings_dialog: None,
             hsv: Default::default(),
             rename: None,
             unsaved: None,
@@ -142,12 +146,31 @@ impl EditorApp {
             video_preview: None,
             video_poster: None,
         };
+        match crate::editor_settings::EditorSettings::load() {
+            Ok(settings) => app.settings = settings,
+            Err(error) => app.status = error,
+        }
         if let Some(path) = initial {
             if let Err(error) = app.open_path(&path) {
                 app.status = error;
             }
         }
         app
+    }
+
+    pub fn open_editor_settings(&mut self) {
+        if self.ai.open || self.ai_settings.is_some() || self.hsv.open
+            || self.rename.is_some() || self.unsaved.is_some() || self.settings_dialog.is_some()
+        {
+            return;
+        }
+        self.commit_transform();
+        self.workspace.clear_asset_drag();
+        self.layer_drag = None;
+        self.settings_dialog = Some(ui::editor_settings::SettingsDialog {
+            settings: self.settings,
+            message: String::new(),
+        });
     }
 
     pub fn open_hsv(&mut self) {

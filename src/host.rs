@@ -295,6 +295,7 @@ pub trait Scene {
         Self::title().into()
     }
     fn init(ui: &mut Ui);
+    fn ui_scale(&self) -> f32 { 1.0 }
     fn begin_frame(&mut self, input: &FrameInput);
     fn build(&mut self, ui: &mut Ui, viewport: Vec2, stats: DrawStats) -> bool;
     fn sync_canvas(
@@ -502,6 +503,7 @@ impl<S: Scene> Host<S> {
                 .and_then(|mut c| c.get_text())
                 .unwrap_or_default();
         }
+        self.ui.set_scale(self.scene.ui_scale());
         self.ui.begin_frame(ui_input);
         let keep_redrawing = self.scene.build(&mut self.ui, viewport, self.draw_stats);
         let output = self.ui.end_frame();

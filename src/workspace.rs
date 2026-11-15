@@ -84,6 +84,21 @@ impl VideoAsset {
             .read_all(&source.path)
             .map_err(|e| format!("Cannot read video: {e}"))
     }
+
+    pub fn export(&self, path: &Path) -> Result<(), String> {
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut output = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|e| format!("Cannot create video file: {e}"))?;
+        let copied = std::io::copy(&mut self.reader(), &mut output)
+            .map_err(|e| format!("Cannot export video: {e}"))?;
+        if copied != self.byte_size {
+            return Err("Cannot export video: incomplete data".into());
+        }
+        output.as_file().sync_all().map_err(|e| format!("Cannot write video: {e}"))?;
+        output.persist(path).map_err(|e| format!("Cannot save video: {e}"))?;
+        Ok(())
+    }
 }
 
 pub(crate) struct VideoReader {
@@ -492,13 +507,17 @@ impl Workspace {
     }
 
     pub fn add_video(&mut self, bytes: Vec<u8>) -> Result<usize, String> {
+        self.add_video_named(bytes, "Ltx 2.3 I2V")
+    }
+
+    pub fn add_video_named(&mut self, bytes: Vec<u8>, stem: &str) -> Result<usize, String> {
         if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
             return Err("ComfyUI returned invalid MP4 data".into());
         }
         let id = self.alloc_id("video");
         let index = self.videos.len();
         self.videos.push(VideoAsset {
-            name: format!("Ltx 2.3 I2V {}.mp4", index + 1),
+            name: format!("{stem} {}.mp4", index + 1),
             id,
             byte_size: bytes.len() as u64,
             thumb: Vec::new(),
@@ -1745,6 +1764,39 @@ mod tests {
             workspace.ensure_asset_loaded(index)?;
         }
         Ok(workspace)
+    }
+
+    #[test]
+    fn video_export_preserves_original_bytes_in_memory_and_from_saved_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().join("videos.mgimg");
+        let output = dir.path().join("export.mp4");
+        let mut workspace = Workspace::default();
+        let mut bytes = b"\0\0\0\x18ftypisom".to_vec();
+        bytes.extend((0..200_000).map(|i| (i % 251) as u8));
+        workspace.add_video(bytes.clone()).unwrap();
+        workspace.videos[0].export(&output).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), bytes);
+        workspace.save(&project_path).unwrap();
+        let before = fs::read(&project_path).unwrap();
+        let loaded = Workspace::open(&project_path).unwrap();
+        assert!(loaded.videos[0].bytes.is_none());
+        fs::write(&output, b"old export").unwrap();
+        loaded.videos[0].export(&output).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), bytes);
+        assert_eq!(fs::read(&project_path).unwrap(), before);
+        assert!(loaded.videos[0].bytes.is_none());
+    }
+
+    #[test]
+    fn failed_video_export_keeps_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("export.mp4");
+        fs::write(&output, b"existing video").unwrap();
+        let mut video = VideoAsset::from_bytes(vec![1, 2, 3]);
+        video.bytes = None;
+        assert!(video.export(&output).is_err());
+        assert_eq!(fs::read(&output).unwrap(), b"existing video");
     }
 
     #[test]

@@ -152,6 +152,45 @@ pub fn prepare(
     Ok((graph, output))
 }
 
+pub fn validate_minimax_i2v(megapixels: f32, seconds: i32, prompt: &str) -> Result<(), String> {
+    if !megapixels.is_finite() || !(0.2..=1.0).contains(&megapixels) {
+        return Err("Megapixels must be between 0.2 and 1".into());
+    }
+    if !(1..=120).contains(&seconds) {
+        return Err("Duration must be between 1 and 120 seconds".into());
+    }
+    if prompt.trim().is_empty() {
+        return Err("Enter a video prompt".into());
+    }
+    Ok(())
+}
+
+pub fn prepare_minimax_i2v(
+    filename: &str,
+    prompt: &str,
+    megapixels: f32,
+    seconds: i32,
+    turbo: bool,
+    seed: u64,
+) -> Result<(Value, String), String> {
+    validate_minimax_i2v(megapixels, seconds, prompt)?;
+    let mut graph: Value = serde_json::from_str(include_str!("../../comfyui/video.minimax_h3_i2v.json"))
+        .map_err(|e| format!("Invalid Minimax I2V workflow: {e}"))?;
+    for (title, key, value) in [
+        ("LoadImage", "image", Value::from(filename)),
+        ("Megapixels", "megapixels", megapixels.into()),
+        ("Prompt", "prompt", prompt.into()),
+        ("Float (duration)", "value", seconds.into()),
+        ("RandomNoise", "noise_seed", seed.into()),
+        ("Boolean (Enable Lightning LoRA)", "value", turbo.into()),
+    ] {
+        let id = node_id(&graph, title)?;
+        graph[&id]["inputs"][key] = value;
+    }
+    let output = node_id(&graph, "Save Video")?;
+    Ok((graph, output))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +343,40 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 0, 0, 1]
         );
+    }
+
+    #[test]
+    fn minimax_i2v_patches_image_prompt_megapixels_duration_and_seed() {
+        let original: Value =
+            serde_json::from_str(include_str!("../../comfyui/video.minimax_h3_i2v.json")).unwrap();
+        let (mut graph, save) =
+            prepare_minimax_i2v("folder/input.png", "Mouse orbits", 0.5, 6, false, 42).unwrap();
+        assert_eq!(save, node_id(&original, "Save Video").unwrap());
+        for (title, key, expected) in [
+            ("LoadImage", "image", Value::from("folder/input.png")),
+            ("Megapixels", "megapixels", 0.5.into()),
+            ("Prompt", "prompt", "Mouse orbits".into()),
+            ("Float (duration)", "value", 6.into()),
+            ("RandomNoise", "noise_seed", 42.into()),
+            ("Boolean (Enable Lightning LoRA)", "value", false.into()),
+        ] {
+            let id = node_id(&graph, title).unwrap();
+            assert_eq!(graph[&id]["inputs"][key], expected);
+            graph[&id]["inputs"][key] = original[&id]["inputs"][key].clone();
+        }
+        assert_eq!(graph, original);
+        let turbo = prepare_minimax_i2v("input.png", "x", 0.5, 5, true, 0).unwrap().0;
+        assert_eq!(
+            turbo[node_id(&turbo, "Boolean (Enable Lightning LoRA)").unwrap()]["inputs"]["value"],
+            true
+        );
+        for megapixels in [0.19, 1.01, f32::NAN, f32::INFINITY] {
+            assert!(prepare_minimax_i2v("input.png", "x", megapixels, 5, false, 0).is_err());
+        }
+        assert!(prepare_minimax_i2v("input.png", "x", 0.5, 0, false, 0).is_err());
+        assert!(prepare_minimax_i2v("input.png", "   ", 0.5, 5, false, 0).is_err());
+        assert!(validate_minimax_i2v(0.2, 1, "ok").is_ok());
+        assert!(validate_minimax_i2v(1.0, 120, "ok").is_ok());
     }
 
     #[test]

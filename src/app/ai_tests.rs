@@ -1410,6 +1410,52 @@ fn modal_blocks_editor_input_and_composes_preview_above_canvas() {
 }
 
 #[test]
+fn video_size_follows_source_document_and_scale_without_changing_animation_settings() {
+    let mut app = EditorApp::default();
+    app.project_mut().resize_canvas(1024, 1536).unwrap();
+    app.ai.document_id = app.workspace.active_doc().id.clone();
+    app.ai.video_settings.prompt = "Walk cycle".into();
+    app.ai.video_settings.width = 768;
+    app.ai.video_settings.height = 512;
+    assert_eq!(app.ai.video_scale, 1.0);
+    let settings = app.video_settings().unwrap();
+    assert_eq!((settings.width, settings.height), (1024, 1536));
+    assert!(settings.validate().is_ok());
+
+    app.workspace.create_document("Other");
+    app.project_mut().resize_canvas(640, 384).unwrap();
+    app.ai.video_layer = Some(0);
+    app.ai.video_scale = 0.5;
+    let settings = app.video_settings().unwrap();
+    assert_eq!((settings.width, settings.height), (512, 768));
+    assert_eq!((app.ai.video_settings.width, app.ai.video_settings.height), (768, 512));
+
+    app.ai.document_id = app.workspace.active_doc().id.clone();
+    app.ai.video_scale = 1.0;
+    let settings = app.video_settings().unwrap();
+    assert_eq!((settings.width, settings.height), (640, 384));
+}
+
+#[test]
+fn video_size_rounds_to_ltx_dimensions_and_rejects_invalid_scale_or_source() {
+    let mut app = EditorApp::default();
+    app.project_mut().resize_canvas(1000, 700).unwrap();
+    app.ai.document_id = app.workspace.active_doc().id.clone();
+    let settings = app.video_settings().unwrap();
+    assert_eq!((settings.width, settings.height), (1024, 704));
+    app.ai.video_scale = 0.01;
+    let settings = app.video_settings().unwrap();
+    assert_eq!((settings.width, settings.height), (64, 64));
+    for scale in [0.0, -1.0, f32::NAN, f32::INFINITY, 100.0] {
+        app.ai.video_scale = scale;
+        assert!(app.video_settings().is_err());
+    }
+    app.ai.video_scale = 1.0;
+    app.ai.document_id = "missing".into();
+    assert!(app.video_settings().is_err());
+}
+
+#[test]
 fn video_source_is_independent_of_active_document_and_selection() {
     use crate::raster::Raster;
     let mut app = EditorApp::default();
@@ -1455,6 +1501,28 @@ fn video_end_frame_reads_an_independent_document_or_layer() {
     app.open_ai_video();
     assert!(app.ai.video_end_document.is_none());
     assert!(app.ai.video_end_layer.is_none());
+}
+
+#[test]
+fn minimax_i2v_opens_from_menu_and_names_the_video_asset() {
+    let mut app = EditorApp::default();
+    app.project_mut()
+        .import_rgba(&[1, 2, 3, 255], 1, 1)
+        .unwrap();
+    app.open_ai_minimax_i2v();
+    assert!(app.ai.open);
+    assert!(app.ai.mode == AiMode::MinimaxI2V);
+    assert!((app.ai.minimax_i2v_megapixels - 0.9).abs() < f32::EPSILON);
+    assert!(app.ai.minimax_i2v_turbo);
+    assert!(app.ai.catalog_load.is_none());
+    let bytes = b"\0\0\0\x18ftypisomtest video bytes".to_vec();
+    app.ai.job = Some(crate::comfyui::Job::with_result(
+        crate::comfyui::JobResult::Video(bytes.clone()),
+    ));
+    app.poll_ai(&mut Ui::new());
+    assert_eq!(app.workspace.videos.len(), 1);
+    assert_eq!(app.workspace.videos[0].name, "Minimax H3 I2V 1.mp4");
+    assert_eq!(app.workspace.videos[0].read().unwrap(), bytes);
 }
 
 #[test]

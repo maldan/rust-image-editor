@@ -20,6 +20,10 @@ impl EditorApp {
         self.open_ai_mode(AiMode::MinimaxRedraw);
     }
 
+    pub fn open_ai_minimax_i2v(&mut self) {
+        self.open_ai_mode(AiMode::MinimaxI2V);
+    }
+
     pub fn open_ai_qwen_draw(&mut self) {
         self.open_ai_mode(AiMode::QwenDraw);
     }
@@ -74,7 +78,7 @@ impl EditorApp {
         self.ai.open = true;
         self.ai.preview_view = Default::default();
         self.ai.mode = mode;
-        if mode == AiMode::Video {
+        if matches!(mode, AiMode::Video | AiMode::MinimaxI2V) {
             self.ai.document_id = self.workspace.active_doc().id.clone();
             self.ai.video_layer = None;
             self.ai.video_end_document = None;
@@ -95,7 +99,7 @@ impl EditorApp {
             self.ai.source = AiSource::Layer;
         }
         self.ai.catalog_load = None;
-        if mode.uses_sd() || mode.uses_video() {
+        if mode.uses_sd() || matches!(mode, AiMode::Video | AiMode::Animation) {
             self.ai.catalog = Default::default();
         }
         self.ai.preview = None;
@@ -108,7 +112,7 @@ impl EditorApp {
         self.ai.fraction = None;
         match crate::comfyui::HostConfig::load() {
             Ok(config) => {
-                if mode.uses_sd() || mode.uses_video() {
+                if mode.uses_sd() || matches!(mode, AiMode::Video | AiMode::Animation) {
                     self.ai.catalog_load =
                         Some(crate::comfyui::CatalogLoad::start(config.clone(), false));
                     self.ai.catalog_message = "Loading models / LoRAs...".into();
@@ -127,7 +131,7 @@ impl EditorApp {
         if self.ai.job.is_some() {
             return;
         }
-        if self.ai.mode == AiMode::Video {
+        if matches!(self.ai.mode, AiMode::Video | AiMode::MinimaxI2V) {
             self.start_video();
             return;
         }
@@ -297,14 +301,27 @@ impl EditorApp {
         });
     }
 
+    pub(crate) fn video_settings(&self) -> Result<crate::comfyui::VideoSettings, String> {
+        let doc = self.workspace.documents.iter()
+            .find(|d| d.id == self.ai.document_id)
+            .ok_or("Choose a source document")?;
+        let (width, height) = crate::comfyui::scaled_size(
+            doc.project.width, doc.project.height, self.ai.video_scale,
+        )?;
+        // LTX requires dimensions in multiples of 64.
+        let width = ((width + 32) / 64 * 64).max(64);
+        let height = ((height + 32) / 64 * 64).max(64);
+        crate::comfyui::scaled_size(width, height, 1.0)?;
+        let mut settings = self.ai.video_settings.clone();
+        settings.width = width as i32;
+        settings.height = height as i32;
+        Ok(settings)
+    }
+
     fn start_video(&mut self) {
         let Some(config) = self.ai.config.clone() else {
             return;
         };
-        if let Err(error) = self.ai.video_settings.validate() {
-            self.ai.message = error;
-            return;
-        }
         let image = match self.video_input() {
             Ok(image) => image,
             Err(error) => {
@@ -312,6 +329,40 @@ impl EditorApp {
                 return;
             }
         };
+        if self.ai.mode == AiMode::MinimaxI2V {
+            if let Err(error) = crate::comfyui::validate_minimax_i2v(
+                self.ai.minimax_i2v_megapixels,
+                self.ai.video_settings.seconds,
+                &self.ai.video_settings.prompt,
+            ) {
+                self.ai.message = error;
+                return;
+            }
+            self.ai.message = "Preparing video input…".into();
+            self.ai.fraction = None;
+            self.ai.preview = None;
+            self.ai.preview_dirty = false;
+            self.ai.job = Some(crate::comfyui::Job::start_minimax_i2v(
+                config,
+                image,
+                self.ai.video_settings.prompt.clone(),
+                self.ai.minimax_i2v_megapixels,
+                self.ai.video_settings.seconds,
+                self.ai.minimax_i2v_turbo,
+            ));
+            return;
+        }
+        let settings = match self.video_settings() {
+            Ok(settings) => settings,
+            Err(error) => {
+                self.ai.message = error;
+                return;
+            }
+        };
+        if let Err(error) = settings.validate() {
+            self.ai.message = error;
+            return;
+        }
         let end_image = match self.ai.video_end_document.clone() {
             Some(document) => match self.video_frame_input(&document, self.ai.video_end_layer) {
                 Ok(image) => Some(image),
@@ -330,7 +381,7 @@ impl EditorApp {
             config,
             image,
             end_image,
-            self.ai.video_settings.clone(),
+            settings,
         ));
     }
 
@@ -861,7 +912,12 @@ impl EditorApp {
                     self.ai.frame_decode = Some(crate::video::FrameDecode::start(bytes, width, height));
                     return;
                 }
-                match self.workspace.add_video(bytes) {
+                let stem = if self.ai.mode == AiMode::MinimaxI2V {
+                    "Minimax H3 I2V"
+                } else {
+                    "Ltx 2.3 I2V"
+                };
+                match self.workspace.add_video_named(bytes, stem) {
                     Ok(index) => {
                         self.dirty = true;
                         self.status =

@@ -11,6 +11,7 @@ pub enum AiMode {
     #[default]
     Edit,
     MinimaxRedraw,
+    MinimaxI2V,
     Draw,
     QwenDraw,
     AnimeDraw,
@@ -29,7 +30,7 @@ impl AiMode {
         !matches!(self, Self::Draw | Self::AnimeDraw | Self::QwenDraw)
     }
     pub fn uses_video(self) -> bool {
-        matches!(self, Self::Video | Self::Animation)
+        matches!(self, Self::Video | Self::Animation | Self::MinimaxI2V)
     }
     pub fn is_anime(self) -> bool {
         matches!(self, Self::AnimeDraw | Self::AnimeRedraw)
@@ -46,6 +47,7 @@ impl AiMode {
             Self::Animation => "Ltx 2.3",
             Self::Edit => "Qwen 2.1 Redraw",
             Self::MinimaxRedraw => "Minimax H3 Redraw",
+            Self::MinimaxI2V => "Minimax H3 I2V",
             Self::QwenDraw => "Qwen 2.1 Draw",
             Self::Draw => "Draw Image",
             Self::AnimeDraw => "Anime Draw",
@@ -63,6 +65,7 @@ impl AiMode {
             Self::Animation => "Ltx 2.3",
             Self::Edit => "AI Qwen 2.1 Redraw",
             Self::MinimaxRedraw => "AI Minimax H3 Redraw",
+            Self::MinimaxI2V => "AI Minimax H3 I2V",
             Self::QwenDraw => "AI Qwen 2.1 Draw",
             Self::Draw => "AI Draw",
             Self::AnimeDraw => "AI Anime Draw",
@@ -145,6 +148,7 @@ pub struct AiDialog {
     pub open: bool,
     pub mode: AiMode,
     pub video_settings: crate::comfyui::VideoSettings,
+    pub video_scale: f32,
     pub video_layer: Option<usize>,
     pub video_end_document: Option<String>,
     pub video_end_layer: Option<usize>,
@@ -162,6 +166,8 @@ pub struct AiDialog {
     pub denoise: f32,
     pub mask_softness: f32,
     pub megapixels: f32,
+    pub minimax_i2v_megapixels: f32,
+    pub minimax_i2v_turbo: bool,
     pub lineart_resolution: i32,
     pub draw_settings: crate::comfyui::DrawSettings,
     pub control_net: crate::comfyui::ControlNetSettings,
@@ -204,6 +210,7 @@ impl Default for AiDialog {
             open: false,
             mode: AiMode::Edit,
             video_settings: Default::default(),
+            video_scale: 1.0,
             video_layer: None,
             video_end_document: None,
             video_end_layer: None,
@@ -218,6 +225,8 @@ impl Default for AiDialog {
             denoise: 1.0,
             mask_softness: 0.0,
             megapixels: 4.0,
+            minimax_i2v_megapixels: 0.9,
+            minimax_i2v_turbo: true,
             lineart_resolution: 512,
             draw_settings: Default::default(),
             control_net: Default::default(),
@@ -309,7 +318,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             ui.request_repaint();
         }
     }
-    if app.ai.mode == AiMode::Video {
+    if matches!(app.ai.mode, AiMode::Video | AiMode::MinimaxI2V) {
         super::video_dialog::draw(ui, app);
         return;
     }
@@ -418,7 +427,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                                     app.ai.draw_settings.validate_redraw(app.ai.denoise).is_ok()
                                         && input_valid(app, width, height)
                                 }
-                                AiMode::Video | AiMode::Animation => false,
+                                AiMode::Video | AiMode::Animation | AiMode::MinimaxI2V => false,
                                 AiMode::Edit => {
                                     !app.ai.prompt.trim().is_empty()
                                         && input_valid(app, width, height)
@@ -458,7 +467,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     if let Some(preview) = app.ai.result.as_ref().or(app.ai.preview.as_ref()) {
                         let image_size = Vec2::new(preview.width() as f32, preview.height() as f32);
                         let available = ui.available_size().max(Vec2::splat(1.0));
-                        let size = Vec2::new(available.x, available.y.min(560.0 * ui.scale()));
+                        // Leave room for preview controls and the status below the row.
+                        let footer_height = 64.0 * ui.scale();
+                        let size = Vec2::new(available.x, (available.y - footer_height).max(1.0));
                         let area = ui.area("ai_preview_view", size);
                         app.ai
                             .preview_view

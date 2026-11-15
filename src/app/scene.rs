@@ -48,11 +48,17 @@ impl Scene for EditorApp {
         ui.load_builtin_icons();
     }
 
+    fn ui_scale(&self) -> f32 {
+        self.settings_dialog.as_ref()
+            .map_or(self.settings.ui_scale, |dialog| dialog.settings.ui_scale)
+    }
+
     fn begin_frame(&mut self, input: &FrameInput) {
         self.session.canvas_cursor = None;
         self.ai.preview_input = input.clone();
         self.input = if self.ai.open
             || self.ai_settings.is_some()
+            || self.settings_dialog.is_some()
             || self.hsv.open
             || self.rename.is_some()
             || self.unsaved.is_some()
@@ -120,6 +126,7 @@ impl Scene for EditorApp {
         // overlays and unfinished uploads need another frame on their own.
         self.ai.open
             || self.ai_settings.is_some()
+            || self.settings_dialog.is_some()
             || self.animation_playing()
             || self.hsv.open
             || self.rename.is_some()

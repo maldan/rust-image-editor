@@ -1,6 +1,23 @@
 use super::*;
 
 impl EditorApp {
+    pub fn export_video(&mut self, index: usize, ui: &mut Ui) {
+        let Some(video) = self.workspace.videos.get(index) else { return; };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("MP4 video", &["mp4"])
+            .set_file_name(&video.name)
+            .save_file()
+            .map(|path| ensure_extension(path, "mp4"))
+        else { return; };
+        match video.export(&path) {
+            Ok(()) => {
+                self.status = format!("Exported {}", file_name(&path));
+                ui.notify_success("Video exported");
+            }
+            Err(error) => self.show_error(ui, error),
+        }
+    }
+
     pub(crate) fn video_playback(&mut self) -> Option<&mut crate::video::Playback> {
         self.video_preview.as_mut()
     }

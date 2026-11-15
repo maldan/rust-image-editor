@@ -7,6 +7,7 @@ mod camera;
 mod canvas_gpu;
 mod comfyui;
 mod editing;
+mod editor_settings;
 mod history;
 mod host;
 mod hsv;
