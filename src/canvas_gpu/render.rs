@@ -287,6 +287,9 @@ impl CanvasRenderer {
             pass.draw(0..6, 0..1);
         }
 
+        let [uv_min, uv_max] = overlay
+            .selection_uv
+            .unwrap_or([Vec2::ZERO, Vec2::ONE]);
         let sel_u = SelUniforms {
             viewport: [viewport.x, viewport.y],
             center: [view.center.x, view.center.y],
@@ -297,6 +300,8 @@ impl CanvasRenderer {
             dim_outside: if overlay.dim_outside { 1.0 } else { 0.0 },
             time,
             _pad: 0.0,
+            uv_min: uv_min.into(),
+            uv_max: uv_max.into(),
         };
         queue.write_buffer(&self.sel_uniform_buf, 0, bytemuck::bytes_of(&sel_u));
         if self.has_selection || overlay.dim_outside {
@@ -310,6 +315,35 @@ impl CanvasRenderer {
         }
 
         let mut verts = Vec::new();
+        if overlay.dim_outside && self.has_selection {
+            let size = Vec2::new(view.width as f32, view.height as f32);
+            let [uv_min, uv_max] = overlay.selection_uv.unwrap_or([Vec2::ZERO, Vec2::ONE]);
+            let min = uv_min * size;
+            let max = uv_max * size;
+            let dim = [0.0, 0.0, 0.0, 0.45];
+            push_image_rect(&mut verts, view, Vec2::ZERO, Vec2::new(size.x, min.y), dim);
+            push_image_rect(
+                &mut verts,
+                view,
+                Vec2::new(0.0, max.y),
+                size,
+                dim,
+            );
+            push_image_rect(
+                &mut verts,
+                view,
+                Vec2::new(0.0, min.y),
+                Vec2::new(min.x, max.y),
+                dim,
+            );
+            push_image_rect(
+                &mut verts,
+                view,
+                Vec2::new(max.x, min.y),
+                Vec2::new(size.x, max.y),
+                dim,
+            );
+        }
         if let Some(corners) = overlay.selection_rect {
             for i in 0..4 {
                 push_ants_line(&mut verts, corners[i], corners[(i + 1) % 4], time);

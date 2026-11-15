@@ -47,11 +47,7 @@ pub fn flood_mask(
             stack.push((x, y + 1));
         }
     }
-    Some(Selection {
-        width,
-        height,
-        mask,
-    })
+    Some(Selection::from_mask(width, height, mask))
 }
 
 pub fn fill_bucket(

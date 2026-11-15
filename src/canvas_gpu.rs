@@ -85,6 +85,8 @@ struct SelUniforms {
     dim_outside: f32,
     time: f32,
     _pad: f32,
+    uv_min: [f32; 2],
+    uv_max: [f32; 2],
 }
 
 #[repr(C)]
@@ -116,6 +118,7 @@ pub struct CanvasOverlay {
     pub brush_center: Option<Vec2>,
     pub brush_radius: f32,
     pub selection_rect: Option<[Vec2; 4]>,
+    pub selection_uv: Option<[Vec2; 2]>,
     pub transform_corners: Option<[Vec2; 4]>,
     pub transform_pivot: Option<Vec2>,
     pub dim_outside: bool,
@@ -292,6 +295,37 @@ fn make_pipeline(
         multiview_mask: None,
         cache: None,
     })
+}
+
+fn push_quad(out: &mut Vec<SolidVertex>, corners: [Vec2; 4], color: [f32; 4]) {
+    for idx in [0, 1, 2, 0, 2, 3] {
+        out.push(SolidVertex {
+            pos: corners[idx].into(),
+            color,
+        });
+    }
+}
+
+fn push_image_rect(
+    out: &mut Vec<SolidVertex>,
+    view: CanvasView,
+    min: Vec2,
+    max: Vec2,
+    color: [f32; 4],
+) {
+    if max.x <= min.x + 1e-4 || max.y <= min.y + 1e-4 {
+        return;
+    }
+    push_quad(
+        out,
+        [
+            view.image_to_screen(min),
+            view.image_to_screen(Vec2::new(max.x, min.y)),
+            view.image_to_screen(max),
+            view.image_to_screen(Vec2::new(min.x, max.y)),
+        ],
+        color,
+    );
 }
 
 fn push_line(out: &mut Vec<SolidVertex>, a: Vec2, b: Vec2, thickness: f32, color: [f32; 4]) {

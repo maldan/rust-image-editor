@@ -2027,6 +2027,7 @@ dependencies = [
  "fontdue",
  "glam",
  "resvg",
+ "unicode-segmentation",
  "wgpu",
  "windows 0.62.2",
 ]

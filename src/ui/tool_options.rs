@@ -6,9 +6,6 @@ use crate::editing::Tool;
 /// `Some(horizontal)` asks the editor to flip the active transform.
 pub fn draw(ui: &mut Ui, session: &mut DocumentSession, image_ready: bool) -> Option<bool> {
     let mut flip = None;
-    ui.label("Tool Options");
-    ui.separator();
-    ui.space(8.0);
 
     match session.tool {
         Tool::Deform => {
@@ -66,44 +63,12 @@ pub fn draw(ui: &mut Ui, session: &mut DocumentSession, image_ready: bool) -> Op
             ui.label("Shift+drag — size");
             ui.label("B brush · F fill · T transform · E erase");
         }
-        Tool::RectangleSelect | Tool::Lasso => {
-            ui.label(if session.tool == Tool::Lasso {
-                "Draw a freehand outline to select."
-            } else {
-                "Drag on the image to select an area."
-            });
-            ui.space(8.0);
-            ui.label("Shift — add · Ctrl — subtract");
-        }
-        Tool::SelectionBrush => {
-            ui.checkbox(
-                "selection_brush_erase",
-                "Erase selection",
-                &mut session.selection_brush_erase,
-            );
-            ui.label("Paint to add to selection.");
-            ui.label(&format!("Size: {:.0} px", session.brush_size));
-            ui.slider_stepped(
-                "selection_brush_size",
-                &mut session.brush_size,
-                1.0..=256.0,
-                1.0,
-            );
-            ui.space(8.0);
-            ui.label("Shift+drag — size");
-        }
-        Tool::MagicWand => {
-            ui.label("Click a pixel to select a connected region.");
-            ui.space(8.0);
-            ui.label("Shift — add · Ctrl — subtract");
-            ui.space(12.0);
-            ui.label(&format!("Threshold: {:.0}", session.wand_threshold));
-            ui.slider_stepped(
-                "wand_threshold",
-                &mut session.wand_threshold,
-                0.0..=255.0,
-                1.0,
-            );
+        Tool::RectangleSelect
+        | Tool::Lasso
+        | Tool::PolygonSelect
+        | Tool::SelectionBrush
+        | Tool::MagicWand => {
+            draw_select_mode(ui, session);
         }
         Tool::Fill => {
             ui.checkbox("fill_erase", "Erase mode", &mut session.erase_mode);
@@ -154,32 +119,61 @@ pub fn draw(ui: &mut Ui, session: &mut DocumentSession, image_ready: bool) -> Op
         }
     }
 
-    ui.space(16.0);
-    ui.separator();
-    ui.label("Selection");
-    ui.space(8.0);
-    ui.checkbox(
-        "dim_outside",
-        "Dim outside selection",
-        &mut session.dim_outside_selection,
-    );
-    ui.space(8.0);
     if let Some(rect) = session.selection.as_ref().and_then(|sel| sel.bounds()) {
+        ui.space(16.0);
+        ui.separator();
+        ui.space(8.0);
         ui.label(&format!(
-            "{} × {} px",
+            "Size: {}px × {}px",
             rect.max_x.saturating_sub(rect.min_x),
             rect.max_y.saturating_sub(rect.min_y)
         ));
-        ui.space(8.0);
-    } else {
-        ui.label(if session.selection.is_some() {
-            "Empty selection"
-        } else {
-            "None — whole image is editable."
-        });
-    }
-    if session.selection.is_some() && ui.button("clear_selection", "Clear selection").clicked() {
-        session.clear_selection();
     }
     flip
+}
+
+fn draw_select_mode(ui: &mut Ui, session: &mut DocumentSession) {
+    let mut mode = session.tool.select_mode().unwrap_or(0);
+    if ui
+        .toggle("select_mode", &mut mode, &Tool::SELECT_MODE_LABELS)
+        .changed()
+    {
+        let tool = Tool::SELECT_MODES[mode];
+        session.lasso_points.clear();
+        session.selection_brush_last = None;
+        session.selection_anchor = None;
+        session.selection_current = None;
+        session.select_tool = tool;
+        session.tool = tool;
+    }
+    ui.space(12.0);
+    match session.tool {
+        Tool::SelectionBrush => {
+            ui.checkbox(
+                "selection_brush_erase",
+                "Erase selection",
+                &mut session.selection_brush_erase,
+            );
+            ui.label(&format!("Size: {:.0} px", session.brush_size));
+            ui.slider_stepped(
+                "selection_brush_size",
+                &mut session.brush_size,
+                1.0..=256.0,
+                1.0,
+            );
+        }
+        Tool::MagicWand => {
+            ui.label(&format!("Threshold: {:.0}", session.wand_threshold));
+            ui.slider_stepped(
+                "wand_threshold",
+                &mut session.wand_threshold,
+                0.0..=255.0,
+                1.0,
+            );
+        }
+        Tool::PolygonSelect => {
+            ui.label("Click points · click first or Enter to close");
+        }
+        _ => {}
+    }
 }

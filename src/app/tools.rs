@@ -104,6 +104,7 @@ impl EditorApp {
         match self.session.tool {
             Tool::RectangleSelect => self.handle_rect_select(view),
             Tool::Lasso => self.handle_lasso(view),
+            Tool::PolygonSelect => self.handle_polygon(view),
             Tool::SelectionBrush => self.handle_selection_brush(view),
             Tool::MagicWand => self.handle_wand(view),
             Tool::Fill => self.handle_fill(view),
@@ -164,6 +165,58 @@ impl EditorApp {
         }
     }
 
+    pub(in crate::app) fn handle_polygon(&mut self, view: CanvasView) {
+        if self.input.key_escape {
+            self.session.lasso_points.clear();
+            return;
+        }
+        if self.input.key_enter {
+            self.close_polygon(view);
+            return;
+        }
+        if !self.input.mouse_pressed {
+            return;
+        }
+        if self.polygon_closes_at(self.input.mouse_pos, view) {
+            self.close_polygon(view);
+            return;
+        }
+        if !self.session.canvas_rect.contains(self.input.mouse_pos) {
+            return;
+        }
+        if self.session.lasso_points.is_empty() {
+            self.session.selection_mode = self.select_mode();
+        }
+        self.session
+            .lasso_points
+            .push(view.screen_to_image(self.input.mouse_pos));
+    }
+
+    fn polygon_closes_at(&self, screen: Vec2, view: CanvasView) -> bool {
+        self.session.lasso_points.len() >= 3
+            && self
+                .session
+                .lasso_points
+                .first()
+                .is_some_and(|first| view.image_to_screen(*first).distance(screen) <= 12.0)
+    }
+
+    fn close_polygon(&mut self, view: CanvasView) {
+        if self.session.lasso_points.len() < 3 {
+            return;
+        }
+        let selection =
+            Selection::from_polygon(&self.session.lasso_points, view.width, view.height);
+        self.session.lasso_points.clear();
+        self.apply_selection(selection, self.session.selection_mode);
+        self.status = match self.session.selection_mode {
+            SelectMode::Replace => "Polygon selection",
+            SelectMode::Add => "Added to selection",
+            SelectMode::Subtract => "Subtracted from selection",
+        }
+        .into();
+    }
+
     pub(in crate::app) fn handle_selection_brush(&mut self, view: CanvasView) {
         let point = view.screen_to_image(self.input.mouse_pos);
         if self.input.mouse_pressed
@@ -178,10 +231,12 @@ impl EditorApp {
         if (self.input.mouse_down || self.input.mouse_pressed || self.input.mouse_released)
             && let Some(previous) = self.session.selection_brush_last
         {
-            let selection = self.session.selection.get_or_insert_with(|| Selection {
-                width: view.width,
-                height: view.height,
-                mask: vec![0; view.width as usize * view.height as usize],
+            let selection = self.session.selection.get_or_insert_with(|| {
+                Selection::from_mask(
+                    view.width,
+                    view.height,
+                    vec![0; view.width as usize * view.height as usize],
+                )
             });
             selection.paint_segment(
                 previous,
@@ -199,24 +254,37 @@ impl EditorApp {
     }
 
     pub fn draw_lasso_path(&self, ui: &mut Ui, view: CanvasView) {
+        let color = [1.0, 0.85, 0.2, 1.0];
         for pair in self.session.lasso_points.windows(2) {
             ui.line(
                 view.image_to_screen(pair[0]),
                 view.image_to_screen(pair[1]),
                 1.0,
-                [1.0, 0.85, 0.2, 1.0],
+                color,
             );
         }
-        if let (Some(first), Some(last)) = (
-            self.session.lasso_points.first(),
-            self.session.lasso_points.last(),
-        ) {
-            ui.line(
-                view.image_to_screen(*last),
-                view.image_to_screen(*first),
-                1.0,
-                [1.0, 0.85, 0.2, 1.0],
-            );
+        let Some(first) = self.session.lasso_points.first() else {
+            return;
+        };
+        let Some(last) = self.session.lasso_points.last() else {
+            return;
+        };
+        let first_screen = view.image_to_screen(*first);
+        let last_screen = view.image_to_screen(*last);
+        if self.session.tool == Tool::PolygonSelect {
+            ui.line(last_screen, self.input.mouse_pos, 1.0, color);
+            if self.polygon_closes_at(self.input.mouse_pos, view) {
+                ui.line(self.input.mouse_pos, first_screen, 1.0, color);
+            }
+            for point in &self.session.lasso_points {
+                let p = view.image_to_screen(*point);
+                ui.fill_rect(
+                    Rect::from_min_size(p - Vec2::splat(2.5), Vec2::splat(5.0)),
+                    color,
+                );
+            }
+        } else {
+            ui.line(last_screen, first_screen, 1.0, color);
         }
     }
 

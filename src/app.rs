@@ -369,6 +369,9 @@ impl EditorApp {
         self.session.selection_brush_last = None;
         self.brush_last = None;
         self.brush_size_drag = None;
+        if tool.is_select() {
+            self.session.select_tool = tool;
+        }
         self.session.tool = tool;
         if tool == Tool::Transform && self.session.preview_asset.is_none() {
             self.begin_transform();

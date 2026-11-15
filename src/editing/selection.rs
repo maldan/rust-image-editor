@@ -56,15 +56,28 @@ pub struct Selection {
     pub width: u32,
     pub height: u32,
     pub mask: Vec<u8>,
+    cached_bounds: Option<PixelRect>,
 }
 
 impl Selection {
+    pub fn from_mask(width: u32, height: u32, mask: Vec<u8>) -> Self {
+        let mut result = Self {
+            width,
+            height,
+            mask,
+            cached_bounds: None,
+        };
+        result.cached_bounds = result.scan_bounds();
+        result
+    }
+
     /// Scanline polygon fill, testing pixel centers and clipping to the canvas.
     pub fn from_polygon(points: &[glam::Vec2], width: u32, height: u32) -> Self {
         let mut result = Self {
             width,
             height,
             mask: vec![0; width as usize * height as usize],
+            cached_bounds: None,
         };
         if points.len() < 3 {
             return result;
@@ -102,6 +115,7 @@ impl Selection {
                 let end = (pair[1] - 0.5).ceil().clamp(0.0, width as f32) as u32;
                 for x in start..end {
                     result.mask[(y * width + x) as usize] = 1;
+                    result.include_pixel(x, y);
                 }
             }
         }
@@ -124,22 +138,31 @@ impl Selection {
                 };
                 if point.distance_squared(from + delta * t) <= radius_sq {
                     self.mask[(y * self.width + x) as usize] = u8::from(!erase);
+                    if !erase {
+                        self.include_pixel(x, y);
+                    }
                 }
             }
+        }
+        if erase {
+            self.cached_bounds = self.scan_bounds();
         }
     }
 
     pub fn from_rect(rect: PixelRect, width: u32, height: u32) -> Self {
         let mut mask = vec![0u8; width as usize * height as usize];
-        for y in rect.min_y..rect.max_y {
-            for x in rect.min_x..rect.max_x {
-                mask[(y * width + x) as usize] = 1;
+        if !rect.is_empty() {
+            for y in rect.min_y..rect.max_y {
+                for x in rect.min_x..rect.max_x {
+                    mask[(y * width + x) as usize] = 1;
+                }
             }
         }
         Self {
             width,
             height,
             mask,
+            cached_bounds: (!rect.is_empty()).then_some(rect),
         }
     }
 
@@ -148,6 +171,12 @@ impl Selection {
             width,
             height,
             mask: vec![1u8; width as usize * height as usize],
+            cached_bounds: (width > 0 && height > 0).then_some(PixelRect {
+                min_x: 0,
+                min_y: 0,
+                max_x: width,
+                max_y: height,
+            }),
         }
     }
 
@@ -159,6 +188,73 @@ impl Selection {
     }
 
     pub fn bounds(&self) -> Option<PixelRect> {
+        self.cached_bounds
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cached_bounds.is_none()
+    }
+
+    pub fn invert(&mut self) {
+        for value in &mut self.mask {
+            *value = u8::from(*value == 0);
+        }
+        self.cached_bounds = self.scan_bounds();
+    }
+
+    pub fn union(&mut self, other: &Selection) {
+        if self.width != other.width || self.height != other.height {
+            return;
+        }
+        for (dst, &src) in self.mask.iter_mut().zip(other.mask.iter()) {
+            if src != 0 {
+                *dst = 1;
+            }
+        }
+        match (self.cached_bounds, other.cached_bounds) {
+            (None, bounds) => self.cached_bounds = bounds,
+            (Some(a), Some(b)) => {
+                self.cached_bounds = Some(PixelRect {
+                    min_x: a.min_x.min(b.min_x),
+                    min_y: a.min_y.min(b.min_y),
+                    max_x: a.max_x.max(b.max_x),
+                    max_y: a.max_y.max(b.max_y),
+                });
+            }
+            (Some(_), None) => {}
+        }
+    }
+
+    pub fn subtract(&mut self, other: &Selection) {
+        if self.width != other.width || self.height != other.height {
+            return;
+        }
+        for (dst, &src) in self.mask.iter_mut().zip(other.mask.iter()) {
+            if src != 0 {
+                *dst = 0;
+            }
+        }
+        self.cached_bounds = self.scan_bounds();
+    }
+
+    fn include_pixel(&mut self, x: u32, y: u32) {
+        self.cached_bounds = Some(match self.cached_bounds {
+            None => PixelRect {
+                min_x: x,
+                min_y: y,
+                max_x: x + 1,
+                max_y: y + 1,
+            },
+            Some(bounds) => PixelRect {
+                min_x: bounds.min_x.min(x),
+                min_y: bounds.min_y.min(y),
+                max_x: bounds.max_x.max(x + 1),
+                max_y: bounds.max_y.max(y + 1),
+            },
+        });
+    }
+
+    fn scan_bounds(&self) -> Option<PixelRect> {
         let mut min_x = self.width;
         let mut min_y = self.height;
         let mut max_x = 0u32;
@@ -181,38 +277,6 @@ impl Selection {
             max_x,
             max_y,
         })
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.mask.iter().all(|&v| v == 0)
-    }
-
-    pub fn invert(&mut self) {
-        for value in &mut self.mask {
-            *value = u8::from(*value == 0);
-        }
-    }
-
-    pub fn union(&mut self, other: &Selection) {
-        if self.width != other.width || self.height != other.height {
-            return;
-        }
-        for (dst, &src) in self.mask.iter_mut().zip(other.mask.iter()) {
-            if src != 0 {
-                *dst = 1;
-            }
-        }
-    }
-
-    pub fn subtract(&mut self, other: &Selection) {
-        if self.width != other.width || self.height != other.height {
-            return;
-        }
-        for (dst, &src) in self.mask.iter_mut().zip(other.mask.iter()) {
-            if src != 0 {
-                *dst = 0;
-            }
-        }
     }
 
     /// Packed R8 mask (0/255) for GPU overlay upload.
@@ -362,5 +426,14 @@ mod tests {
         assert!(a.contains(0, 0));
         assert!(!a.contains(2, 2));
         assert!(!a.contains(1, 1));
+        assert_eq!(
+            a.bounds(),
+            Some(PixelRect {
+                min_x: 0,
+                min_y: 0,
+                max_x: 2,
+                max_y: 2,
+            })
+        );
     }
 }

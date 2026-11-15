@@ -314,7 +314,8 @@ impl Scene for EditorApp {
             ));
         }
         let mut overlay = CanvasOverlay {
-            dim_outside: !self.camera_visible() && self.session.dim_outside_selection && self.session.selection.is_some(),
+            dim_outside: !self.camera_visible() && self.session.selection.is_some(),
+            selection_uv: self.session.selection.as_ref().and_then(selection_overlay_uv),
             layers: self
                 .workspace
                 .active()
@@ -387,4 +388,22 @@ impl Scene for EditorApp {
     fn canvas_cursor(&self) -> Option<TransformCursor> {
         self.session.canvas_cursor
     }
+}
+
+fn selection_overlay_uv(selection: &crate::editing::Selection) -> Option<[Vec2; 2]> {
+    let bounds = selection.bounds()?;
+    let width = selection.width.max(1) as f32;
+    let height = selection.height.max(1) as f32;
+    let pad_x = 2.0 / width;
+    let pad_y = 2.0 / height;
+    Some([
+        Vec2::new(
+            (bounds.min_x as f32 / width - pad_x).max(0.0),
+            (bounds.min_y as f32 / height - pad_y).max(0.0),
+        ),
+        Vec2::new(
+            (bounds.max_x as f32 / width + pad_x).min(1.0),
+            (bounds.max_y as f32 / height + pad_y).min(1.0),
+        ),
+    ])
 }

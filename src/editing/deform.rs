@@ -313,11 +313,7 @@ mod tests {
         source.write(32, -2, 5, [1, 2, 3, 255]);
         let mut mesh = DeformMesh::new(32, 32, 8);
         mesh.dab(Vec2::splat(16.0), Vec2::new(4.0, 0.0), 12.0, 1.0, 1.0, 0);
-        let empty = Selection {
-            width: 32,
-            height: 32,
-            mask: vec![0; 1024],
-        };
+        let empty = Selection::from_mask(32, 32, vec![0; 1024]);
         assert_eq!(mesh.render(&source, Some(&empty)).0, source);
         let out = mesh.render(&source, None).0;
         assert_ne!(out, source);

@@ -28,6 +28,7 @@ pub enum Tool {
     Brush,
     RectangleSelect,
     Lasso,
+    PolygonSelect,
     SelectionBrush,
     MagicWand,
     Fill,
@@ -36,11 +37,22 @@ pub enum Tool {
 }
 
 impl Tool {
+    pub const SELECT_MODES: [Tool; 5] = [
+        Tool::RectangleSelect,
+        Tool::MagicWand,
+        Tool::Lasso,
+        Tool::PolygonSelect,
+        Tool::SelectionBrush,
+    ];
+    pub const SELECT_MODE_LABELS: [&'static str; 5] =
+        ["Rect", "Wand", "Lasso", "Poly", "Brush"];
+
     pub fn label(self) -> &'static str {
         match self {
             Tool::Brush => "Brush",
             Tool::RectangleSelect => "Select",
             Tool::Lasso => "Lasso",
+            Tool::PolygonSelect => "Polygon",
             Tool::SelectionBrush => "Select Brush",
             Tool::MagicWand => "Wand",
             Tool::Fill => "Fill",
@@ -49,13 +61,25 @@ impl Tool {
         }
     }
 
-    pub fn all() -> [Tool; 8] {
+    pub fn is_select(self) -> bool {
+        matches!(
+            self,
+            Tool::RectangleSelect
+                | Tool::Lasso
+                | Tool::PolygonSelect
+                | Tool::SelectionBrush
+                | Tool::MagicWand
+        )
+    }
+
+    pub fn select_mode(self) -> Option<usize> {
+        Self::SELECT_MODES.iter().position(|&tool| tool == self)
+    }
+
+    pub fn toolbar() -> [Tool; 5] {
         [
             Tool::Brush,
             Tool::RectangleSelect,
-            Tool::Lasso,
-            Tool::SelectionBrush,
-            Tool::MagicWand,
             Tool::Fill,
             Tool::Transform,
             Tool::Deform,

@@ -74,11 +74,7 @@ fn invert_selection_complements_mask_and_does_nothing_without_selection() {
         .import_rgba(&[1, 2, 3, 255].repeat(6), 3, 2)
         .unwrap();
     let pixels = app.project().layers[0].pixels.clone();
-    app.session.selection = Some(Selection {
-        width: 3,
-        height: 2,
-        mask: vec![1, 0, 1, 0, 0, 1],
-    });
+    app.session.selection = Some(Selection::from_mask(3, 2, vec![1, 0, 1, 0, 0, 1]));
     app.invert_selection();
     assert_eq!(
         app.session.selection.as_ref().unwrap().mask,
@@ -546,6 +542,46 @@ fn selection_tools_handle_rotated_view_modifiers_and_release_outside_canvas() {
             .chunks_exact(4)
             .all(|p| p == [0, 0, 0, 255])
     );
+}
+
+#[test]
+fn polygon_select_closes_on_first_point_or_enter() {
+    let mut app = EditorApp::default();
+    app.project_mut()
+        .import_rgba(&[0, 0, 0, 255].repeat(100), 10, 10)
+        .unwrap();
+    app.refresh_image().unwrap();
+    app.session.canvas_rect = Rect::from_min_size(Vec2::ZERO, Vec2::splat(200.0));
+    app.set_tool(Tool::PolygonSelect);
+    let view = app.canvas_view().unwrap();
+    for point in [Vec2::new(1.0, 1.0), Vec2::new(8.0, 1.0), Vec2::new(8.0, 8.0)] {
+        app.input = FrameInput::default();
+        app.input.mouse_pressed = true;
+        app.input.mouse_pos = view.image_to_screen(point);
+        app.handle_canvas_edit(view);
+    }
+    assert_eq!(app.session.lasso_points.len(), 3);
+    app.input = FrameInput::default();
+    app.input.mouse_pressed = true;
+    app.input.mouse_pos = view.image_to_screen(Vec2::new(1.0, 1.0));
+    app.handle_canvas_edit(view);
+    let selection = app.session.selection.as_ref().unwrap();
+    assert!(selection.contains(4, 2));
+    assert!(!selection.contains(2, 6));
+    assert!(app.session.lasso_points.is_empty());
+
+    app.set_tool(Tool::PolygonSelect);
+    for point in [Vec2::new(1.0, 6.0), Vec2::new(8.0, 6.0), Vec2::new(8.0, 9.0)] {
+        app.input = FrameInput::default();
+        app.input.mouse_pressed = true;
+        app.input.mouse_pos = view.image_to_screen(point);
+        app.handle_canvas_edit(view);
+    }
+    app.input = FrameInput::default();
+    app.input.key_enter = true;
+    app.handle_canvas_edit(view);
+    assert!(app.session.selection.as_ref().unwrap().contains(6, 7));
+    assert!(app.session.lasso_points.is_empty());
 }
 
 #[test]

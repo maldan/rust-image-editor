@@ -576,14 +576,7 @@ impl FloatingTransform {
                 });
             }
         }
-        (
-            dirty,
-            Selection {
-                width,
-                height,
-                mask,
-            },
-        )
+        (dirty, Selection::from_mask(width, height, mask))
     }
 }
 

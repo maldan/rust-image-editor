@@ -688,7 +688,7 @@ fn source_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32) {
         AiSource::Document => 1,
         AiSource::Selection => 2,
     };
-    if ui.select("ai_source", &mut source, sources).changed() {
+    if ui.toggle("ai_source", &mut source, sources).changed() {
         ai.source = match source {
             1 => AiSource::Document,
             2 => AiSource::Selection,

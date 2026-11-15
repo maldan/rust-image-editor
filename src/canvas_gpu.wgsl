@@ -329,6 +329,8 @@ struct SelUniforms {
     dim_outside: f32,
     time: f32,
     _pad: f32,
+    uv_min: vec2<f32>,
+    uv_max: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> su: SelUniforms;
@@ -351,7 +353,7 @@ fn vs_sel(@builtin(vertex_index) idx: u32) -> SelOut {
         vec2<f32>(1.0, 1.0),
         vec2<f32>(0.0, 1.0),
     );
-    let uv = corners[idx];
+    let uv = mix(su.uv_min, su.uv_max, corners[idx]);
     let screen = image_to_screen(uv * su.image_size, su.center, su.image_size, su.zoom, su.rotation);
     var out: SelOut;
     out.pos = to_ndc(screen, su.viewport);
