@@ -167,6 +167,7 @@ pub fn validate_minimax_i2v(megapixels: f32, seconds: i32, prompt: &str) -> Resu
 
 pub fn prepare_minimax_i2v(
     filename: &str,
+    last_filename: Option<&str>,
     prompt: &str,
     megapixels: f32,
     seconds: i32,
@@ -183,6 +184,69 @@ pub fn prepare_minimax_i2v(
         ("Float (duration)", "value", seconds.into()),
         ("RandomNoise", "noise_seed", seed.into()),
         ("Boolean (Enable Lightning LoRA)", "value", turbo.into()),
+    ] {
+        let id = node_id(&graph, title)?;
+        graph[&id]["inputs"][key] = value;
+    }
+    let last_id = node_id(&graph, "LoadImage2")?;
+    if let Some(last_filename) = last_filename {
+        graph[&last_id]["inputs"]["image"] = last_filename.into();
+    } else {
+        let prompt_id = node_id(&graph, "Prompt")?;
+        graph.as_object_mut().unwrap().remove(&last_id);
+        graph[&prompt_id]["inputs"]
+            .as_object_mut()
+            .ok_or("Prompt has no inputs")?
+            .remove("last_frame");
+    }
+    let output = node_id(&graph, "Save Video")?;
+    Ok((graph, output))
+}
+
+pub fn prepare_minimax_r2v(
+    images: [Option<String>; 4],
+    video: Option<String>,
+    prompt: &str,
+    megapixels: f32,
+    seconds: i32,
+    lightning: bool,
+    seed: u64,
+) -> Result<(Value, String), String> {
+    validate_minimax_i2v(megapixels, seconds, prompt)?;
+    if images[0].is_none() {
+        return Err("Choose reference 1".into());
+    }
+    let mut graph: Value = serde_json::from_str(include_str!("../../comfyui/video.minimax_h3_r2v.json"))
+        .map_err(|e| format!("Invalid Minimax R2V workflow: {e}"))?;
+    let r2v = node_id(&graph, "MiniMax H3 Reference to Video")?;
+    for i in 0..4 {
+        let id = node_id(&graph, &format!("LoadImage{}", i + 1))?;
+        if let Some(filename) = &images[i] {
+            graph[&id]["inputs"]["image"] = filename.clone().into();
+        } else {
+            graph.as_object_mut().unwrap().remove(&id);
+            graph[&r2v]["inputs"]
+                .as_object_mut()
+                .ok_or("MiniMax H3 Reference to Video has no inputs")?
+                .remove(&format!("ref_images.ref_image_{i}"));
+        }
+    }
+    let video_id = node_id(&graph, "LoadVideo1")?;
+    if let Some(filename) = video {
+        graph[&video_id]["inputs"]["video"] = filename.into();
+    } else {
+        graph.as_object_mut().unwrap().remove(&video_id);
+        graph[&r2v]["inputs"]
+            .as_object_mut()
+            .ok_or("MiniMax H3 Reference to Video has no inputs")?
+            .remove("ref_videos.ref_video_0");
+    }
+    for (title, key, value) in [
+        ("Megapixels", "megapixels", megapixels.into()),
+        ("Prompt", "value", prompt.into()),
+        ("Duration", "value", seconds.into()),
+        ("RandomNoise", "noise_seed", seed.into()),
+        ("Boolean (Enable Lightning LoRA)", "value", lightning.into()),
     ] {
         let id = node_id(&graph, title)?;
         graph[&id]["inputs"][key] = value;
@@ -349,34 +413,155 @@ mod tests {
     fn minimax_i2v_patches_image_prompt_megapixels_duration_and_seed() {
         let original: Value =
             serde_json::from_str(include_str!("../../comfyui/video.minimax_h3_i2v.json")).unwrap();
-        let (mut graph, save) =
-            prepare_minimax_i2v("folder/input.png", "Mouse orbits", 0.5, 6, false, 42).unwrap();
+        let (graph, save) =
+            prepare_minimax_i2v("folder/input.png", None, "Mouse orbits", 0.5, 6, false, 42)
+                .unwrap();
         assert_eq!(save, node_id(&original, "Save Video").unwrap());
+        assert_eq!(
+            graph[node_id(&graph, "LoadImage").unwrap()]["inputs"]["image"],
+            "folder/input.png"
+        );
+        assert!(node_id(&graph, "LoadImage2").is_err());
+        assert!(graph[node_id(&graph, "Prompt").unwrap()]["inputs"]
+            .get("last_frame")
+            .is_none());
+        let (mut with_last, _) = prepare_minimax_i2v(
+            "folder/input.png",
+            Some("last.png"),
+            "Mouse orbits",
+            0.5,
+            6,
+            false,
+            42,
+        )
+        .unwrap();
         for (title, key, expected) in [
             ("LoadImage", "image", Value::from("folder/input.png")),
+            ("LoadImage2", "image", Value::from("last.png")),
             ("Megapixels", "megapixels", 0.5.into()),
             ("Prompt", "prompt", "Mouse orbits".into()),
             ("Float (duration)", "value", 6.into()),
             ("RandomNoise", "noise_seed", 42.into()),
             ("Boolean (Enable Lightning LoRA)", "value", false.into()),
         ] {
-            let id = node_id(&graph, title).unwrap();
-            assert_eq!(graph[&id]["inputs"][key], expected);
-            graph[&id]["inputs"][key] = original[&id]["inputs"][key].clone();
+            let id = node_id(&with_last, title).unwrap();
+            assert_eq!(with_last[&id]["inputs"][key], expected);
+            with_last[&id]["inputs"][key] = original[&id]["inputs"][key].clone();
         }
-        assert_eq!(graph, original);
-        let turbo = prepare_minimax_i2v("input.png", "x", 0.5, 5, true, 0).unwrap().0;
+        assert_eq!(with_last, original);
+        let turbo =
+            prepare_minimax_i2v("input.png", None, "x", 0.5, 5, true, 0).unwrap().0;
         assert_eq!(
             turbo[node_id(&turbo, "Boolean (Enable Lightning LoRA)").unwrap()]["inputs"]["value"],
             true
         );
         for megapixels in [0.19, 1.01, f32::NAN, f32::INFINITY] {
-            assert!(prepare_minimax_i2v("input.png", "x", megapixels, 5, false, 0).is_err());
+            assert!(prepare_minimax_i2v("input.png", None, "x", megapixels, 5, false, 0).is_err());
         }
-        assert!(prepare_minimax_i2v("input.png", "x", 0.5, 0, false, 0).is_err());
-        assert!(prepare_minimax_i2v("input.png", "   ", 0.5, 5, false, 0).is_err());
+        assert!(prepare_minimax_i2v("input.png", None, "x", 0.5, 0, false, 0).is_err());
+        assert!(prepare_minimax_i2v("input.png", None, "   ", 0.5, 5, false, 0).is_err());
         assert!(validate_minimax_i2v(0.2, 1, "ok").is_ok());
         assert!(validate_minimax_i2v(1.0, 120, "ok").is_ok());
+    }
+
+    #[test]
+    fn minimax_r2v_drops_unused_load_images_and_keeps_enabled_slots() {
+        let original: Value =
+            serde_json::from_str(include_str!("../../comfyui/video.minimax_h3_r2v.json")).unwrap();
+        let (graph, save) = prepare_minimax_r2v(
+            [
+                Some("a.png".into()),
+                None,
+                Some("c.png".into()),
+                None,
+            ],
+            None,
+            "Two refs",
+            0.4,
+            7,
+            true,
+            9,
+        )
+        .unwrap();
+        assert_eq!(save, node_id(&original, "Save Video").unwrap());
+        let r2v = node_id(&graph, "MiniMax H3 Reference to Video").unwrap();
+        assert_eq!(graph[node_id(&graph, "LoadImage1").unwrap()]["inputs"]["image"], "a.png");
+        assert!(node_id(&graph, "LoadImage2").is_err());
+        assert_eq!(graph[node_id(&graph, "LoadImage3").unwrap()]["inputs"]["image"], "c.png");
+        assert!(node_id(&graph, "LoadImage4").is_err());
+        assert_eq!(graph[&r2v]["inputs"]["ref_images.ref_image_0"], serde_json::json!(["137", 0]));
+        assert!(graph[&r2v]["inputs"].get("ref_images.ref_image_1").is_none());
+        assert_eq!(graph[&r2v]["inputs"]["ref_images.ref_image_2"], serde_json::json!(["149", 0]));
+        assert!(graph[&r2v]["inputs"].get("ref_images.ref_image_3").is_none());
+        assert!(node_id(&graph, "LoadVideo1").is_err());
+        assert!(graph[&r2v]["inputs"].get("ref_videos.ref_video_0").is_none());
+        assert_eq!(graph[node_id(&graph, "Boolean (Enable Lightning LoRA)").unwrap()]["inputs"]["value"], true);
+        for node in graph.as_object().unwrap().values() {
+            for input in node["inputs"].as_object().unwrap().values() {
+                if let Some(link) = input.as_array() {
+                    assert!(
+                        graph.get(link[0].as_str().unwrap()).is_some(),
+                        "dangling workflow link"
+                    );
+                }
+            }
+        }
+        let (graph, _) = prepare_minimax_r2v(
+            [
+                Some("a.png".into()),
+                Some("b.png".into()),
+                Some("c.png".into()),
+                Some("d.png".into()),
+            ],
+            Some("clip.mp4".into()),
+            "x",
+            0.9,
+            5,
+            false,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            graph[node_id(&graph, "LoadVideo1").unwrap()]["inputs"]["video"],
+            "clip.mp4"
+        );
+        assert_eq!(
+            graph[node_id(&graph, "MiniMax H3 Reference to Video").unwrap()]["inputs"]
+                ["ref_videos.ref_video_0"],
+            serde_json::json!(["151", 0])
+        );
+        let (mut full, _) = prepare_minimax_r2v(
+            [
+                Some("a.png".into()),
+                Some("b.png".into()),
+                Some("c.png".into()),
+                Some("d.png".into()),
+            ],
+            Some("0001-0015.mp4".into()),
+            "x",
+            0.9,
+            5,
+            false,
+            1,
+        )
+        .unwrap();
+        for (title, key) in [
+            ("LoadImage1", "image"),
+            ("LoadImage2", "image"),
+            ("LoadImage3", "image"),
+            ("LoadImage4", "image"),
+            ("LoadVideo1", "video"),
+            ("Prompt", "value"),
+            ("Megapixels", "megapixels"),
+            ("Duration", "value"),
+            ("RandomNoise", "noise_seed"),
+            ("Boolean (Enable Lightning LoRA)", "value"),
+        ] {
+            let id = node_id(&full, title).unwrap();
+            full[&id]["inputs"][key] = original[&id]["inputs"][key].clone();
+        }
+        assert_eq!(full, original);
+        assert!(prepare_minimax_r2v([None, None, None, None], None, "x", 0.5, 5, true, 0).is_err());
     }
 
     #[test]

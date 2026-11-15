@@ -6,8 +6,15 @@ use std::path::Path;
 
 use image::{DynamicImage, ImageFormat, RgbaImage};
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiMetadata {
+    pub prompt: String,
+    pub model: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Layer {
+    pub ai_metadata: Option<AiMetadata>,
     pub z: f32,
     /// Held drawings keyed by their first frame. `pixels` is the editable current drawing.
     pub drawings: BTreeMap<u32, SparsePixels>,
@@ -359,6 +366,7 @@ impl Project {
         self.width = width;
         self.height = height;
         self.layers = vec![Layer {
+            ai_metadata: None,
             z: 0.0,
             drawings: Default::default(),
             name: "Layer 1".into(),
@@ -376,6 +384,7 @@ impl Project {
         }
         let index = self.layers.len() + 1;
         self.layers.push(Layer {
+            ai_metadata: None,
             z: 0.0,
             drawings: Default::default(),
             name: format!("Layer {index}"),
@@ -483,6 +492,7 @@ impl Project {
             self.width = width;
             self.height = height;
             self.layers.push(Layer {
+                ai_metadata: None,
                 z: 0.0,
                 drawings: Default::default(),
                 name: "Layer 1".into(),
@@ -611,8 +621,7 @@ pub fn encode_png_rgba(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>
     encode_png(&DynamicImage::ImageRgba8(image))
 }
 
-/// VP8L lossless WebP. Partial alpha is preserved; this is not the lossy encoder.
-pub fn encode_webp_rgba(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+fn rgba_len(pixels: &[u8], width: u32, height: u32) -> Result<(), String> {
     let expected = (width as usize)
         .checked_mul(height as usize)
         .and_then(|n| n.checked_mul(4))
@@ -620,11 +629,35 @@ pub fn encode_webp_rgba(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8
     if pixels.len() != expected || width == 0 || height == 0 {
         return Err("Invalid image size".into());
     }
+    Ok(())
+}
+
+/// VP8L lossless WebP. Partial alpha is preserved; this is not the lossy encoder.
+pub fn encode_webp_rgba(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    rgba_len(pixels, width, height)?;
     let mut cursor = std::io::Cursor::new(Vec::new());
     image::codecs::webp::WebPEncoder::new_lossless(&mut cursor)
         .encode(pixels, width, height, image::ExtendedColorType::Rgba8)
         .map_err(|e| format!("Cannot encode WebP: {e}"))?;
     Ok(cursor.into_inner())
+}
+
+/// Lossy WebP for ComfyUI uploads. `quality` is 0..=100.
+pub fn encode_webp_rgba_quality(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    quality: u8,
+) -> Result<Vec<u8>, String> {
+    rgba_len(pixels, width, height)?;
+    if quality > 100 {
+        return Err("WebP quality must be between 0 and 100".into());
+    }
+    let encoder = webp::Encoder::from_rgba(pixels, width, height);
+    encoder
+        .encode_simple(false, quality as f32)
+        .map(|encoded| encoded.to_vec())
+        .map_err(|e| format!("Cannot encode WebP: {e:?}"))
 }
 
 fn encode_png(image: &DynamicImage) -> Result<Vec<u8>, String> {
@@ -813,6 +846,19 @@ mod tests {
                     .iter()
                     .all(|b| *b == 0)
             );
+        }
+    }
+
+    #[test]
+    fn encode_webp_quality_roundtrips_flat_color() {
+        let pixels = [10, 20, 30, 255].repeat(32 * 32);
+        let bytes = encode_webp_rgba_quality(&pixels, 32, 32, 95).unwrap();
+        assert!(bytes.starts_with(b"RIFF"));
+        let image = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert_eq!(image.dimensions(), (32, 32));
+        let pixel = image.get_pixel(0, 0).0;
+        for (channel, expected) in pixel.iter().zip([10_i16, 20, 30, 255]) {
+            assert!((*channel as i16 - expected).abs() <= 4);
         }
     }
 

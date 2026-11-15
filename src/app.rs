@@ -92,6 +92,7 @@ pub struct EditorApp {
     pub hsv: ui::hsv_dialog::HsvDialog,
     pub rename: Option<ui::rename_dialog::RenameDialog>,
     pub unsaved: Option<UnsavedAction>,
+    pub delete_prompt: Option<ui::delete_dialog::DeletePrompt>,
     close_ready: bool,
     close_aborted: bool,
     video_preview: Option<crate::video::Playback>,
@@ -141,6 +142,7 @@ impl EditorApp {
             hsv: Default::default(),
             rename: None,
             unsaved: None,
+            delete_prompt: None,
             close_ready: false,
             close_aborted: false,
             video_preview: None,
@@ -160,7 +162,7 @@ impl EditorApp {
 
     pub fn open_editor_settings(&mut self) {
         if self.ai.open || self.ai_settings.is_some() || self.hsv.open
-            || self.rename.is_some() || self.unsaved.is_some() || self.settings_dialog.is_some()
+            || self.rename.is_some() || self.unsaved.is_some() || self.delete_prompt.is_some() || self.settings_dialog.is_some()
         {
             return;
         }

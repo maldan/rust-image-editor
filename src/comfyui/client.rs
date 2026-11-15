@@ -52,30 +52,40 @@ impl Client {
             .map_err(|_| "Invalid ComfyUI JSON response".into())
     }
 
-    pub fn upload(&self, bytes: Vec<u8>) -> Result<String, String> {
-        self.upload_named(bytes, "mega-image-editor-input.png")
+    pub fn upload(&self, bytes: Vec<u8>, postfix: &str) -> Result<String, String> {
+        self.upload_named(bytes, input_upload_name(postfix, "webp"), "image/webp", None)
     }
 
-    pub fn upload_mask(&self, bytes: Vec<u8>) -> Result<String, String> {
-        self.upload_named(bytes, "mega-image-editor-mask.png")
+    pub fn upload_mp4(&self, bytes: Vec<u8>, postfix: &str) -> Result<String, String> {
+        self.upload_named(
+            bytes,
+            input_upload_name(postfix, "mp4"),
+            "video/mp4",
+            Some(Duration::from_secs(300)),
+        )
     }
 
-    pub fn upload_video_end(&self, bytes: Vec<u8>) -> Result<String, String> {
-        self.upload_named(bytes, "mega-image-editor-video-end.png")
-    }
-
-    fn upload_named(&self, bytes: Vec<u8>, name: &'static str) -> Result<String, String> {
+    fn upload_named(
+        &self,
+        bytes: Vec<u8>,
+        name: String,
+        mime: &str,
+        timeout: Option<Duration>,
+    ) -> Result<String, String> {
         let part = multipart::Part::bytes(bytes)
             .file_name(name)
-            .mime_str("image/png")
+            .mime_str(mime)
             .map_err(|e| e.to_string())?;
         let form = multipart::Form::new()
             .part("image", part)
             .text("overwrite", "true");
-        let response = self.json(
-            self.request(reqwest::Method::POST, "/upload/image")
-                .multipart(form),
-        )?;
+        let mut request = self
+            .request(reqwest::Method::POST, "/upload/image")
+            .multipart(form);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        let response = self.json(request)?;
         let filename = response["name"]
             .as_str()
             .ok_or("Upload response has no filename")?;
@@ -289,6 +299,14 @@ pub fn output_from_history_kind(
     Ok(output)
 }
 
+fn input_upload_name(postfix: &str, ext: &str) -> String {
+    if postfix.is_empty() {
+        format!("mega-image-editor-input.{ext}")
+    } else {
+        format!("mega-image-editor-input-{postfix}.{ext}")
+    }
+}
+
 #[cfg(test)]
 mod video_tests {
     use super::*;
@@ -313,5 +331,31 @@ mod video_tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn input_upload_name_keeps_a_stable_postfix() {
+        assert_eq!(input_upload_name("", "webp"), "mega-image-editor-input.webp");
+        assert_eq!(
+            input_upload_name("first", "webp"),
+            "mega-image-editor-input-first.webp"
+        );
+        assert_eq!(
+            input_upload_name("last", "webp"),
+            "mega-image-editor-input-last.webp"
+        );
+        assert_eq!(
+            input_upload_name("mask", "webp"),
+            "mega-image-editor-input-mask.webp"
+        );
+        assert_eq!(
+            input_upload_name("ref1", "webp"),
+            "mega-image-editor-input-ref1.webp"
+        );
+        assert_eq!(
+            input_upload_name("ref4", "webp"),
+            "mega-image-editor-input-ref4.webp"
+        );
+        assert_eq!(input_upload_name("", "mp4"), "mega-image-editor-input.mp4");
     }
 }

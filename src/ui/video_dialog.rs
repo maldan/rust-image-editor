@@ -8,29 +8,43 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     let mut run = false;
     let mut cancel = false;
     let running = app.ai.job.is_some();
-    let minimax = app.ai.mode == super::ai_dialog::AiMode::MinimaxI2V;
-    let window_id = if minimax { "minimax_i2v_dialog" } else { "ltx_i2v_dialog" };
+    let i2v = app.ai.mode == super::ai_dialog::AiMode::MinimaxI2V;
+    let r2v = app.ai.mode == super::ai_dialog::AiMode::MinimaxR2V;
+    let window_id = if i2v {
+        "minimax_i2v_dialog"
+    } else if r2v {
+        "minimax_r2v_dialog"
+    } else {
+        "ltx_i2v_dialog"
+    };
     ui.modal(Window::new(window_id, app.ai.mode.title()).size(Vec2::new(680.0, 760.0)).resizable(true).open(&mut open), |ui| {
         let height = (ui.available_size().y - 120.0 * ui.scale()).max(160.0 * ui.scale());
         ui.scroll_area("video_settings", Vec2::new(ui.available_size().x, height), ScrollAxes::Vertical, |ui| {
             ui.add_enabled(!running, |ui| {
-                ui.label("Source document");
-                let names: Vec<_> = app.workspace.documents.iter().map(|d| d.name.as_str()).collect();
-                let mut doc_index = app.workspace.documents.iter().position(|d| d.id == app.ai.document_id).unwrap_or(0);
-                if ui.select("video_document", &mut doc_index, &names).changed() {
-                    app.ai.document_id = app.workspace.documents[doc_index].id.clone();
-                    app.ai.video_layer = None;
-                }
-                if let Some(doc) = app.workspace.documents.get(doc_index) {
-                    let mut sources = vec!["Whole document".to_string()];
-                    sources.extend(doc.project.layers.iter().map(|l| format!("Layer: {}", l.name)));
-                    let options: Vec<_> = sources.iter().map(String::as_str).collect();
-                    let mut source = app.ai.video_layer.map_or(0, |i| i + 1).min(options.len() - 1);
-                    if ui.select("video_source", &mut source, &options).changed() {
-                        app.ai.video_layer = source.checked_sub(1);
+                if i2v {
+                    draw_refs(ui, app, true);
+                } else if r2v {
+                    draw_refs(ui, app, false);
+                    draw_r2v_video(ui, app);
+                } else {
+                    ui.label("Source document");
+                    let names: Vec<_> = app.workspace.documents.iter().map(|d| d.name.as_str()).collect();
+                    let mut doc_index = app.workspace.documents.iter().position(|d| d.id == app.ai.document_id).unwrap_or(0);
+                    if ui.select("video_document", &mut doc_index, &names).changed() {
+                        app.ai.document_id = app.workspace.documents[doc_index].id.clone();
+                        app.ai.video_layer = None;
+                    }
+                    if let Some(doc) = app.workspace.documents.get(doc_index) {
+                        let mut sources = vec!["Whole document".to_string()];
+                        sources.extend(doc.project.layers.iter().map(|l| format!("Layer: {}", l.name)));
+                        let options: Vec<_> = sources.iter().map(String::as_str).collect();
+                        let mut source = app.ai.video_layer.map_or(0, |i| i + 1).min(options.len() - 1);
+                        if ui.select("video_source", &mut source, &options).changed() {
+                            app.ai.video_layer = source.checked_sub(1);
+                        }
                     }
                 }
-                if minimax {
+                if i2v || r2v {
                     ui.label(&format!("Megapixels: {:.1}", app.ai.minimax_i2v_megapixels));
                     ui.slider_stepped(
                         "minimax_i2v_megapixels",
@@ -42,7 +56,15 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                         ui.label("Duration (seconds)");
                         ui.drag_int("video_seconds", &mut app.ai.video_settings.seconds, 1);
                     });
-                    ui.checkbox("minimax_i2v_turbo", "Turbo", &mut app.ai.minimax_i2v_turbo);
+                    if r2v {
+                        ui.checkbox(
+                            "minimax_r2v_lightning",
+                            "Lightning",
+                            &mut app.ai.minimax_r2v_lightning,
+                        );
+                    } else {
+                        ui.checkbox("minimax_i2v_turbo", "Turbo", &mut app.ai.minimax_i2v_turbo);
+                    }
                     ui.label("Prompt");
                     ui.text_area("video_prompt", &mut app.ai.video_settings.prompt, Vec2::new(0.0, 130.0));
                     if let Err(error) = crate::comfyui::validate_minimax_i2v(
@@ -115,15 +137,21 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         });
         if running { cancel = ui.button("video_cancel", "Cancel").clicked(); ui.request_repaint(); }
         else {
-            let source_valid = app.workspace.documents.iter().find(|d| d.id == app.ai.document_id)
-                .is_some_and(|d| d.project.width > 0 && d.project.height > 0
-                    && app.ai.video_layer.is_none_or(|i| i < d.project.layers.len()));
-            let end_valid = app.ai.video_end_document.as_ref().is_none_or(|id| {
+            let source_valid = if i2v {
+                (0..2).all(|i| frame_ref_valid(app, &app.ai.i2v_refs, i))
+            } else if r2v {
+                (0..4).all(|i| frame_ref_valid(app, &app.ai.r2v_refs, i)) && r2v_video_valid(app)
+            } else {
+                app.workspace.documents.iter().find(|d| d.id == app.ai.document_id)
+                    .is_some_and(|d| d.project.width > 0 && d.project.height > 0
+                        && app.ai.video_layer.is_none_or(|i| i < d.project.layers.len()))
+            };
+            let end_valid = i2v || r2v || app.ai.video_end_document.as_ref().is_none_or(|id| {
                 app.workspace.documents.iter().find(|d| &d.id == id)
                     .is_some_and(|d| d.project.width > 0 && d.project.height > 0
                         && app.ai.video_end_layer.is_none_or(|i| i < d.project.layers.len()))
             });
-            let settings_ok = if minimax {
+            let settings_ok = if i2v || r2v {
                 crate::comfyui::validate_minimax_i2v(
                     app.ai.minimax_i2v_megapixels,
                     app.ai.video_settings.seconds,
@@ -148,5 +176,125 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     }
     if !open || app.input.key_escape {
         app.close_ai();
+    }
+}
+
+fn frame_ref_valid(app: &EditorApp, refs: &[super::ai_dialog::VideoRef], index: usize) -> bool {
+    let reference = &refs[index];
+    if index > 0 && !reference.enabled {
+        return true;
+    }
+    app.workspace
+        .documents
+        .iter()
+        .find(|d| d.id == reference.document_id)
+        .is_some_and(|d| {
+            d.project.width > 0
+                && d.project.height > 0
+                && reference.layer.is_none_or(|i| i < d.project.layers.len())
+        })
+}
+
+fn r2v_video_valid(app: &EditorApp) -> bool {
+    !app.ai.r2v_video
+        || app
+            .workspace
+            .videos
+            .iter()
+            .any(|v| v.id == app.ai.r2v_video_id)
+}
+
+fn draw_r2v_video(ui: &mut Ui, app: &mut EditorApp) {
+    ui.horizontal(|ui| {
+        ui.checkbox("r2v_video", "Video", &mut app.ai.r2v_video);
+        if app.workspace.videos.is_empty() {
+            ui.label("No video assets");
+            return;
+        }
+        if app.ai.r2v_video
+            && app
+                .workspace
+                .videos
+                .iter()
+                .all(|v| v.id != app.ai.r2v_video_id)
+        {
+            app.ai.r2v_video_id = app.workspace.videos[0].id.clone();
+        }
+        let names: Vec<String> = app.workspace.videos.iter().map(|v| v.name.clone()).collect();
+        let options: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut index = app
+            .workspace
+            .videos
+            .iter()
+            .position(|v| v.id == app.ai.r2v_video_id)
+            .unwrap_or(0);
+        let enabled = app.ai.r2v_video;
+        ui.add_enabled(enabled, |ui| {
+            if ui.select("r2v_video_asset", &mut index, &options).changed() {
+                app.ai.r2v_video_id = app.workspace.videos[index].id.clone();
+            }
+        });
+    });
+}
+
+fn draw_refs(ui: &mut Ui, app: &mut EditorApp, i2v: bool) {
+    let (prefix, labels): (&str, &[&str]) = if i2v {
+        ("i2v", &["First", "Last"])
+    } else {
+        (
+            "r2v",
+            &["Reference 1", "Reference 2", "Reference 3", "Reference 4"],
+        )
+    };
+    let refs = if i2v {
+        &mut app.ai.i2v_refs[..]
+    } else {
+        &mut app.ai.r2v_refs[..]
+    };
+    refs[0].enabled = true;
+    for i in 0..refs.len() {
+        ui.horizontal(|ui| {
+            if i == 0 {
+                let mut on = true;
+                ui.add_enabled(false, |ui| {
+                    ui.checkbox(&format!("{prefix}_ref_0"), labels[0], &mut on);
+                });
+            } else {
+                ui.checkbox(
+                    &format!("{prefix}_ref_{i}"),
+                    labels[i],
+                    &mut refs[i].enabled,
+                );
+            }
+            let names: Vec<_> = app.workspace.documents.iter().map(|d| d.name.as_str()).collect();
+            let mut doc_index = app
+                .workspace
+                .documents
+                .iter()
+                .position(|d| d.id == refs[i].document_id)
+                .unwrap_or(0);
+            if ui
+                .select(&format!("{prefix}_document_{i}"), &mut doc_index, &names)
+                .changed()
+            {
+                refs[i].document_id = app.workspace.documents[doc_index].id.clone();
+                refs[i].layer = None;
+            }
+            if let Some(doc) = app.workspace.documents.get(doc_index) {
+                let mut sources = vec!["Whole document".to_string()];
+                sources.extend(doc.project.layers.iter().map(|l| format!("Layer: {}", l.name)));
+                let options: Vec<_> = sources.iter().map(String::as_str).collect();
+                let mut source = refs[i]
+                    .layer
+                    .map_or(0, |layer| layer + 1)
+                    .min(options.len() - 1);
+                if ui
+                    .select(&format!("{prefix}_layer_{i}"), &mut source, &options)
+                    .changed()
+                {
+                    refs[i].layer = source.checked_sub(1);
+                }
+            }
+        });
     }
 }

@@ -6,7 +6,7 @@ mod catalog;
 mod client;
 mod config;
 mod job;
-mod workflow;
+pub(crate) mod workflow;
 mod ws;
 
 pub use catalog::{Catalog, CatalogLoad};

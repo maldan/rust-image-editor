@@ -2,6 +2,39 @@ use super::*;
 use crate::raster::SparsePixels;
 
 #[test]
+fn ai_metadata_uses_the_workflow_model_and_matching_prompt() {
+    let mut ai = crate::ui::ai_dialog::AiDialog::default();
+    ai.prompt = "edit prompt".into();
+    ai.draw_settings.positive = "drawing prompt".into();
+    ai.draw_settings.model = Some("selected.safetensors".into());
+    for mode in [AiMode::Draw, AiMode::Redraw, AiMode::Inpaint, AiMode::DrawCn, AiMode::Upscale] {
+        ai.mode = mode;
+        let metadata = ai.generation_metadata();
+        assert_eq!(metadata.prompt, "drawing prompt");
+        assert_eq!(metadata.model, "selected.safetensors");
+    }
+    for (mode, model, prompt) in [
+        (AiMode::QwenDraw, "qwen_image_2.1_int8_convrot.safetensors", "drawing prompt"),
+        (AiMode::Edit, "qwen_image_2.1_int8_convrot.safetensors", "edit prompt"),
+        (AiMode::AnimeDraw, "anima-preview3-base.safetensors", "drawing prompt"),
+        (AiMode::AnimeRedraw, "anima-preview3-base.safetensors", "drawing prompt"),
+        (AiMode::MinimaxRedraw, "minimax_h3_image_pruned_int8_convrot.safetensors", "edit prompt"),
+    ] {
+        ai.mode = mode;
+        let metadata = ai.generation_metadata();
+        assert_eq!(metadata.model, model);
+        assert_eq!(metadata.prompt, prompt);
+    }
+    ai.mode = AiMode::Draw;
+    ai.draw_settings.model = None;
+    assert_eq!(ai.generation_metadata().model, "blendermixIllustrious_v01.safetensors");
+    ai.mode = AiMode::Animation;
+    ai.video_settings.prompt = "animation prompt".into();
+    assert_eq!(ai.generation_metadata().prompt, "animation prompt");
+    assert_eq!(ai.generation_metadata().model, "ltx-2.3-22b-dev-fp8.safetensors");
+}
+
+#[test]
 fn create_document_from_asset_preview_uses_one_layer_and_preserves_source() {
     let mut app = EditorApp::default();
     app.project_mut().import_rgba(&[255, 0, 0, 255], 1, 1).unwrap();
@@ -754,21 +787,13 @@ fn input_workflows_upload_selected_source_and_accept_as_new_layer() {
                     "/upload/image" => {
                         let multipart = String::from_utf8_lossy(&body);
                         assert!(multipart.contains(if is_mask {
-                            "filename=\"mega-image-editor-mask.png\""
+                            "filename=\"mega-image-editor-input-mask.webp\""
                         } else {
-                            "filename=\"mega-image-editor-input.png\""
+                            "filename=\"mega-image-editor-input.webp\""
                         }));
                         assert!(multipart.contains("name=\"overwrite\"\r\n\r\ntrue\r\n"));
-                        let start = body
-                            .windows(8)
-                            .position(|w| w == b"\x89PNG\r\n\x1a\n")
-                            .unwrap();
-                        let image = image::load_from_memory_with_format(
-                            &body[start..],
-                            image::ImageFormat::Png,
-                        )
-                        .unwrap()
-                        .to_rgba8();
+                        let start = body.windows(4).position(|w| w == b"RIFF").unwrap();
+                        let image = image::load_from_memory(&body[start..]).unwrap().to_rgba8();
                         assert_eq!(
                             image.dimensions(),
                             if source == AiSource::Selection {
@@ -787,17 +812,18 @@ fn input_workflows_upload_selected_source_and_accept_as_new_layer() {
                                     .all(|p| p.0 == [0, 0, 0, 255] || p.0 == [255, 255, 255, 255])
                             );
                         } else {
-                            assert_eq!(
-                                image.get_pixel(0, 0).0,
-                                if source == AiSource::Layer {
-                                    [200, 100, 50, 255]
-                                } else {
-                                    [10, 20, 30, 255]
-                                }
-                            );
+                            let expected = if source == AiSource::Layer {
+                                [200_i16, 100, 50, 255]
+                            } else {
+                                [10, 20, 30, 255]
+                            };
+                            let pixel = image.get_pixel(0, 0).0;
+                            for (channel, expected) in pixel.iter().zip(expected) {
+                                assert!((*channel as i16 - expected).abs() <= 4);
+                            }
                         }
                         if source == AiSource::Selection {
-                            assert_eq!(image.get_pixel(24, 20).0, [0, 0, 0, 0]);
+                            assert!(image.get_pixel(24, 20).0[3] < 8);
                         }
                         if is_mask {
                             br#"{"name":"mask.png","subfolder":"test"}"#.to_vec()
@@ -961,6 +987,10 @@ fn input_workflows_upload_selected_source_and_accept_as_new_layer() {
             password: String::new(),
         });
         app.start_ai();
+        let submitted_metadata = app.ai.result_metadata.clone().unwrap();
+        app.ai.prompt = "changed after submission".into();
+        app.ai.draw_settings.positive = "changed after submission".into();
+        app.ai.draw_settings.model = Some("different-model.safetensors".into());
         let started = Instant::now();
         let mut ui = Ui::new();
         while app.ai.job.is_some() {
@@ -1002,6 +1032,7 @@ fn input_workflows_upload_selected_source_and_accept_as_new_layer() {
         app.accept_ai();
         assert_eq!(app.image_size, Some((128, 128)));
         assert_eq!(app.project().layers.len(), 3);
+        assert_eq!(app.project().layers[2].ai_metadata, Some(submitted_metadata));
         assert_eq!(
             app.project().layers[2].name,
             format!("{} 3", mode.layer_prefix())
@@ -1514,6 +1545,8 @@ fn minimax_i2v_opens_from_menu_and_names_the_video_asset() {
     assert!(app.ai.mode == AiMode::MinimaxI2V);
     assert!((app.ai.minimax_i2v_megapixels - 0.9).abs() < f32::EPSILON);
     assert!(app.ai.minimax_i2v_turbo);
+    assert!(app.ai.i2v_refs[0].enabled);
+    assert!(!app.ai.i2v_refs[1].enabled);
     assert!(app.ai.catalog_load.is_none());
     let bytes = b"\0\0\0\x18ftypisomtest video bytes".to_vec();
     app.ai.job = Some(crate::comfyui::Job::with_result(
@@ -1522,6 +1555,67 @@ fn minimax_i2v_opens_from_menu_and_names_the_video_asset() {
     app.poll_ai(&mut Ui::new());
     assert_eq!(app.workspace.videos.len(), 1);
     assert_eq!(app.workspace.videos[0].name, "Minimax H3 I2V 1.mp4");
+    assert_eq!(app.workspace.videos[0].read().unwrap(), bytes);
+}
+
+#[test]
+fn minimax_frame_refs_keep_checkbox_and_document_after_reopen() {
+    let mut app = EditorApp::default();
+    app.project_mut()
+        .import_rgba(&[1, 2, 3, 255], 1, 1)
+        .unwrap();
+    app.workspace.create_document("Other");
+    let other = app.workspace.active_doc().id.clone();
+    app.open_ai_minimax_i2v();
+    app.ai.i2v_refs[1].enabled = true;
+    app.ai.i2v_refs[1].document_id = other.clone();
+    app.ai.i2v_refs[1].layer = Some(0);
+    app.close_ai();
+    app.open_ai_minimax_i2v();
+    assert!(app.ai.i2v_refs[1].enabled);
+    assert_eq!(app.ai.i2v_refs[1].document_id, other);
+    assert_eq!(app.ai.i2v_refs[1].layer, Some(0));
+    app.close_ai();
+    app.open_ai_minimax_r2v();
+    app.ai.r2v_refs[2].enabled = true;
+    app.ai.r2v_refs[2].document_id = other.clone();
+    app.close_ai();
+    app.open_ai_minimax_r2v();
+    assert!(app.ai.r2v_refs[2].enabled);
+    assert_eq!(app.ai.r2v_refs[2].document_id, other);
+    app.workspace
+        .add_video_named(b"\0\0\0\x18ftypisomclip".to_vec(), "Clip")
+        .unwrap();
+    let video_id = app.workspace.videos[0].id.clone();
+    app.ai.r2v_video = true;
+    app.ai.r2v_video_id = video_id.clone();
+    app.close_ai();
+    app.open_ai_minimax_r2v();
+    assert!(app.ai.r2v_video);
+    assert_eq!(app.ai.r2v_video_id, video_id);
+}
+
+#[test]
+fn minimax_r2v_opens_with_required_first_ref_and_names_the_video_asset() {
+    let mut app = EditorApp::default();
+    app.project_mut()
+        .import_rgba(&[1, 2, 3, 255], 1, 1)
+        .unwrap();
+    let id = app.workspace.active_doc().id.clone();
+    app.open_ai_minimax_r2v();
+    assert!(app.ai.open);
+    assert!(app.ai.mode == AiMode::MinimaxR2V);
+    assert!(app.ai.minimax_r2v_lightning);
+    assert!(app.ai.r2v_refs[0].enabled);
+    assert_eq!(app.ai.r2v_refs[0].document_id, id);
+    assert!(app.ai.r2v_refs[1..].iter().all(|r| !r.enabled && r.document_id == id));
+    assert!(!app.ai.r2v_video);
+    let bytes = b"\0\0\0\x18ftypisomtest video bytes".to_vec();
+    app.ai.job = Some(crate::comfyui::Job::with_result(
+        crate::comfyui::JobResult::Video(bytes.clone()),
+    ));
+    app.poll_ai(&mut Ui::new());
+    assert_eq!(app.workspace.videos[0].name, "Minimax H3 R2V 1.mp4");
     assert_eq!(app.workspace.videos[0].read().unwrap(), bytes);
 }
 

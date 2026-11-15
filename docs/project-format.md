@@ -93,6 +93,7 @@ Kind: `mega-image-editor/manifest+json`
 |------|--------|
 | `z` | глубина, конечное число в `[-10, 10]` |
 | `name`, `visible`, `opacity` | UI-свойства (`opacity` по умолчанию 1.0) |
+| `aiMetadata` | необязательные метаданные ИИ: `prompt` и `model` |
 | `path` | путь к `.tiles` |
 | `compression` | `"none"` / отсутствует, или `"zstd"` |
 | `timeline` | путь к `.timeline` (только animation) |

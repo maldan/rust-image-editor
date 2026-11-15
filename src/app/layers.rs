@@ -222,6 +222,44 @@ impl EditorApp {
 mod rename_tests {
     use super::*;
     #[test]
+    fn ai_metadata_edit_cancel_and_clear() {
+        let mut app = EditorApp::default();
+        app.project_mut().import_rgba(&[1, 2, 3, 255], 1, 1).unwrap();
+        app.dirty = false;
+        app.open_layer_rename(0);
+        let dialog = app.rename.as_mut().unwrap();
+        dialog.prompt = "  Forest\nat sunset  ".into();
+        dialog.model = "chosen.safetensors".into();
+        app.apply_rename();
+        let expected = crate::project::AiMetadata {
+            prompt: "  Forest\nat sunset  ".into(), model: "chosen.safetensors".into(),
+        };
+        assert_eq!(app.project().layers[0].ai_metadata, Some(expected.clone()));
+        assert!(app.dirty);
+        app.dirty = false;
+        app.open_layer_rename(0);
+        app.apply_rename();
+        assert!(!app.dirty);
+        app.open_layer_rename(0);
+        app.rename.as_mut().unwrap().prompt = "discard".into();
+        app.input.key_escape = true;
+        let mut ui = Ui::new();
+        ui.begin_frame(mega_ui::UiInput { viewport: Vec2::new(800.0, 600.0), ..Default::default() });
+        crate::ui::rename_dialog::draw(&mut ui, &mut app);
+        ui.end_frame();
+        assert!(app.rename.is_none());
+        assert_eq!(app.project().layers[0].ai_metadata, Some(expected));
+        assert!(!app.dirty);
+        app.open_layer_rename(0);
+        let dialog = app.rename.as_mut().unwrap();
+        dialog.prompt.clear();
+        dialog.model.clear();
+        app.apply_rename();
+        assert!(app.project().layers[0].ai_metadata.is_none());
+        assert!(app.dirty);
+    }
+
+    #[test]
     fn rename_targets_clicked_layer_and_persists_without_changing_pixels_or_selection() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rename.mgimg");

@@ -12,6 +12,7 @@ pub enum AiMode {
     Edit,
     MinimaxRedraw,
     MinimaxI2V,
+    MinimaxR2V,
     Draw,
     QwenDraw,
     AnimeDraw,
@@ -30,7 +31,10 @@ impl AiMode {
         !matches!(self, Self::Draw | Self::AnimeDraw | Self::QwenDraw)
     }
     pub fn uses_video(self) -> bool {
-        matches!(self, Self::Video | Self::Animation | Self::MinimaxI2V)
+        matches!(
+            self,
+            Self::Video | Self::Animation | Self::MinimaxI2V | Self::MinimaxR2V
+        )
     }
     pub fn is_anime(self) -> bool {
         matches!(self, Self::AnimeDraw | Self::AnimeRedraw)
@@ -48,6 +52,7 @@ impl AiMode {
             Self::Edit => "Qwen 2.1 Redraw",
             Self::MinimaxRedraw => "Minimax H3 Redraw",
             Self::MinimaxI2V => "Minimax H3 I2V",
+            Self::MinimaxR2V => "Minimax H3 R2V",
             Self::QwenDraw => "Qwen 2.1 Draw",
             Self::Draw => "Draw Image",
             Self::AnimeDraw => "Anime Draw",
@@ -66,6 +71,7 @@ impl AiMode {
             Self::Edit => "AI Qwen 2.1 Redraw",
             Self::MinimaxRedraw => "AI Minimax H3 Redraw",
             Self::MinimaxI2V => "AI Minimax H3 I2V",
+            Self::MinimaxR2V => "AI Minimax H3 R2V",
             Self::QwenDraw => "AI Qwen 2.1 Draw",
             Self::Draw => "AI Draw",
             Self::AnimeDraw => "AI Anime Draw",
@@ -77,6 +83,13 @@ impl AiMode {
             Self::Lineart => "AI Lineart",
         }
     }
+}
+
+#[derive(Clone, Default)]
+pub struct VideoRef {
+    pub enabled: bool,
+    pub document_id: String,
+    pub layer: Option<usize>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -152,6 +165,11 @@ pub struct AiDialog {
     pub video_layer: Option<usize>,
     pub video_end_document: Option<String>,
     pub video_end_layer: Option<usize>,
+    pub r2v_refs: [VideoRef; 4],
+    pub i2v_refs: [VideoRef; 2],
+    pub r2v_video: bool,
+    pub r2v_video_id: String,
+    pub minimax_r2v_lightning: bool,
     /// Inclusive 0-based animation frames sent as the first and last conditioning images.
     pub anim_start: u32,
     pub anim_end: u32,
@@ -198,6 +216,8 @@ pub struct AiDialog {
     pub preview: Option<image::RgbaImage>,
     /// Full-resolution server output, held until explicitly accepted.
     pub result: Option<image::RgbaImage>,
+    /// Captured with the running job, retained with its result until acceptance.
+    pub result_metadata: Option<crate::project::AiMetadata>,
     pub preview_dirty: bool,
     pub preview_view: PreviewView,
     pub preview_input: crate::host::FrameInput,
@@ -214,6 +234,11 @@ impl Default for AiDialog {
             video_layer: None,
             video_end_document: None,
             video_end_layer: None,
+            r2v_refs: Default::default(),
+            i2v_refs: Default::default(),
+            r2v_video: false,
+            r2v_video_id: String::new(),
+            minimax_r2v_lightning: true,
             anim_start: 0,
             anim_end: 0,
             anim_scale: 1,
@@ -251,6 +276,7 @@ impl Default for AiDialog {
             fraction: None,
             preview: None,
             result: None,
+            result_metadata: None,
             preview_dirty: false,
             preview_view: PreviewView::default(),
             preview_input: Default::default(),
@@ -259,6 +285,43 @@ impl Default for AiDialog {
 }
 
 impl AiDialog {
+    pub(crate) fn generation_metadata(&self) -> crate::project::AiMetadata {
+        use crate::comfyui::workflow;
+        let template = match self.mode {
+            AiMode::Edit => workflow::EMBEDDED,
+            AiMode::QwenDraw => workflow::QWEN_DRAW,
+            AiMode::MinimaxRedraw => workflow::MINIMAX_REDRAW,
+            AiMode::AnimeDraw | AiMode::AnimeRedraw => workflow::ANIME,
+            AiMode::Draw => workflow::DRAW,
+            AiMode::Redraw => workflow::REDRAW,
+            AiMode::Inpaint => workflow::INPAINT,
+            AiMode::DrawCn => workflow::DRAW_CN,
+            AiMode::Upscale => workflow::UPSCALE,
+            AiMode::Lineart => workflow::LINEART,
+            AiMode::Video | AiMode::Animation => include_str!("../../comfyui/video.ltx_i2v.json"),
+            AiMode::MinimaxI2V => include_str!("../../comfyui/video.minimax_h3_i2v.json"),
+            AiMode::MinimaxR2V => include_str!("../../comfyui/video.minimax_h3_r2v.json"),
+        };
+        let model = if self.mode.uses_sd() { self.draw_settings.model.clone() } else { None }
+            .or_else(|| {
+                let graph: serde_json::Value = serde_json::from_str(template).ok()?;
+                graph.as_object()?.values().find_map(|node| {
+                    ["ckpt_name", "unet_name"].iter()
+                        .find_map(|key| node["inputs"][key].as_str().map(str::to_owned))
+                })
+            }).unwrap_or_default();
+        let prompt = if self.mode.uses_video() {
+            self.video_settings.prompt.clone()
+        } else if self.mode.uses_sd() || self.mode.is_anime() || self.mode == AiMode::QwenDraw {
+            self.draw_settings.positive.clone()
+        } else if self.mode == AiMode::Lineart {
+            String::new()
+        } else {
+            self.prompt.clone()
+        };
+        crate::project::AiMetadata { prompt, model }
+    }
+
     pub fn source_region(
         &self,
         width: u32,
@@ -318,7 +381,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             ui.request_repaint();
         }
     }
-    if matches!(app.ai.mode, AiMode::Video | AiMode::MinimaxI2V) {
+    if matches!(
+        app.ai.mode,
+        AiMode::Video | AiMode::MinimaxI2V | AiMode::MinimaxR2V
+    ) {
         super::video_dialog::draw(ui, app);
         return;
     }
@@ -427,7 +493,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                                     app.ai.draw_settings.validate_redraw(app.ai.denoise).is_ok()
                                         && input_valid(app, width, height)
                                 }
-                                AiMode::Video | AiMode::Animation | AiMode::MinimaxI2V => false,
+                                AiMode::Video | AiMode::Animation | AiMode::MinimaxI2V | AiMode::MinimaxR2V => {
+                                    false
+                                }
                                 AiMode::Edit => {
                                     !app.ai.prompt.trim().is_empty()
                                         && input_valid(app, width, height)

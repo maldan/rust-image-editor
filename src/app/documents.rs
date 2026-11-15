@@ -34,16 +34,31 @@ impl EditorApp {
 
     pub fn import_image(&mut self, ui: &mut Ui) {
         let Some(path) = rfd::FileDialog::new()
+            .add_filter("Assets", &["png", "webp", "mp4"])
             .add_filter("Images", &["png", "webp"])
+            .add_filter("Videos", &["mp4"])
             .pick_file()
         else {
             return;
         };
-        match self.workspace.import_asset_image(&path) {
+        let video = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
+        let result = if video {
+            self.workspace.import_asset_video(&path)
+        } else {
+            self.workspace.import_asset_image(&path)
+        };
+        match result {
             Ok(_) => {
                 self.dirty = true;
                 self.status = format!("Imported asset {}", file_name(&path));
-                ui.notify_success("Image imported as asset (not placed on document)");
+                ui.notify_success(if video {
+                    "Video imported as asset"
+                } else {
+                    "Image imported as asset (not placed on document)"
+                });
             }
             Err(error) => self.show_error(ui, error),
         }
@@ -216,6 +231,7 @@ impl EditorApp {
             return Err("Selection has no pixels".into());
         }
         Ok(crate::project::Layer {
+            ai_metadata: source.ai_metadata.clone(),
             z: source.z,
             drawings: Default::default(),
             name: "Selection".into(),

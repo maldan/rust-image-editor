@@ -964,6 +964,7 @@ mod tests {
         let mut history = History::default();
         history.push(edit);
         let layers = vec![crate::project::Layer {
+            ai_metadata: None,
             z: 0.0,
             drawings: Default::default(),
             name: "L".into(),
@@ -1005,6 +1006,7 @@ mod tests {
             width: 128,
             height: 64,
             layers: vec![crate::project::Layer {
+                ai_metadata: None,
                 z: 0.0,
                 drawings: Default::default(),
                 name: "L".into(),

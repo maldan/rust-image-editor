@@ -10,7 +10,7 @@ pub(crate) enum RenameTarget {
 impl RenameTarget {
     pub fn title(&self) -> &'static str {
         match self {
-            Self::Layer { .. } => "Rename Layer",
+            Self::Layer { .. } => "Edit Layer",
             Self::Image(_) => "Rename Image",
             Self::Video(_) => "Rename Video",
             Self::Document(_) => "Rename Document",
@@ -62,7 +62,17 @@ impl EditorApp {
         let Some(name) = name.cloned() else {
             return;
         };
+        let ai_metadata = match &target {
+            RenameTarget::Layer { document_id, index } => self.workspace.documents.iter()
+                .find(|d| &d.id == document_id)
+                .and_then(|d| d.project.layers.get(*index))
+                .and_then(|l| l.ai_metadata.clone()),
+            _ => None,
+        };
         self.rename = Some(crate::ui::rename_dialog::RenameDialog {
+            prompt: ai_metadata.as_ref().map(|m| m.prompt.clone()).unwrap_or_default(),
+            model: ai_metadata.as_ref().map(|m| m.model.clone()).unwrap_or_default(),
+            original_ai_metadata: ai_metadata,
             target,
             original_name: name.clone(),
             name,
@@ -79,6 +89,27 @@ impl EditorApp {
             return;
         }
         let dialog = self.rename.take().unwrap();
+        if let RenameTarget::Layer { document_id, index } = &dialog.target {
+            let Some(layer) = self.workspace.documents.iter_mut()
+                .find(|d| &d.id == document_id)
+                .and_then(|d| d.project.layers.get_mut(*index)) else { return; };
+            if layer.name != dialog.original_name || layer.ai_metadata != dialog.original_ai_metadata {
+                return;
+            }
+            let metadata = if dialog.prompt.is_empty() && dialog.model.is_empty() {
+                None
+            } else {
+                Some(crate::project::AiMetadata { prompt: dialog.prompt, model: dialog.model })
+            };
+            if layer.name != name || layer.ai_metadata != metadata {
+                layer.name = name;
+                layer.ai_metadata = metadata;
+                self.history.clear_redo();
+                self.dirty = true;
+                self.status = "Layer updated".into();
+            }
+            return;
+        }
         let current = match &dialog.target {
             RenameTarget::Layer { document_id, index } => self
                 .workspace

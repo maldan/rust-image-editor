@@ -1,0 +1,499 @@
+{
+  "92": {
+    "inputs": {
+      "filename_prefix": "video/MiniMax_H3",
+      "format": "mp4",
+      "format.codec": "h264",
+      "format.codec.encoding": "auto",
+      "codec": "auto",
+      "video": [
+        "130",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "Save Video",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "119": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "120": {
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "121": {
+    "inputs": {
+      "samples": [
+        "125",
+        0
+      ],
+      "vae": [
+        "120",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "VAE Decode Audio",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "122": {
+    "inputs": {
+      "samples": [
+        "125",
+        0
+      ],
+      "vae": [
+        "119",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "123": {
+    "inputs": {
+      "sampler_name": "res_multistep"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "124": {
+    "inputs": {
+      "scheduler": "simple",
+      "steps": [
+        "142",
+        0
+      ],
+      "denoise": 1,
+      "model": [
+        "127",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "BasicScheduler",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "125": {
+    "inputs": {
+      "noise": [
+        "129",
+        0
+      ],
+      "guider": [
+        "126",
+        0
+      ],
+      "sampler": [
+        "123",
+        0
+      ],
+      "sigmas": [
+        "124",
+        0
+      ],
+      "latent_image": [
+        "136",
+        1
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "SamplerCustomAdvanced",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "126": {
+    "inputs": {
+      "model": [
+        "141",
+        0
+      ],
+      "conditioning": [
+        "136",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "Basic Guider",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "127": {
+    "inputs": {
+      "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "128": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "129": {
+    "inputs": {
+      "noise_seed": 159974470080976
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "130": {
+    "inputs": {
+      "fps": 24,
+      "bit_depth": 8,
+      "color_space": "sRGB",
+      "chroma_subsampling": "auto",
+      "codec": "none",
+      "images": [
+        "122",
+        0
+      ],
+      "audio": [
+        "121",
+        0
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "Create Video",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "131": {
+    "inputs": {
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "values.a": [
+        "132",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "Math Expression",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "132": {
+    "inputs": {
+      "value": 7
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Duration",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "136": {
+    "inputs": {
+      "prompt": [
+        "138",
+        0
+      ],
+      "width": [
+        "148",
+        0
+      ],
+      "height": [
+        "148",
+        1
+      ],
+      "length": [
+        "131",
+        1
+      ],
+      "ref_image_size": "match",
+      "clip": [
+        "128",
+        0
+      ],
+      "vae": [
+        "119",
+        0
+      ],
+      "audio_vae": [
+        "120",
+        0
+      ],
+      "ref_images.ref_image_0": [
+        "137",
+        0
+      ],
+      "ref_images.ref_image_1": [
+        "139",
+        0
+      ],
+      "ref_images.ref_image_2": [
+        "149",
+        0
+      ],
+      "ref_images.ref_image_3": [
+        "150",
+        0
+      ],
+      "ref_videos.ref_video_0": [
+        "151",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3ReferenceToVideo",
+    "_meta": {
+      "title": "MiniMax H3 Reference to Video",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "137": {
+    "inputs": {
+      "image": "director_2.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "LoadImage1",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "138": {
+    "inputs": {
+      "value": "integrated_multimodal_description: Use <Picture 1> and <Picture 2> as character references. The wolf girl from <Picture 1> stands by the pool, lowers her peace sign and smiles as the nude wolf girl from <Picture 2> walks up to her. They look at each other, the wolf girl gently pulls the other closer, they hug tightly, then lean in and kiss. Both characters stay consistent with their reference images, soft outdoor pool lighting.\n\noverall_soundscape: soft pool water ambience, light wind, gentle fabric rustling, soft breathing, quiet intimate atmosphere\n\nnon_diegetic_music: soft romantic anime-style piano and light synths\n\ndialogue: wolf girl says softly \"I missed you...\" wolf girl replies \"I missed you too...\" then they kiss"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "Prompt",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "139": {
+    "inputs": {
+      "image": "director_3.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "LoadImage2",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "141": {
+    "inputs": {
+      "switch": [
+        "146",
+        0
+      ],
+      "on_false": [
+        "127",
+        0
+      ],
+      "on_true": [
+        "145",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "If/Else Switch (model)",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "142": {
+    "inputs": {
+      "switch": [
+        "146",
+        0
+      ],
+      "on_false": [
+        "143",
+        0
+      ],
+      "on_true": [
+        "144",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "If/Else Switch (Steps)",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "143": {
+    "inputs": {
+      "value": 20
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Int (Full)",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "144": {
+    "inputs": {
+      "value": 4
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Int (Lightning LoRA)",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "145": {
+    "inputs": {
+      "lora_name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "strength_model": 1,
+      "model": [
+        "127",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "146": {
+    "inputs": {
+      "value": true
+    },
+    "class_type": "PrimitiveBoolean",
+    "_meta": {
+      "title": "Boolean (Enable Lightning LoRA)",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "147": {
+    "inputs": {
+      "upscale_method": "nearest-exact",
+      "megapixels": 0.9,
+      "resolution_steps": 32,
+      "image": [
+        "137",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "Megapixels",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "148": {
+    "inputs": {
+      "image": [
+        "147",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Get Image Size",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "149": {
+    "inputs": {
+      "image": "director_3.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "LoadImage3",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "150": {
+    "inputs": {
+      "image": "director_3.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "LoadImage4",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
+  "151": {
+    "inputs": {
+      "video": "0001-0015.mp4",
+      "force_rate": 0,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 0,
+      "skip_first_frames": 0,
+      "select_every_nth": 1,
+      "format": "AnimateDiff"
+    },
+    "class_type": "VHS_LoadVideo",
+    "_meta": {
+      "title": "LoadVideo1",
+      "aux_id": "kosinkadink/ComfyUI-VideoHelperSuite",
+      "ver": "4d907bee61e92c2e65af3bd6383a4e4d356126d1"
+    }
+  }
+}

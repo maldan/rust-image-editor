@@ -14,6 +14,7 @@ pub mod hsv_dialog;
 mod menu_bar;
 mod project_panel;
 pub mod rename_dialog;
+pub mod delete_dialog;
 mod unsaved_dialog;
 mod tool_options;
 mod tools_panel;
@@ -139,7 +140,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     let status_h = 24.0 * scale;
 
     let modal_open =
-        app.ai.open || app.ai_settings.is_some() || app.settings_dialog.is_some() || app.hsv.open || app.rename.is_some() || app.unsaved.is_some();
+        app.ai.open || app.ai_settings.is_some() || app.settings_dialog.is_some() || app.hsv.open || app.rename.is_some() || app.unsaved.is_some() || app.delete_prompt.is_some();
     ui.add_enabled(!modal_open, |ui| {
         ui.menu_bar(|ui| {
             menu_bar::draw(ui, app);
@@ -202,6 +203,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     hsv_dialog::draw(ui, app);
     rename_dialog::draw(ui, app);
     unsaved_dialog::draw(ui, app);
+    delete_dialog::draw(ui, app);
 }
 
 fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
@@ -232,17 +234,13 @@ fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
         app.show_video_preview(index);
     }
     if let Some(index) = action.delete_video {
-        if app.session.preview_asset.as_ref() == app.workspace.videos.get(index).map(|v| &v.id) {
-            app.close_asset_preview();
-        }
-        app.workspace.delete_video(index);
-        app.dirty = true;
+        app.prompt_library_delete(crate::workspace::LibraryKind::Video, index);
     }
     if let Some(index) = action.preview_asset {
         app.show_asset_preview(index);
     }
     if let Some(index) = action.delete_doc {
-        app.delete_document(index);
+        app.prompt_library_delete(crate::workspace::LibraryKind::Document, index);
     }
     if let Some(index) = action.clone_doc {
         app.duplicate_document(index);
@@ -251,11 +249,7 @@ fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
         app.place_asset(index, ui);
     }
     if let Some(index) = action.delete_asset {
-        if app.session.preview_asset.as_ref() == app.workspace.assets.get(index).map(|a| &a.id) {
-            app.close_asset_preview();
-        }
-        app.workspace.delete_asset(index);
-        app.dirty = true;
+        app.prompt_library_delete(crate::workspace::LibraryKind::Image, index);
     }
 }
 

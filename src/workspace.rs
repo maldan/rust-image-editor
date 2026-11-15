@@ -204,6 +204,8 @@ fn default_opacity() -> f32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct LayerMeta {
+    #[serde(default, rename = "aiMetadata", skip_serializing_if = "Option::is_none")]
+    ai_metadata: Option<crate::project::AiMetadata>,
     #[serde(default)]
     z: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -512,7 +514,7 @@ impl Workspace {
 
     pub fn add_video_named(&mut self, bytes: Vec<u8>, stem: &str) -> Result<usize, String> {
         if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
-            return Err("ComfyUI returned invalid MP4 data".into());
+            return Err("Invalid MP4 data".into());
         }
         let id = self.alloc_id("video");
         let index = self.videos.len();
@@ -824,6 +826,15 @@ impl Workspace {
         self.add_asset_image(name, decoded, byte_size)
     }
 
+    pub fn import_asset_video(&mut self, path: &Path) -> Result<usize, String> {
+        let bytes = fs::read(path).map_err(|e| format!("Cannot read video: {e}"))?;
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Video");
+        self.add_video_named(bytes, name)
+    }
+
     pub fn import_asset_rgba(
         &mut self,
         name: String,
@@ -1068,6 +1079,7 @@ impl Workspace {
                     None
                 };
                 layers.push(LayerMeta {
+                    ai_metadata: layer.ai_metadata.clone(),
                     z: layer.z,
                     timeline,
                     name: layer.name.clone(),
@@ -1356,6 +1368,7 @@ impl Workspace {
             let height = meta.height;
             for layer_meta in &meta.layers {
                 layers.push(Layer {
+                    ai_metadata: layer_meta.ai_metadata.clone(),
                     z: layer_meta.z,
                     drawings: Default::default(),
                     name: layer_meta.name.clone(),
@@ -1623,6 +1636,42 @@ mod tests {
         assert_eq!(loaded.active_document, index);
         assert_eq!(loaded.active().layers.len(), 1);
         assert_eq!(loaded.active().layers[0].pixels.read(0, 0, 0), [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn ai_metadata_roundtrip_deferred_save_as_optimize_and_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metadata.mgimg");
+        let copy = dir.path().join("copy.mgimg");
+        let _workspace = saved_workspace(&path);
+        let archive = MegaFile::open(&path).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&archive.read_all(MANIFEST_PATH).unwrap()).unwrap();
+        assert!(manifest["documents"][0]["layers"][0].get("aiMetadata").is_none());
+        let tiles_path = manifest["documents"][0]["layers"][0]["path"].as_str().unwrap().to_owned();
+        let tiles = archive.read_all(&tiles_path).unwrap();
+        drop(archive);
+        let mut workspace = Workspace::open(&path).unwrap();
+        let metadata = crate::project::AiMetadata {
+            prompt: "Лес\nна закате".into(), model: "chosen.safetensors".into(),
+        };
+        workspace.active_mut().layers[0].ai_metadata = Some(metadata.clone());
+        workspace.save(&path).unwrap();
+        let archive = MegaFile::open(&path).unwrap();
+        assert_eq!(archive.read_all(&tiles_path).unwrap(), tiles);
+        let manifest: serde_json::Value = serde_json::from_slice(&archive.read_all(MANIFEST_PATH).unwrap()).unwrap();
+        assert_eq!(manifest["documents"][0]["layers"][0]["aiMetadata"]["model"], metadata.model);
+        drop(archive);
+        let mut loaded = Workspace::open(&path).unwrap();
+        assert_eq!(loaded.active().layers[0].ai_metadata, Some(metadata.clone()));
+        loaded.save(&copy).unwrap();
+        loaded.optimize().unwrap();
+        let mut copied = Workspace::open(&copy).unwrap();
+        assert_eq!(copied.active().layers[0].ai_metadata, Some(metadata.clone()));
+        copied.ensure_document_loaded(0).unwrap();
+        assert_eq!(copied.active().layers[0].ai_metadata, Some(metadata));
+        copied.active_mut().layers[0].ai_metadata = None;
+        copied.save(&copy).unwrap();
+        assert!(Workspace::open(&copy).unwrap().active().layers[0].ai_metadata.is_none());
     }
 
     #[test]
@@ -2443,6 +2492,28 @@ mod tests {
             .unwrap();
         assert_eq!(ws.assets.len(), 1);
         assert!(ws.active().layers.is_empty());
+    }
+
+    #[test]
+    fn import_asset_video_adds_mp4_without_touching_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.mp4");
+        fs::write(&path, include_bytes!("../tests/fixtures/video-preview.mp4")).unwrap();
+        let mut ws = Workspace::default();
+        let layers = ws.active().layers.len();
+        let index = ws.import_asset_video(&path).unwrap();
+        assert_eq!(index, 0);
+        assert_eq!(ws.videos.len(), 1);
+        assert!(ws.videos[0].name.starts_with("clip "));
+        assert!(ws.videos[0].name.ends_with(".mp4"));
+        assert_eq!(ws.active().layers.len(), layers);
+        assert_eq!(
+            ws.videos[0].read().unwrap(),
+            include_bytes!("../tests/fixtures/video-preview.mp4")
+        );
+        assert!(ws.import_asset_video(&dir.path().join("missing.mp4")).is_err());
+        fs::write(dir.path().join("bad.mp4"), [0; 20]).unwrap();
+        assert!(ws.import_asset_video(&dir.path().join("bad.mp4")).is_err());
     }
 
     #[test]

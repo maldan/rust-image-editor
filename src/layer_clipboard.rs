@@ -8,6 +8,8 @@ const MAX_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 struct Payload {
+    #[serde(default, rename = "aiMetadata", skip_serializing_if = "Option::is_none")]
+    ai_metadata: Option<crate::project::AiMetadata>,
     #[serde(default)]
     z: f32,
     version: u32,
@@ -42,6 +44,7 @@ fn encode_kind(layer: &Layer, canvas_size: (u32, u32), fragment: bool) -> Result
         return Err("Layer is too large for the clipboard".into());
     }
     let payload = Payload {
+        ai_metadata: layer.ai_metadata.clone(),
         z: layer.z,
         version: 1,
         canvas_width: canvas_size.0,
@@ -93,6 +96,7 @@ pub fn decode(text: &str) -> Result<Option<CopiedLayer>, String> {
     }
     Ok(Some(CopiedLayer {
         layer: Layer {
+            ai_metadata: payload.ai_metadata,
             z: payload.z,
             drawings: Default::default(),
             name: payload.name,
@@ -133,6 +137,9 @@ mod tests {
         pixels.write(0, -100, -30, [1, 2, 3, 4]);
         pixels.write(0, 20000, 20000, [5, 6, 7, 255]);
         let layer = Layer {
+            ai_metadata: Some(crate::project::AiMetadata {
+                prompt: "Forest\nat sunset".into(), model: "chosen.safetensors".into(),
+            }),
             z: 0.0,
             drawings: Default::default(),
             name: "Слой 🎨".into(),
@@ -144,6 +151,7 @@ mod tests {
         let copied = decode(&text).unwrap().unwrap();
         assert_eq!(copied.canvas_size, (1000, 800));
         assert_eq!(copied.layer.name, layer.name);
+        assert_eq!(copied.layer.ai_metadata, layer.ai_metadata);
         assert_eq!(copied.layer.visible, layer.visible);
         assert_eq!(copied.layer.opacity, layer.opacity);
         assert_eq!(copied.layer.pixels, layer.pixels);
@@ -159,6 +167,7 @@ mod tests {
         assert!(decode("ordinary copied text").unwrap().is_none());
         assert!(decode(&format!("{PREFIX}broken")).is_err());
         let layer = Layer {
+            ai_metadata: None,
             z: 0.0,
             drawings: Default::default(),
             name: "empty".into(),

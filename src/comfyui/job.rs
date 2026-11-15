@@ -33,6 +33,15 @@ enum InputWorkflow {
         megapixels: f32,
         seconds: i32,
         turbo: bool,
+        last: Option<RgbaImage>,
+    },
+    MinimaxR2V {
+        prompt: String,
+        megapixels: f32,
+        seconds: i32,
+        lightning: bool,
+        extras: [Option<RgbaImage>; 3],
+        video: Option<Vec<u8>>,
     },
     Video {
         settings: super::VideoSettings,
@@ -163,6 +172,7 @@ impl Job {
     pub fn start_minimax_i2v(
         config: HostConfig,
         pixels: RgbaImage,
+        last: Option<RgbaImage>,
         prompt: String,
         megapixels: f32,
         seconds: i32,
@@ -178,6 +188,34 @@ impl Job {
                     megapixels,
                     seconds,
                     turbo,
+                    last,
+                },
+            },
+        )
+    }
+
+    pub fn start_minimax_r2v(
+        config: HostConfig,
+        pixels: RgbaImage,
+        extras: [Option<RgbaImage>; 3],
+        video: Option<Vec<u8>>,
+        prompt: String,
+        megapixels: f32,
+        seconds: i32,
+        lightning: bool,
+    ) -> Self {
+        Self::start_request(
+            config,
+            Request::Input {
+                pixels,
+                scale: 1.0,
+                workflow: InputWorkflow::MinimaxR2V {
+                    prompt,
+                    megapixels,
+                    seconds,
+                    lightning,
+                    extras,
+                    video,
                 },
             },
         )
@@ -428,6 +466,10 @@ fn check_cancel(cancel: &AtomicBool) -> Result<(), String> {
     }
 }
 
+fn encode_comfy_image(image: &RgbaImage) -> Result<Vec<u8>, String> {
+    crate::project::encode_webp_rgba_quality(image.as_raw(), image.width(), image.height(), 95)
+}
+
 fn run(
     config: HostConfig,
     request: Request,
@@ -453,7 +495,9 @@ fn run(
     let video = matches!(
         &request,
         Request::Input {
-            workflow: InputWorkflow::Video { .. } | InputWorkflow::MinimaxI2V { .. },
+            workflow: InputWorkflow::Video { .. }
+                | InputWorkflow::MinimaxI2V { .. }
+                | InputWorkflow::MinimaxR2V { .. },
             ..
         }
     );
@@ -486,10 +530,27 @@ fn run(
                 prompt,
                 megapixels,
                 seconds,
+                last,
                 ..
             } = &workflow
             {
                 super::video::validate_minimax_i2v(*megapixels, *seconds, prompt)?;
+                if let Some(last) = last {
+                    super::scaled_size(last.width(), last.height(), 1.0)?;
+                }
+            }
+            if let InputWorkflow::MinimaxR2V {
+                prompt,
+                megapixels,
+                seconds,
+                extras,
+                ..
+            } = &workflow
+            {
+                super::video::validate_minimax_i2v(*megapixels, *seconds, prompt)?;
+                for extra in extras.iter().flatten() {
+                    super::scaled_size(extra.width(), extra.height(), 1.0)?;
+                }
             }
             if let InputWorkflow::DrawCn { settings, control } = &workflow {
                 control.validate(settings)?;
@@ -517,9 +578,22 @@ fn run(
                 image::imageops::resize(&pixels, w, h, image::imageops::FilterType::Lanczos3)
             };
             check_cancel(cancel)?;
-            let png = crate::project::encode_png_rgba(pixels.as_raw(), w, h)?;
+            let bytes = encode_comfy_image(&pixels)?;
             progress.lock().unwrap().message = "Uploading input...".into();
-            let filename = client.upload(png)?;
+            let first_postfix = match &workflow {
+                InputWorkflow::Video {
+                    end_pixels: Some(_),
+                    ..
+                }
+                | InputWorkflow::MinimaxI2V { last: Some(_), .. } => "first",
+                InputWorkflow::MinimaxR2V { extras, .. }
+                    if extras.iter().any(Option::is_some) =>
+                {
+                    "ref1"
+                }
+                _ => "",
+            };
+            let filename = client.upload(bytes, first_postfix)?;
             check_cancel(cancel)?;
             match workflow {
                 InputWorkflow::Inpaint {
@@ -534,8 +608,8 @@ fn run(
                     };
                     check_cancel(cancel)?;
                     progress.lock().unwrap().message = "Uploading mask...".into();
-                    let png = crate::project::encode_png_rgba(mask.as_raw(), w, h)?;
-                    let mask_filename = client.upload_mask(png)?;
+                    let bytes = crate::project::encode_webp_rgba(mask.as_raw(), w, h)?;
+                    let mask_filename = client.upload(bytes, "mask")?;
                     check_cancel(cancel)?;
                     super::workflow::prepare_inpaint(
                         &filename,
@@ -551,13 +625,9 @@ fn run(
                 } => {
                     let end_filename = if let Some(end) = end_pixels {
                         progress.lock().unwrap().message = "Uploading end frame...".into();
-                        let png = crate::project::encode_png_rgba(
-                            end.as_raw(),
-                            end.width(),
-                            end.height(),
-                        )?;
+                        let bytes = encode_comfy_image(&end)?;
                         check_cancel(cancel)?;
-                        let filename = client.upload_video_end(png)?;
+                        let filename = client.upload(bytes, "last")?;
                         check_cancel(cancel)?;
                         Some(filename)
                     } else {
@@ -570,9 +640,59 @@ fn run(
                     megapixels,
                     seconds,
                     turbo,
-                } => super::video::prepare_minimax_i2v(
-                    &filename, &prompt, megapixels, seconds, turbo, seed,
-                )?,
+                    last,
+                } => {
+                    let last_filename = if let Some(last) = last {
+                        progress.lock().unwrap().message = "Uploading last frame...".into();
+                        let bytes = encode_comfy_image(&last)?;
+                        check_cancel(cancel)?;
+                        let filename = client.upload(bytes, "last")?;
+                        check_cancel(cancel)?;
+                        Some(filename)
+                    } else {
+                        None
+                    };
+                    super::video::prepare_minimax_i2v(
+                        &filename,
+                        last_filename.as_deref(),
+                        &prompt,
+                        megapixels,
+                        seconds,
+                        turbo,
+                        seed,
+                    )?
+                }
+                InputWorkflow::MinimaxR2V {
+                    prompt,
+                    megapixels,
+                    seconds,
+                    lightning,
+                    extras,
+                    video,
+                } => {
+                    let mut images = [Some(filename), None, None, None];
+                    for (i, extra) in extras.into_iter().enumerate() {
+                        if let Some(extra) = extra {
+                            progress.lock().unwrap().message =
+                                format!("Uploading reference {}...", i + 2);
+                            let bytes = encode_comfy_image(&extra)?;
+                            check_cancel(cancel)?;
+                            images[i + 1] =
+                                Some(client.upload(bytes, &format!("ref{}", i + 2))?);
+                            check_cancel(cancel)?;
+                        }
+                    }
+                    let video = if let Some(bytes) = video {
+                        progress.lock().unwrap().message = "Uploading reference video...".into();
+                        check_cancel(cancel)?;
+                        Some(client.upload_mp4(bytes, "")?)
+                    } else {
+                        None
+                    };
+                    super::video::prepare_minimax_r2v(
+                        images, video, &prompt, megapixels, seconds, lightning, seed,
+                    )?
+                }
                 InputWorkflow::Edit(prompt) => super::workflow::prepare(&filename, &prompt, seed)?,
                 InputWorkflow::MinimaxRedraw {
                     prompt,
@@ -706,32 +826,30 @@ mod tests {
                 let body = match step {
                     0 => {
                         assert!(headers.starts_with("POST /upload/image "));
-                        assert!(request.windows(8).any(|b| b == b"image/pn"));
+                        assert!(request.windows(10).any(|b| b == b"image/webp"));
                         assert!(
-                            String::from_utf8_lossy(&request)
-                                .contains("filename=\"mega-image-editor-input.png\"")
+                            String::from_utf8_lossy(&request).contains(&format!(
+                                "filename=\"mega-image-editor-input{}.webp\"",
+                                if between { "-first" } else { "" }
+                            ))
                         );
-                        br#"{"name":"input.png"}"#.to_vec()
+                        br#"{"name":"input.webp"}"#.to_vec()
                     }
                     1 if between => {
                         assert!(headers.starts_with("POST /upload/image "));
                         assert!(
                             String::from_utf8_lossy(&request)
-                                .contains("filename=\"mega-image-editor-video-end.png\"")
+                                .contains("filename=\"mega-image-editor-input-last.webp\"")
                         );
-                        let signature = b"\x89PNG\r\n\x1a\n";
-                        let offset = request
-                            .windows(signature.len())
-                            .position(|b| b == signature)
-                            .unwrap();
-                        let image = image::load_from_memory_with_format(
-                            &request[offset..],
-                            image::ImageFormat::Png,
-                        )
-                        .unwrap()
-                        .to_rgba8();
+                        let offset = request.windows(4).position(|b| b == b"RIFF").unwrap();
+                        let image = image::load_from_memory(&request[offset..])
+                            .unwrap()
+                            .to_rgba8();
                         assert_eq!(image.dimensions(), (128, 64));
-                        assert_eq!(image.get_pixel(0, 0).0, [25, 50, 75, 255]);
+                        let pixel = image.get_pixel(0, 0).0;
+                        for (channel, expected) in pixel.iter().zip([25_i16, 50, 75, 255]) {
+                            assert!((*channel as i16 - expected).abs() <= 4);
+                        }
                         br#"{"name":"end.png"}"#.to_vec()
                     }
                     step if step == 1 + usize::from(between) => {
@@ -744,7 +862,7 @@ mod tests {
                         } else {
                             ("269", "320:319", "value")
                         };
-                        assert_eq!(body["prompt"][first]["inputs"]["image"], "input.png");
+                        assert_eq!(body["prompt"][first]["inputs"]["image"], "input.webp");
                         assert_eq!(
                             body["prompt"][positive]["inputs"][prompt_key],
                             "Animate clouds"

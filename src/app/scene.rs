@@ -62,12 +62,13 @@ impl Scene for EditorApp {
             || self.hsv.open
             || self.rename.is_some()
             || self.unsaved.is_some()
+            || self.delete_prompt.is_some()
         {
             let mut blocked = FrameInput::default();
             blocked.key_escape = input.key_escape;
             blocked.key_save = self.ai.open && self.unsaved.is_none() && input.key_save;
             blocked.dt = input.dt;
-            if self.hsv.open || self.rename.is_some() {
+            if self.hsv.open || self.rename.is_some() || self.delete_prompt.is_some() {
                 blocked.key_enter = input.key_enter;
             }
             blocked
@@ -131,6 +132,7 @@ impl Scene for EditorApp {
             || self.hsv.open
             || self.rename.is_some()
             || self.unsaved.is_some()
+            || self.delete_prompt.is_some()
             || self
                 .video_preview
                 .as_ref()

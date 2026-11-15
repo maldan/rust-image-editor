@@ -149,6 +149,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             if ui.menu_item("minimax_i2v", "I2V...").clicked() {
                 app.open_ai_minimax_i2v();
             }
+            if ui.menu_item("minimax_r2v", "R2V...").clicked() {
+                app.open_ai_minimax_r2v();
+            }
         });
         ui.menu("sdxl", "SDXL", |ui| {
             ui.add_enabled(app.image_size.is_some(), |ui| {

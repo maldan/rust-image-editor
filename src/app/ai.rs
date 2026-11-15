@@ -24,6 +24,10 @@ impl EditorApp {
         self.open_ai_mode(AiMode::MinimaxI2V);
     }
 
+    pub fn open_ai_minimax_r2v(&mut self) {
+        self.open_ai_mode(AiMode::MinimaxR2V);
+    }
+
     pub fn open_ai_qwen_draw(&mut self) {
         self.open_ai_mode(AiMode::QwenDraw);
     }
@@ -78,11 +82,26 @@ impl EditorApp {
         self.ai.open = true;
         self.ai.preview_view = Default::default();
         self.ai.mode = mode;
-        if matches!(mode, AiMode::Video | AiMode::MinimaxI2V) {
+        if matches!(mode, AiMode::Video | AiMode::MinimaxI2V | AiMode::MinimaxR2V) {
             self.ai.document_id = self.workspace.active_doc().id.clone();
             self.ai.video_layer = None;
             self.ai.video_end_document = None;
             self.ai.video_end_layer = None;
+        }
+        if matches!(mode, AiMode::MinimaxI2V | AiMode::MinimaxR2V) {
+            let refs: &mut [crate::ui::ai_dialog::VideoRef] = if mode == AiMode::MinimaxI2V {
+                &mut self.ai.i2v_refs
+            } else {
+                &mut self.ai.r2v_refs
+            };
+            if refs[0].document_id.is_empty() {
+                let id = self.workspace.active_doc().id.clone();
+                for (i, reference) in refs.iter_mut().enumerate() {
+                    reference.document_id = id.clone();
+                    reference.layer = None;
+                    reference.enabled = i == 0;
+                }
+            }
         }
         if mode == AiMode::Animation {
             if let Some(animation) = self.project().animation.clone() {
@@ -104,6 +123,7 @@ impl EditorApp {
         }
         self.ai.preview = None;
         self.ai.result = None;
+        self.ai.result_metadata = None;
         self.ai.input_region = None;
         self.ai.anim_frames = None;
         self.ai.anim_play = 0.0;
@@ -131,7 +151,10 @@ impl EditorApp {
         if self.ai.job.is_some() {
             return;
         }
-        if matches!(self.ai.mode, AiMode::Video | AiMode::MinimaxI2V) {
+        if matches!(
+            self.ai.mode,
+            AiMode::Video | AiMode::MinimaxI2V | AiMode::MinimaxR2V
+        ) {
             self.start_video();
             return;
         }
@@ -169,8 +192,10 @@ impl EditorApp {
             self.ai.message = "Preparing workflow...".into();
             self.ai.preview = None;
             self.ai.result = None;
+            self.ai.result_metadata = None;
             self.ai.preview_dirty = false;
             self.ai.fraction = None;
+            self.ai.result_metadata = Some(self.ai.generation_metadata());
             self.ai.job = Some(if self.ai.mode == AiMode::QwenDraw {
                 crate::comfyui::Job::start_qwen_draw(config, self.ai.draw_settings.clone())
             } else if self.ai.mode == AiMode::AnimeDraw {
@@ -238,8 +263,10 @@ impl EditorApp {
         self.ai.message = "Preparing input…".into();
         self.ai.preview = None;
         self.ai.result = None;
+        self.ai.result_metadata = None;
         self.ai.preview_dirty = false;
         self.ai.fraction = None;
+        self.ai.result_metadata = Some(self.ai.generation_metadata());
         self.ai.job = Some(if let Some(mask) = mask {
             crate::comfyui::Job::start_inpaint(
                 config,
@@ -322,6 +349,14 @@ impl EditorApp {
         let Some(config) = self.ai.config.clone() else {
             return;
         };
+        if self.ai.mode == AiMode::MinimaxR2V {
+            self.start_minimax_r2v(config);
+            return;
+        }
+        if self.ai.mode == AiMode::MinimaxI2V {
+            self.start_minimax_i2v(config);
+            return;
+        }
         let image = match self.video_input() {
             Ok(image) => image,
             Err(error) => {
@@ -329,29 +364,6 @@ impl EditorApp {
                 return;
             }
         };
-        if self.ai.mode == AiMode::MinimaxI2V {
-            if let Err(error) = crate::comfyui::validate_minimax_i2v(
-                self.ai.minimax_i2v_megapixels,
-                self.ai.video_settings.seconds,
-                &self.ai.video_settings.prompt,
-            ) {
-                self.ai.message = error;
-                return;
-            }
-            self.ai.message = "Preparing video input…".into();
-            self.ai.fraction = None;
-            self.ai.preview = None;
-            self.ai.preview_dirty = false;
-            self.ai.job = Some(crate::comfyui::Job::start_minimax_i2v(
-                config,
-                image,
-                self.ai.video_settings.prompt.clone(),
-                self.ai.minimax_i2v_megapixels,
-                self.ai.video_settings.seconds,
-                self.ai.minimax_i2v_turbo,
-            ));
-            return;
-        }
         let settings = match self.video_settings() {
             Ok(settings) => settings,
             Err(error) => {
@@ -382,6 +394,119 @@ impl EditorApp {
             image,
             end_image,
             settings,
+        ));
+    }
+
+    fn start_minimax_i2v(&mut self, config: crate::comfyui::HostConfig) {
+        if let Err(error) = crate::comfyui::validate_minimax_i2v(
+            self.ai.minimax_i2v_megapixels,
+            self.ai.video_settings.seconds,
+            &self.ai.video_settings.prompt,
+        ) {
+            self.ai.message = error;
+            return;
+        }
+        self.ai.i2v_refs[0].enabled = true;
+        let first = match self.video_frame_input(
+            &self.ai.i2v_refs[0].document_id.clone(),
+            self.ai.i2v_refs[0].layer,
+        ) {
+            Ok(image) => image,
+            Err(error) => {
+                self.ai.message = error;
+                return;
+            }
+        };
+        let last = if self.ai.i2v_refs[1].enabled {
+            match self.video_frame_input(
+                &self.ai.i2v_refs[1].document_id.clone(),
+                self.ai.i2v_refs[1].layer,
+            ) {
+                Ok(image) => Some(image),
+                Err(error) => {
+                    self.ai.message = error;
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        self.ai.message = "Preparing video input…".into();
+        self.ai.fraction = None;
+        self.ai.preview = None;
+        self.ai.preview_dirty = false;
+        self.ai.job = Some(crate::comfyui::Job::start_minimax_i2v(
+            config,
+            first,
+            last,
+            self.ai.video_settings.prompt.clone(),
+            self.ai.minimax_i2v_megapixels,
+            self.ai.video_settings.seconds,
+            self.ai.minimax_i2v_turbo,
+        ));
+    }
+
+    fn start_minimax_r2v(&mut self, config: crate::comfyui::HostConfig) {
+        if let Err(error) = crate::comfyui::validate_minimax_i2v(
+            self.ai.minimax_i2v_megapixels,
+            self.ai.video_settings.seconds,
+            &self.ai.video_settings.prompt,
+        ) {
+            self.ai.message = error;
+            return;
+        }
+        self.ai.r2v_refs[0].enabled = true;
+        let mut images = [None, None, None, None];
+        for i in 0..4 {
+            if i > 0 && !self.ai.r2v_refs[i].enabled {
+                continue;
+            }
+            let document = self.ai.r2v_refs[i].document_id.clone();
+            let layer = self.ai.r2v_refs[i].layer;
+            match self.video_frame_input(&document, layer) {
+                Ok(image) => images[i] = Some(image),
+                Err(error) => {
+                    self.ai.message = error;
+                    return;
+                }
+            }
+        }
+        let Some(first) = images[0].take() else {
+            self.ai.message = "Choose reference 1".into();
+            return;
+        };
+        let extras = [images[1].take(), images[2].take(), images[3].take()];
+        let video = if self.ai.r2v_video {
+            let id = self.ai.r2v_video_id.clone();
+            match self.workspace.videos.iter().find(|v| v.id == id) {
+                Some(asset) => match asset.read() {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) => {
+                        self.ai.message = error;
+                        return;
+                    }
+                },
+                None => {
+                    self.ai.message = "Choose a reference video".into();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        self.ai.message = "Preparing video input…".into();
+        self.ai.fraction = None;
+        self.ai.preview = None;
+        self.ai.preview_dirty = false;
+        self.ai.job = Some(crate::comfyui::Job::start_minimax_r2v(
+            config,
+            first,
+            extras,
+            video,
+            self.ai.video_settings.prompt.clone(),
+            self.ai.minimax_i2v_megapixels,
+            self.ai.video_settings.seconds,
+            self.ai.minimax_r2v_lightning,
         ));
     }
 
@@ -416,6 +541,7 @@ impl EditorApp {
                 }
             }
         };
+        self.ai.result_metadata = Some(self.ai.generation_metadata());
         self.ai.anim_apply = (start, end);
         self.ai.anim_frames = None;
         self.ai.anim_play = 0.0;
@@ -576,6 +702,7 @@ impl EditorApp {
         project.add_layer();
         let layer = &mut project.layers[project.active_layer];
         layer.name = name.clone();
+        layer.ai_metadata = self.ai.result_metadata.clone();
         layer.drawings = drawings;
         layer.pixels = pixels;
         self.workspace.documents[index].mark_thumb_dirty();
@@ -749,6 +876,7 @@ impl EditorApp {
         if let Some(job) = self.ai.job.take() {
             job.cancel();
             self.ai.result = None;
+            self.ai.result_metadata = None;
             self.ai.fraction = None;
             self.ai.message = "Cancelled locally; remote stop requested in background".into();
         }
@@ -759,6 +887,7 @@ impl EditorApp {
         self.ai.open = false;
         self.ai.catalog_load = None;
         self.ai.result = None;
+        self.ai.result_metadata = None;
         self.ai.input_region = None;
         self.ai.preview = None;
         self.ai.anim_frames = None;
@@ -809,6 +938,11 @@ impl EditorApp {
             };
         match insertion {
             Ok(()) => {
+                if !onto_current {
+                    let metadata = self.ai.result_metadata.clone();
+                    let project = self.workspace.active_mut();
+                    project.layers[project.active_layer].ai_metadata = metadata;
+                }
                 let needs_fit = self.image_size.is_none();
                 if let Some(before) = before {
                     let after = self.project().layers[layer_index].pixels.clone();
@@ -912,10 +1046,10 @@ impl EditorApp {
                     self.ai.frame_decode = Some(crate::video::FrameDecode::start(bytes, width, height));
                     return;
                 }
-                let stem = if self.ai.mode == AiMode::MinimaxI2V {
-                    "Minimax H3 I2V"
-                } else {
-                    "Ltx 2.3 I2V"
+                let stem = match self.ai.mode {
+                    AiMode::MinimaxI2V => "Minimax H3 I2V",
+                    AiMode::MinimaxR2V => "Minimax H3 R2V",
+                    _ => "Ltx 2.3 I2V",
                 };
                 match self.workspace.add_video_named(bytes, stem) {
                     Ok(index) => {

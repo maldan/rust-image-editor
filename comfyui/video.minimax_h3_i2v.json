@@ -51,6 +51,17 @@
       "ver": "0.45.0"
     }
   },
+  "121": {
+    "inputs": {
+      "image": "transparent_rgb_gaming_mouse.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "LoadImage2",
+      "cnr_id": "comfy-core",
+      "ver": "0.45.0"
+    }
+  },
   "105_11": {
     "inputs": {
       "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
@@ -223,7 +234,8 @@
       "length": ["105_107", 1],
       "clip": ["105_13", 0],
       "vae": ["105_11", 0],
-      "first_frame": ["114", 0]
+      "first_frame": ["114", 0],
+      "last_frame": ["121", 0]
     },
     "class_type": "MiniMaxH3ImageToVideo",
     "_meta": {
