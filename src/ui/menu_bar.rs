@@ -93,7 +93,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         });
         ui.menu("animation", "Animation", |ui| {
             let enabled =
-                app.project().animation.is_some() && app.session.preview_asset.is_none();
+                app.project().animation.is_some()
+                    && app.session.preview_asset.is_none()
+                    && !app.session.preview_graph;
             if ui
                 .menu_item_enabled("ltx_animation", "Ltx 2.3...", enabled)
                 .clicked()

@@ -94,7 +94,7 @@ impl Scene for EditorApp {
         self.session.viewport_size = viewport;
         self.note_frame(self.input.dt);
         if self.input.key_escape { self.finish_deformation(true); }
-        self.poll_nodes(ui);
+        self.poll_all_graphs(ui);
         self.poll_ai(ui);
         self.poll_video(ui);
         if !self.nodes.visible {
@@ -151,8 +151,7 @@ impl Scene for EditorApp {
                 .video_preview
                 .as_ref()
                 .is_some_and(crate::video::Playback::needs_repaint)
-            || self.nodes.run.is_some()
-            || self.nodes.preview_job.is_some()
+            || self.graphs_need_repaint()
             || self.video_poster.is_some()
             || self.video_trim.job.is_some()
             || (self.session.preview_asset.is_none() && self.session.selection.is_some())
@@ -166,6 +165,12 @@ impl Scene for EditorApp {
         queue: &wgpu::Queue,
         renderer: &mut mega_ui::wgpu::UiRenderer,
     ) {
+        if self.nodes.live_dirty {
+            if let Some(preview) = &self.nodes.live_display {
+                renderer.set_texture_rgba(device, queue, crate::nodes::LIVE_PREVIEW_TEXTURE, &preview.pixels, crate::nodes::CELL, crate::nodes::CELL, "live node preview");
+            }
+            self.nodes.live_dirty = false;
+        }
         if self.nodes.atlas_dirty {
             renderer.set_texture_rgba(device, queue, crate::nodes::PREVIEW_TEXTURE, &self.nodes.atlas, crate::nodes::ATLAS, crate::nodes::ATLAS, "node previews");
             self.nodes.atlas_dirty = false;

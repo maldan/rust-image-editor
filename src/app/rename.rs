@@ -6,6 +6,7 @@ pub(crate) enum RenameTarget {
     Image(String),
     Video(String),
     Document(String),
+    Graph(String),
 }
 impl RenameTarget {
     pub fn title(&self) -> &'static str {
@@ -14,6 +15,7 @@ impl RenameTarget {
             Self::Image(_) => "Rename Image",
             Self::Video(_) => "Rename Video",
             Self::Document(_) => "Rename Document",
+            Self::Graph(_) => "Rename Graph",
         }
     }
 }
@@ -58,6 +60,13 @@ impl EditorApp {
                 .iter()
                 .find(|d| &d.id == id)
                 .map(|d| &d.name),
+            RenameTarget::Graph(id) => self
+                .workspace
+                .graphs
+                .entries
+                .iter()
+                .find(|g| g.id == *id)
+                .map(|g| &g.name),
         };
         let Some(name) = name.cloned() else {
             return;
@@ -136,6 +145,13 @@ impl EditorApp {
                 .iter_mut()
                 .find(|d| &d.id == id)
                 .map(|d| &mut d.name),
+            RenameTarget::Graph(id) => self
+                .workspace
+                .graphs
+                .entries
+                .iter_mut()
+                .find(|g| g.id == *id)
+                .map(|g| &mut g.name),
         };
         let Some(current) = current else {
             return;

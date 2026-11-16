@@ -3,7 +3,7 @@ use mega_ui::{Rect, TextStyle, Ui};
 
 use crate::app::RenameTarget;
 use crate::host::{FrameInput, THUMB_ATLAS};
-use crate::workspace::{LibraryKind, THUMB_VIEW, Workspace};
+use crate::workspace::{LibraryKind, THUMB_VIEW, ThumbDrag, Workspace};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LibraryGroup {
@@ -37,10 +37,15 @@ pub struct LibraryAction {
     pub import_clipboard: bool,
     pub new_document: bool,
     pub new_animation: bool,
+    pub new_graph: bool,
+    pub switch_graph: Option<usize>,
+    pub clone_graph: Option<usize>,
+    pub delete_graph: Option<usize>,
     pub switch_doc: Option<usize>,
     pub delete_doc: Option<usize>,
     pub clone_doc: Option<usize>,
-    pub add_document_to_nodes: Option<String>,
+    pub add_document_to_graph: Option<String>,
+    pub add_asset_to_graph: Option<String>,
     pub place_asset: Option<usize>,
     pub delete_asset: Option<usize>,
     pub preview_asset: Option<usize>,
@@ -53,7 +58,8 @@ pub fn draw(
     ui: &mut Ui,
     workspace: &mut Workspace,
     input: &FrameInput,
-    canvas: Rect,
+    drop_target: Rect,
+    graph_mode: bool,
     drag: &mut Option<LibraryDrag>,
 ) -> LibraryAction {
     let mut action = LibraryAction::default();
@@ -102,11 +108,17 @@ pub fn draw(
             }
         });
     });
+    if ui.button("graph_new", "New Graph").clicked() {
+        action.new_graph = true;
+    }
     ui.space(8.0);
 
     let mut switch_doc: Option<usize> = None;
     let mut delete_doc: Option<usize> = None;
     let mut clone_doc: Option<usize> = None;
+    let mut switch_graph: Option<usize> = None;
+    let mut clone_graph: Option<usize> = None;
+    let mut delete_graph: Option<usize> = None;
     let mut place_asset: Option<usize> = None;
     let mut delete_asset: Option<usize> = None;
     let mut preview_asset: Option<usize> = None;
@@ -140,7 +152,8 @@ pub fn draw(
                     &format!("Images ({asset_count})"),
                     true,
                     |ui| {
-                        let mut start_drag: Option<(usize, Vec2)> = None;
+                        let mut start_drag: Option<ThumbDrag> = None;
+                        let mut start_origin = input.mouse_pos;
                         for index in 0..asset_count {
                             let id = format!("asset_{}", workspace.assets[index].id);
                             let name = workspace.assets[index].name.clone();
@@ -160,7 +173,8 @@ pub fn draw(
                                     );
                                     draw_thumb(ui, workspace, index, thumb.rect);
                                     if row_input && thumb.hovered && input.mouse_pressed {
-                                        start_drag = Some((index, input.mouse_pos));
+                                        start_drag = Some(ThumbDrag::Image(index));
+                                        start_origin = input.mouse_pos;
                                     }
                                     // The thumb slot takes the press, so the row frame does not see that click.
                                     if row_input && thumb.active && input.mouse_released {
@@ -179,6 +193,10 @@ pub fn draw(
                                     }
                                     if ui.menu_item("delete", "Delete").clicked() {
                                         delete_asset = Some(index);
+                                    }
+                                    if ui.menu_item("add_to_graph", "Add to Graph").clicked() {
+                                        action.add_asset_to_graph =
+                                            Some(workspace.assets[index].id.clone());
                                     }
                                 },
                             );
@@ -204,8 +222,8 @@ pub fn draw(
                                 }
                             }
                         }
-                        if let Some((index, origin)) = start_drag {
-                            workspace.begin_asset_drag(index, origin);
+                        if let Some(kind) = start_drag {
+                            workspace.begin_thumb_drag(kind, start_origin);
                         }
                     },
                 );
@@ -314,6 +332,8 @@ pub fn draw(
                         |ui| {
                             let doc_count = workspace.documents.len();
                             let can_delete = doc_count > 1;
+                            let mut start_drag: Option<ThumbDrag> = None;
+                            let mut start_origin = input.mouse_pos;
                             for index in 0..doc_count {
                                 if workspace.documents[index].project.animation.is_some()
                                     != (group == LibraryGroup::AnimationDocument)
@@ -344,6 +364,10 @@ pub fn draw(
                                             Vec2::splat(thumb_size),
                                         );
                                         draw_thumb(ui, workspace, asset_count + index, thumb.rect);
+                                        if row_input && thumb.hovered && input.mouse_pressed {
+                                            start_drag = Some(ThumbDrag::Document(index));
+                                            start_origin = input.mouse_pos;
+                                        }
                                         if row_input && thumb.active && input.mouse_released {
                                             thumb_release = true;
                                         }
@@ -367,8 +391,8 @@ pub fn draw(
                                         {
                                             delete_doc = Some(index);
                                         }
-                                        if ui.menu_item("add_to_nodes", "Add to Nodes").clicked() {
-                                            action.add_document_to_nodes = Some(workspace.documents[index].id.clone());
+                                        if ui.menu_item("add_to_graph", "Add to Graph").clicked() {
+                                            action.add_document_to_graph = Some(workspace.documents[index].id.clone());
                                         }
                                     },
                                 );
@@ -389,8 +413,13 @@ pub fn draw(
                                     && !dragging
                                 {
                                     pick = Some(id);
-                                    switch_doc = Some(index);
+                                    if !workspace.asset_dragging {
+                                        switch_doc = Some(index);
+                                    }
                                 }
+                            }
+                            if let Some(kind) = start_drag {
+                                workspace.begin_thumb_drag(kind, start_origin);
                             }
                         },
                     );
@@ -404,6 +433,38 @@ pub fn draw(
                 );
             },
         );
+        ui.tree_node_icon_open(
+            "graphs_root",
+            "folder",
+            &format!("Graphs ({})", workspace.graphs.entries.len()),
+            true,
+            |ui| {
+                for (index, graph) in workspace.graphs.entries.iter().enumerate() {
+                    let id = format!("graph_{}", graph.id);
+                    let selected = workspace.tree_selected.as_deref() == Some(id.as_str());
+                    let clicked = item_row(ui, &id, selected, &graph.name, "Graph", meta_style, |ui| {
+                        let thumb = ui.area(&format!("graph_thumb_{index}"), Vec2::splat(thumb_size));
+                        ui.fill_rect(thumb.rect, [0.12, 0.12, 0.14, 1.0]);
+                        thumb.rect
+                    });
+                    ui.context_menu(&format!("graph_menu_{index}"), clicked.response.hovered, |ui| {
+                        if ui.menu_item("duplicate", "Duplicate").clicked() {
+                            clone_graph = Some(index);
+                        }
+                        if ui.menu_item("edit", "Edit").clicked() {
+                            action.rename = Some(RenameTarget::Graph(graph.id.clone()));
+                        }
+                        if ui.menu_item("delete", "Delete").clicked() {
+                            delete_graph = Some(index);
+                        }
+                    });
+                    if row_input && clicked.response.clicked() && !dragging {
+                        pick = Some(id);
+                        switch_graph = Some(index);
+                    }
+                }
+            },
+        );
     });
     if let Some(id) = pick {
         sel = Some(id);
@@ -411,18 +472,25 @@ pub fn draw(
     workspace.tree_selected = sel;
 
     // Promote press → drag after threshold; ghost follows cursor.
-    if let (Some(index), Some(origin)) = (workspace.asset_drag, workspace.asset_drag_origin) {
+    if let (Some(kind), Some(origin)) = (workspace.asset_drag, workspace.asset_drag_origin) {
         if input.mouse_down {
             if (input.mouse_pos - origin).length() > 6.0 * ui.scale() {
                 workspace.asset_dragging = true;
             }
             if workspace.asset_dragging {
-                if workspace.assets.get(index).is_some() {
+                let cell = match kind {
+                    ThumbDrag::Image(index) => workspace.assets.get(index).map(|_| index),
+                    ThumbDrag::Document(index) => workspace
+                        .documents
+                        .get(index)
+                        .map(|_| asset_count + index),
+                };
+                if let Some(cell) = cell {
                     let ghost = mega_ui::Rect::from_min_size(
                         input.mouse_pos - Vec2::splat(thumb_size * 0.5),
                         Vec2::splat(thumb_size),
                     );
-                    draw_thumb(ui, workspace, index, ghost);
+                    draw_thumb(ui, workspace, cell, ghost);
                 }
                 ui.request_repaint();
             }
@@ -430,17 +498,33 @@ pub fn draw(
     }
 
     if input.mouse_released {
-        if let Some(asset) = workspace.asset_drag {
+        if let Some(kind) = workspace.asset_drag {
             let clicked = !workspace.asset_dragging
                 && workspace
                     .asset_drag_origin
                     .is_some_and(|origin| input.mouse_pos.distance(origin) < 6.0 * ui.scale());
-            let dropped = workspace.asset_dragging && canvas.contains(input.mouse_pos);
+            let dropped = workspace.asset_dragging && drop_target.contains(input.mouse_pos);
             workspace.clear_asset_drag();
             if dropped {
-                place_asset = Some(asset);
+                match kind {
+                    ThumbDrag::Image(index) if graph_mode => {
+                        if let Some(asset) = workspace.assets.get(index) {
+                            action.add_asset_to_graph = Some(asset.id.clone());
+                        }
+                    }
+                    ThumbDrag::Image(index) => place_asset = Some(index),
+                    ThumbDrag::Document(index) if graph_mode => {
+                        if let Some(doc) = workspace.documents.get(index) {
+                            action.add_document_to_graph = Some(doc.id.clone());
+                        }
+                    }
+                    ThumbDrag::Document(_) => {}
+                }
             } else if clicked {
-                preview_asset = Some(asset);
+                match kind {
+                    ThumbDrag::Image(index) => preview_asset = Some(index),
+                    ThumbDrag::Document(index) => switch_doc = Some(index),
+                }
             }
         }
     }
@@ -449,6 +533,9 @@ pub fn draw(
         *drag = None;
     }
     action.switch_doc = switch_doc;
+    action.switch_graph = switch_graph;
+    action.clone_graph = clone_graph;
+    action.delete_graph = delete_graph;
     action.preview_asset = preview_asset;
     action.delete_doc = delete_doc;
     action.clone_doc = clone_doc;
@@ -579,6 +666,16 @@ mod tests {
         input: &FrameInput,
         drag: &mut Option<LibraryDrag>,
     ) -> (LibraryAction, mega_ui::UiOutput) {
+        library_frame_on(ui, workspace, input, drag, false)
+    }
+
+    fn library_frame_on(
+        ui: &mut Ui,
+        workspace: &mut Workspace,
+        input: &FrameInput,
+        drag: &mut Option<LibraryDrag>,
+        graph_mode: bool,
+    ) -> (LibraryAction, mega_ui::UiOutput) {
         ui.begin_frame(mega_ui::UiInput {
             viewport: Vec2::new(800.0, 1800.0),
             mouse_pos: input.mouse_pos,
@@ -598,6 +695,7 @@ mod tests {
                     workspace,
                     input,
                     Rect::from_min_size(Vec2::new(500.0, 0.0), Vec2::new(300.0, 1600.0)),
+                    graph_mode,
                     drag,
                 );
             })
@@ -857,12 +955,88 @@ mod tests {
         let action = library_frame(&mut ui, &mut workspace, &input, &mut drag).0;
         assert_eq!(action.place_asset, Some(0));
         assert!(action.reorder.is_none() && action.preview_asset.is_none());
+        assert!(action.add_asset_to_graph.is_none());
+    }
+
+    fn drag_thumb_onto_workspace(
+        workspace: &mut Workspace,
+        thumb_index: usize,
+        graph_mode: bool,
+    ) -> LibraryAction {
+        let mut ui = Ui::new();
+        ui.load_builtin_icons();
+        let mut drag = None;
+        let mut output = mega_ui::UiOutput::default();
+        for _ in 0..4 {
+            output = library_frame_on(
+                &mut ui,
+                workspace,
+                &FrameInput::default(),
+                &mut drag,
+                graph_mode,
+            )
+            .1;
+        }
+        let source = output
+            .draw_list
+            .iter()
+            .filter(|c| c.kind == 1.0 && c.tex == THUMB_ATLAS)
+            .nth(thumb_index)
+            .unwrap()
+            .rect;
+        let mut input = FrameInput::default();
+        input.mouse_pos = (source.min + source.max) * 0.5;
+        input.mouse_pressed = true;
+        input.mouse_down = true;
+        library_frame_on(&mut ui, workspace, &input, &mut drag, graph_mode);
+        input.mouse_pressed = false;
+        input.mouse_pos = Vec2::new(600.0, 400.0);
+        library_frame_on(&mut ui, workspace, &input, &mut drag, graph_mode);
+        input.mouse_down = false;
+        input.mouse_released = true;
+        library_frame_on(&mut ui, workspace, &input, &mut drag, graph_mode).0
+    }
+
+    #[test]
+    fn image_thumbnail_drop_on_graph_adds_to_graph() {
+        let mut workspace = Workspace::default();
+        workspace
+            .import_asset_rgba("Image".into(), &[1, 2, 3, 255], 1, 1)
+            .unwrap();
+        let id = workspace.assets[0].id.clone();
+        let action = drag_thumb_onto_workspace(&mut workspace, 0, true);
+        assert_eq!(action.add_asset_to_graph.as_deref(), Some(id.as_str()));
+        assert!(action.place_asset.is_none() && action.preview_asset.is_none());
+    }
+
+    #[test]
+    fn document_thumbnail_drop_on_graph_adds_to_graph() {
+        let mut workspace = Workspace::default();
+        workspace
+            .import_asset_rgba("Image".into(), &[1, 2, 3, 255], 1, 1)
+            .unwrap();
+        let id = workspace.documents[0].id.clone();
+        let action = drag_thumb_onto_workspace(&mut workspace, 1, true);
+        assert_eq!(action.add_document_to_graph.as_deref(), Some(id.as_str()));
+        assert!(action.switch_doc.is_none() && action.place_asset.is_none());
+    }
+
+    #[test]
+    fn document_thumbnail_drop_on_canvas_does_not_place() {
+        let mut workspace = Workspace::default();
+        workspace
+            .import_asset_rgba("Image".into(), &[1, 2, 3, 255], 1, 1)
+            .unwrap();
+        let action = drag_thumb_onto_workspace(&mut workspace, 1, false);
+        assert!(action.add_document_to_graph.is_none());
+        assert!(action.place_asset.is_none());
+        assert!(action.switch_doc.is_none());
     }
 
     #[test]
     fn library_context_actions_target_their_row_without_switching_or_previewing() {
         for kind in 0..4 {
-            for item in 0..if kind >= 2 { 4 } else { 2 } {
+            for item in 0..if kind >= 2 { 4 } else if kind == 0 { 3 } else { 2 } {
                 let mut workspace = Workspace::default();
                 workspace
                     .import_asset_rgba("Image".into(), &[1, 2, 3, 255], 1, 1)
@@ -968,8 +1142,10 @@ mod tests {
                     action.place_asset,
                     action.reorder
                 );
-                if kind >= 2 && item == 3 {
-                    assert_eq!(action.add_document_to_nodes.as_deref(), Some(workspace.documents[kind - 2].id.as_str()));
+                if kind == 0 && item == 2 {
+                    assert_eq!(action.add_asset_to_graph.as_deref(), Some(workspace.assets[0].id.as_str()));
+                } else if kind >= 2 && item == 3 {
+                    assert_eq!(action.add_document_to_graph.as_deref(), Some(workspace.documents[kind - 2].id.as_str()));
                 } else if kind >= 2 && item == 0 {
                     assert_eq!(action.clone_doc, Some(kind - 2));
                 } else if item == usize::from(kind >= 2) {
@@ -1011,6 +1187,7 @@ mod tests {
                     &mut workspace,
                     &FrameInput::default(),
                     Rect::from_min_size(Vec2::ZERO, Vec2::splat(200.0)),
+                    false,
                     &mut None,
                 );
             });

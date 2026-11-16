@@ -14,7 +14,8 @@ use crate::project::{Layer, Project, encode_webp_rgba};
 const MANIFEST_PATH: &str = "/manifest.json";
 const MANIFEST_KIND: &str = "mega-image-editor/manifest+json";
 const IMAGE_KIND: &str = "image/webp";
-const FORMAT_VERSION: u32 = 9;
+const FORMAT_VERSION: u32 = 10;
+const GRAPH_KIND: &str = "mega-image-editor/graph+json";
 pub const THUMB_SIZE: u32 = 84;
 const THUMB_ATLAS_COLS: u32 = 16;
 /// On-screen library thumb size (logical px before UI scale).
@@ -157,6 +158,8 @@ pub struct ImageAsset {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
+    /// Hash of `pixels` after load/import. Graph previews use this instead of hashing every frame.
+    pub(crate) pixels_hash: u64,
     /// Source file length. Clipboard imports keep the decoded buffer length.
     pub byte_size: u64,
     /// Packed RGBA thumb `THUMB_SIZE x THUMB_SIZE`.
@@ -349,6 +352,16 @@ struct WorkspaceManifest {
     documents: Vec<DocumentMeta>,
     #[serde(default)]
     videos: Vec<VideoMeta>,
+    #[serde(default)]
+    graphs: Vec<GraphMeta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GraphMeta {
+    id: String,
+    name: String,
+    version: u32,
+    path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -419,17 +432,23 @@ fn empty_thumb() -> Vec<u8> {
     vec![0u8; (THUMB_SIZE * THUMB_SIZE * 4) as usize]
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Copy, Debug)]
+pub enum ThumbDrag {
+    Image(usize),
+    Document(usize),
+}
+
 pub struct Workspace {
     pub prompt_presets: Vec<PromptPreset>,
     pub assets: Vec<ImageAsset>,
     pub videos: Vec<VideoAsset>,
     pub documents: Vec<Document>,
+    pub graphs: crate::nodes::Graphs,
     pub active_document: usize,
     pub path: Option<PathBuf>,
     pub tree_selected: Option<String>,
-    /// Asset index being dragged onto the canvas (grab thumb and drop).
-    pub asset_drag: Option<usize>,
+    /// Thumbnail drag from the library onto the workspace (canvas or graph).
+    pub asset_drag: Option<ThumbDrag>,
     pub asset_drag_origin: Option<glam::Vec2>,
     /// True after pointer moved past drag threshold.
     pub asset_dragging: bool,
@@ -452,6 +471,7 @@ struct SavedResources {
     videos: HashSet<String>,
     layers: HashMap<String, (Option<u64>, Option<String>)>,
     previews: HashMap<String, u64>,
+    graphs: HashMap<String, u64>,
     manifest: Vec<u8>,
 }
 
@@ -462,6 +482,7 @@ impl Default for Workspace {
             assets: Vec::new(),
             videos: Vec::new(),
             documents: Vec::new(),
+            graphs: Default::default(),
             active_document: 0,
             path: None,
             tree_selected: None,
@@ -617,14 +638,17 @@ impl Workspace {
                 asset.name
             ));
         }
+        let pixels = rgba.into_raw();
+        let pixels_hash = crate::safe_save::fingerprint(&pixels);
         if let Some(saved) = self
             .saved
             .as_mut()
             .and_then(|saved| saved.assets.get_mut(&deferred.path))
         {
-            saved.2 = Some(crate::safe_save::fingerprint(rgba.as_raw()));
+            saved.2 = Some(pixels_hash);
         }
-        asset.pixels = rgba.into_raw();
+        asset.pixels = pixels;
+        asset.pixels_hash = pixels_hash;
         asset.deferred = None;
         Ok(())
     }
@@ -779,8 +803,8 @@ impl Workspace {
         self.thumb_uploaded_revision = self.thumb_packed_revision;
     }
 
-    pub fn begin_asset_drag(&mut self, index: usize, origin: glam::Vec2) {
-        self.asset_drag = Some(index);
+    pub fn begin_thumb_drag(&mut self, kind: ThumbDrag, origin: glam::Vec2) {
+        self.asset_drag = Some(kind);
         self.asset_drag_origin = Some(origin);
         self.asset_dragging = false;
     }
@@ -860,6 +884,7 @@ impl Workspace {
             return Err("Image is empty".into());
         }
         let pixels = rgba.into_raw();
+        let pixels_hash = crate::safe_save::fingerprint(&pixels);
         let thumb = make_thumb(&pixels, width, height);
         let id = self.alloc_id("img");
         self.assets.push(ImageAsset {
@@ -868,6 +893,7 @@ impl Workspace {
             width,
             height,
             pixels,
+            pixels_hash,
             byte_size,
             thumb,
             deferred: None,
@@ -1107,6 +1133,24 @@ impl Workspace {
                 preview: Some(preview),
             });
         }
+        let mut graph_metas = Vec::new();
+        for entry in &self.graphs.entries {
+            let path = format!("/graphs/{}.json", entry.id);
+            let empty = crate::nodes::NodeEditor::default();
+            let editor = entry.editor.as_ref().unwrap_or(&empty);
+            let bytes = crate::nodes::encode_graph(editor)?;
+            let hash = crate::safe_save::fingerprint(&bytes);
+            if previous.and_then(|saved| saved.graphs.get(&path)) != Some(&hash) {
+                files.push(WriteFile::new(path.clone(), GRAPH_KIND, bytes));
+            }
+            next.graphs.insert(path.clone(), hash);
+            graph_metas.push(GraphMeta {
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+                version: crate::nodes::GRAPH_VERSION,
+                path,
+            });
+        }
         let manifest = WorkspaceManifest {
             prompt_presets: self.prompt_presets.clone(),
             format: "mega-image-editor".into(),
@@ -1117,6 +1161,7 @@ impl Workspace {
             assets: asset_metas,
             documents: doc_metas,
             videos: video_metas,
+            graphs: graph_metas,
         };
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)
             .map_err(|e| format!("Cannot encode manifest: {e}"))?;
@@ -1166,6 +1211,7 @@ impl Workspace {
             let mut paths = HashSet::from([MANIFEST_PATH.to_string()]);
             paths.extend(manifest.videos.iter().map(|v| v.path.clone()));
             paths.extend(manifest.videos.iter().filter_map(|v| v.preview.clone()));
+            paths.extend(manifest.graphs.iter().map(|graph| graph.path.clone()));
             let mut replacements = HashMap::new();
             for (asset, preview) in manifest.assets.iter_mut().zip(&saved_previews.assets) {
                 paths.insert(asset.path.clone());
@@ -1352,6 +1398,7 @@ impl Workspace {
                 width: meta.width,
                 height: meta.height,
                 pixels: Vec::new(),
+                pixels_hash: 0,
                 byte_size: byte_size.size,
                 thumb,
                 deferred: Some(DeferredAsset {
@@ -1452,12 +1499,49 @@ impl Workspace {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let mut graphs = crate::nodes::Graphs {
+            entries: Vec::new(),
+            active: 0,
+            next_id: 1,
+        };
+        for meta in &manifest.graphs {
+            if meta.version != crate::nodes::GRAPH_VERSION {
+                return Err(format!("Unsupported graph version {}", meta.version));
+            }
+            let bytes = source
+                .0
+                .read_all(&meta.path)
+                .map_err(|e| format!("Graph '{}' missing: {e}", meta.name))?;
+            let file: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("Invalid graph '{}': {e}", meta.name))?;
+            let file_version = file
+                .get("version")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| format!("Graph '{}' has no version", meta.name))?;
+            if file_version != meta.version as u64 {
+                return Err(format!(
+                    "Graph '{}' version does not match the manifest",
+                    meta.name
+                ));
+            }
+            let editor = crate::nodes::decode_graph(&bytes)?;
+            bump_graph_id(&meta.id, &mut graphs.next_id);
+            graphs.entries.push(crate::nodes::GraphEntry {
+                id: meta.id.clone(),
+                name: meta.name.clone(),
+                editor: Some(editor),
+            });
+        }
+        if graphs.entries.is_empty() {
+            graphs = Default::default();
+        }
         let mut workspace = Self {
             prompt_presets: manifest.prompt_presets.clone(),
             assets,
             videos,
             active_document,
             documents,
+            graphs,
             path: Some(path.to_path_buf()),
             tree_selected,
             asset_drag: None,
@@ -1510,13 +1594,21 @@ impl Workspace {
                 );
             }
         }
+        for (entry, meta) in workspace.graphs.entries.iter().zip(&manifest.graphs) {
+            let empty = crate::nodes::NodeEditor::default();
+            let editor = entry.editor.as_ref().unwrap_or(&empty);
+            let bytes = crate::nodes::encode_graph(editor).unwrap_or_default();
+            saved
+                .graphs
+                .insert(meta.path.clone(), crate::safe_save::fingerprint(&bytes));
+        }
         workspace.saved = Some(saved);
         Ok(workspace)
     }
 }
 
 fn check_manifest(manifest: &WorkspaceManifest) -> Result<(), String> {
-    if manifest.format == "mega-image-editor" && matches!(manifest.version, 5 | 6 | 7 | 8 | 9) {
+    if manifest.format == "mega-image-editor" && matches!(manifest.version, 5 | 6 | 7 | 8 | 9 | 10) {
         for doc in &manifest.documents {
             if doc.layers.iter().any(|l| !l.z.is_finite() || !(-10.0..=10.0).contains(&l.z)) {
                 return Err("Invalid layer depth".into());
@@ -1538,9 +1630,24 @@ fn check_manifest(manifest: &WorkspaceManifest) -> Result<(), String> {
                 }
             }
         }
+        let mut ids = HashSet::new();
+        for graph in &manifest.graphs {
+            if graph.id.is_empty() || graph.path.is_empty() || graph.name.is_empty() {
+                return Err("Invalid graph".into());
+            }
+            if !ids.insert(graph.id.clone()) {
+                return Err("Duplicate graph".into());
+            }
+        }
         Ok(())
     } else {
         Err("Unsupported project format or version".into())
+    }
+}
+
+fn bump_graph_id(id: &str, next: &mut u64) {
+    if let Some(n) = id.strip_prefix("g_").and_then(|s| s.parse::<u64>().ok()) {
+        *next = (*next).max(n + 1);
     }
 }
 
@@ -1708,7 +1815,7 @@ mod tests {
         assert_eq!(manifest["prompt_presets"][0]["negative"], "negative");
         assert_eq!(manifest["prompt_presets"][0]["kind"], "image");
         assert_eq!(manifest["prompt_presets"][1]["kind"], "video");
-        assert_eq!(manifest["version"], 9);
+        assert_eq!(manifest["version"], 10);
         drop(archive);
         let unchanged = fs::read(&path).unwrap();
         workspace.save(&path).unwrap();
@@ -2411,7 +2518,7 @@ mod tests {
             [10, 20, 30, 255]
         );
         let archive = MegaFile::open(&path).unwrap();
-        assert_eq!(archive.list_all().unwrap().len(), 3); // Manifest, one live layer, document preview.
+        assert_eq!(archive.list_all().unwrap().len(), 4); // Manifest, layer, document preview, graph.
         drop(archive);
         workspace.save(&path).unwrap();
         assert_eq!(

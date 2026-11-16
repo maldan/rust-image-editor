@@ -33,6 +33,7 @@ Save As / первое сохранение пишет новый архив ц�
 /previews/assets/{id}.webp              миниатюра 84×84
 /previews/videos/{id}.webp              постер видео (если есть)
 /previews/documents/{id}.webp           миниатюра документа
+/graphs/{id}.json                       шаблон графа (ссылки, без пикселей)
 ```
 
 Индексы слоёв `{i}` — позиция в массиве `layers` манифеста (0-based).
@@ -45,15 +46,16 @@ Kind: `mega-image-editor/manifest+json`
 ```json
 {
   "format": "mega-image-editor",
-  "version": 8,
+  "version": 10,
   "active_document": 0,
   "assets": [ /* AssetMeta */ ],
   "videos": [ /* VideoMeta */ ],
-  "documents": [ /* DocumentMeta */ ]
+  "documents": [ /* DocumentMeta */ ],
+  "graphs": [ /* GraphMeta */ ]
 }
 ```
 
-Пишется версия **8**. Читаются **5, 6, 7, 8**.
+Пишется версия **10**. Читаются **5–10**. Старые файлы без `graphs` открываются с пустым списком (в UI остаётся Graph 1).
 
 ### AssetMeta
 
@@ -87,6 +89,17 @@ Kind: `mega-image-editor/manifest+json`
 `type` и наличие `animation` должны совпадать. У animation у каждого слоя
 обязан быть `timeline`.
 
+### GraphMeta
+
+| поле | смысл |
+|------|--------|
+| `id`, `name` | идентификатор (`g_1`) и имя в Library |
+| `version` | схема json графа (сейчас 1); дублируется в корне файла |
+| `path` | обычно `/graphs/{id}.json` |
+
+Файл графа — шаблон: ноды (`kind` + `data`), линки, вид. Пиксели не хранятся,
+только id документа/ассета. Слой в v1 не пишется.
+
 ### LayerMeta
 
 | поле | смысл |
@@ -106,9 +119,10 @@ Kind: `mega-image-editor/manifest+json`
 Workspace (один .mgimg)
 ├── assets[]     → /assets + /previews/assets
 ├── videos[]     → /videos + /previews/videos
-└── documents[]  → DocumentMeta в манифесте
-    ├── image      → только .tiles на слой
-    └── animation  → .tiles + .timeline на слой + Animation в манифесте
+├── documents[]  → DocumentMeta в манифесте
+│   ├── image      → только .tiles на слой
+│   └── animation  → .tiles + .timeline на слой + Animation в манифесте
+└── graphs[]     → /graphs/{id}.json
 ```
 
 Метаданные документов и слоёв живут в манифесте; тяжёлые байты — в отдельных
@@ -140,7 +154,8 @@ layers, previews и манифест (если он изменился). Нез�
 | version | статус |
 |---------|--------|
 | 5, 6 | читаются; Optimize/Save могут сжать сырые слои и дописать previews |
-| 7, 8 | читаются; запись всегда 8 |
+| 7, 8, 9 | читаются |
+| 10 | запись; graphs в манифесте |
 
 Несовместимый `format` или `version` — отказ открыть файл.
 

@@ -10,6 +10,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     }
     let area = ui.area("canvas_view", size);
     app.session.canvas_rect = area.rect;
+    app.session.workspace_rect = area.rect;
 
     // Background only — image / checker / brush / selection are drawn by canvas wgpu.
     ui.fill_rect(app.session.canvas_rect, [0.075, 0.08, 0.095, 1.0]);

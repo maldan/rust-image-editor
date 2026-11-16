@@ -478,7 +478,7 @@ pub fn prepare_minimax_refs(
         }
     }
     patch(&mut graph, "RefImageSize", "image", size_filename.into())?;
-    patch(&mut graph, "Prompt", "value", prompt.into())?;
+    patch(&mut graph, "Prompt", "value", expand_picture_mentions(prompt).into())?;
     patch(
         &mut graph,
         "ResizeMegapixels",
@@ -488,6 +488,24 @@ pub fn prepare_minimax_refs(
     patch(&mut graph, "Sampler", "seed", seed.into())?;
     let output = node_id(&graph, "SaveImage")?;
     Ok((graph, output))
+}
+
+/// Expand shorthand only in the submitted workflow; keep the edited prompt intact.
+fn expand_picture_mentions(prompt: &str) -> String {
+    let mut result = String::with_capacity(prompt.len());
+    let mut chars = prompt.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '@' && chars.peek().is_some_and(|next| next.is_ascii_digit()) {
+            result.push_str("<Picture ");
+            while chars.peek().is_some_and(|next| next.is_ascii_digit()) {
+                result.push(chars.next().unwrap());
+            }
+            result.push('>');
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 fn patch(graph: &mut Value, title: &str, key: &str, value: Value) -> Result<(), String> {
@@ -1236,5 +1254,14 @@ mod tests {
         assert!(validate_minimax_refs(4.0, "x", true, None).is_ok());
         assert!(validate_minimax_refs(0.5, "x", true, None).is_err());
         assert!(validate_minimax_refs(4.0, "   ", true, None).is_err());
+    }
+
+    #[test]
+    fn minimax_refs_expands_picture_mentions_only_in_submitted_prompt() {
+        let prompt = "Возьми @1, соедини с @2; @12 и @1. Обычные @ и <Picture 3>.";
+        let (graph, _) = prepare_minimax_refs([None, None, None, None], "size.webp", prompt, 4.0, 0).unwrap();
+        let id = node_id(&graph, "Prompt").unwrap();
+        assert_eq!(graph[&id]["inputs"]["value"], "Возьми <Picture 1>, соедини с <Picture 2>; <Picture 12> и <Picture 1>. Обычные @ и <Picture 3>.");
+        assert_eq!(prompt, "Возьми @1, соедини с @2; @12 и @1. Обычные @ и <Picture 3>.");
     }
 }

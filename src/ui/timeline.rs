@@ -3,7 +3,9 @@ use glam::Vec2;
 use mega_ui::{LayoutOpts, Rect, ScrollAxes, Ui};
 
 pub fn visible(app: &EditorApp) -> bool {
-    app.project().animation.is_some() && app.session.preview_asset.is_none()
+    app.project().animation.is_some()
+        && app.session.preview_asset.is_none()
+        && !app.session.preview_graph
 }
 
 #[cfg(test)]

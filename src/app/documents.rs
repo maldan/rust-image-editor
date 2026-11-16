@@ -12,6 +12,7 @@ impl EditorApp {
     pub fn new_project(&mut self, ui: &mut Ui) {
         self.animation_clock = None;
         self.close_asset_preview();
+        self.close_graph_view();
         self.video_poster = None;
         self.video_trim = Default::default();
         self.cancel_transform();
@@ -401,7 +402,10 @@ impl EditorApp {
             return false;
         };
         self.commit_transform();
-        match self.workspace.save(&path) {
+        self.stash_active_graph();
+        let result = self.workspace.save(&path);
+        self.unstash_active_graph();
+        match result {
             Ok(()) => {
                 self.dirty = false;
                 self.status = format!("Saved {}", file_name(&path));
@@ -433,10 +437,11 @@ impl EditorApp {
         let mut workspace = Workspace::open(path)?;
         workspace.ensure_document_loaded(workspace.active_document)?;
         self.close_asset_preview();
+        self.close_graph_view();
         self.video_poster = None;
         self.cancel_transform();
         self.workspace = workspace;
-        self.nodes = Default::default();
+        self.install_active_graph();
         self.video_trim = Default::default();
         self.ai.presets = Default::default();
         self.refresh_image()?;
@@ -500,6 +505,7 @@ impl EditorApp {
             return;
         }
         self.close_asset_preview();
+        self.close_graph_view();
         if index == self.workspace.active_document {
             return;
         }
@@ -518,6 +524,7 @@ impl EditorApp {
         self.animation_clock = None;
         self.cancel_transform();
         self.close_asset_preview();
+        self.close_graph_view();
         let name = format!("Document {}", self.workspace.documents.len() + 1);
         self.workspace.create_document(&name);
         self.history.discard_project_edits();
@@ -572,6 +579,7 @@ impl EditorApp {
 
     pub fn place_asset(&mut self, asset_index: usize, ui: &mut Ui) {
         self.close_asset_preview();
+        self.close_graph_view();
         self.cancel_transform();
         match self.workspace.place_asset_on_active(asset_index) {
             Ok(()) => {

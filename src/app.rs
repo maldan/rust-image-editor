@@ -25,6 +25,7 @@ mod animation;
 mod documents;
 mod history;
 mod layers;
+mod graphs;
 mod nodes;
 mod rename;
 mod video;
@@ -299,6 +300,7 @@ impl EditorApp {
             self.session.preview_document_view =
                 Some((self.session.pan, self.session.zoom, self.session.rotation));
         }
+        self.session.preview_graph = false;
         self.session.preview_asset = Some(id);
         self.session.preview_asset_dirty = true;
         self.session.rotation = 0.0;

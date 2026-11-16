@@ -45,7 +45,7 @@ pub fn default_dock() -> DockState {
         ),
         DockNode::split_h(
             0.76,
-            DockNode::leaf(&["Workspace", "Nodes"]),
+            DockNode::leaf(&["Workspace"]),
             DockNode::leaf(&["Layers", "Canvas"]),
         ),
     ))
@@ -151,21 +151,22 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
 
         let dock_size = Vec2::new(viewport.x, (viewport.y - menu_h - status_h).max(1.0));
         let mut dock = std::mem::replace(&mut app.dock, DockState::new(DockNode::leaf(&["tmp"])));
+        let graph_mode = app.session.preview_graph;
         let preview = app.session.preview_asset.is_some();
-        context_panel(&mut dock.root, preview);
-        camera_dock(&mut dock.root, !preview && app.project().animation.is_some());
-        let hidden_canvas = if preview { hide_canvas_tabs(&mut dock.root) } else { Vec::new() };
+        context_panel(&mut dock.root, preview || graph_mode);
+        camera_dock(&mut dock.root, !preview && !graph_mode && app.project().animation.is_some());
+        let hidden_canvas = if preview || graph_mode { hide_canvas_tabs(&mut dock.root) } else { Vec::new() };
         app.nodes.visible = false;
         app.session.canvas_rect = mega_ui::Rect { min: Vec2::ZERO, max: Vec2::ZERO };
         ui.dock_space("main", dock_size, &mut dock, |ui, tab| {
-            if tab == "Nodes" {
-                app.nodes.visible = true;
-                nodes::draw(ui, app);
-                return;
-            }
             if tab == "Workspace" {
-                canvas::draw(ui, app);
-                if timeline::visible(app) { timeline::draw(ui, app); }
+                if graph_mode {
+                    app.nodes.visible = true;
+                    nodes::draw(ui, app);
+                } else {
+                    canvas::draw(ui, app);
+                    if timeline::visible(app) { timeline::draw(ui, app); }
+                }
                 return;
             }
             let size = ui.available_size().max(Vec2::splat(1.0));
@@ -183,21 +184,32 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                     }
                 }
                 "Library" => {
-                    let action = assets_panel::draw(ui, &mut app.workspace, &app.input, app.session.canvas_rect, &mut app.library_drag);
+                    let action = assets_panel::draw(
+                        ui,
+                        &mut app.workspace,
+                        &app.input,
+                        app.session.workspace_rect,
+                        graph_mode,
+                        &mut app.library_drag,
+                    );
                     apply_library(ui, app, action);
                 }
                 "Camera" => camera_panel::draw(ui, app),
                 "Canvas" => canvas_panel::draw(ui, app),
                 "Layers" | "Properties" => {
                     if app.session.preview_asset.is_some() { asset_properties::draw(ui, app); }
-                    else { project_panel::draw(ui, app); }
+                    else if !graph_mode { project_panel::draw(ui, app); }
                 }
                 _ => {}
             });
         });
         restore_canvas_tabs(&mut dock.root, hidden_canvas);
         app.dock = dock;
-        if preview != app.session.preview_asset.is_some() { ui.request_repaint(); }
+        if preview != app.session.preview_asset.is_some()
+            || graph_mode != app.session.preview_graph
+        {
+            ui.request_repaint();
+        }
 
         ui.status_bar(|ui| {
             ui.label(&app.status.clone());
@@ -216,19 +228,47 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     delete_dialog::draw(ui, app);
 }
 
+fn add_to_graph(ui: &mut Ui, app: &mut EditorApp, kind: crate::nodes::NodeKind, ok: &str) {
+    // Place the new node near the visible centre without changing pan or zoom.
+    let center = app.session.viewport_size * 0.5;
+    let zoom = app.nodes.space.zoom.max(1e-4);
+    let offset = Vec2::splat((app.nodes.nodes.len() % 5) as f32 * 35.0);
+    app.nodes.space.context_world = Some((center - app.nodes.space.pan) / zoom + offset);
+    let before = app.nodes.nodes.len();
+    app.nodes.add(kind);
+    app.status = if app.nodes.nodes.len() > before {
+        ok.into()
+    } else {
+        app.nodes.message.clone()
+    };
+    ui.request_repaint();
+}
+
 fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
-    if let Some(id) = action.add_document_to_nodes {
+    if let Some(id) = action.add_document_to_graph {
         if app.workspace.documents.iter().any(|doc| doc.id == id) {
-            // Place the new node near the visible centre without changing pan or zoom.
-            let center = app.session.viewport_size * 0.5;
-            let zoom = app.nodes.space.zoom.max(1e-4);
-            let offset = Vec2::splat((app.nodes.nodes.len() % 5) as f32 * 35.0);
-            app.nodes.space.context_world = Some((center - app.nodes.space.pan) / zoom + offset);
-            let before = app.nodes.nodes.len();
-            app.nodes.add(crate::nodes::NodeKind::Image(crate::nodes::Source { document: id, layer: None }));
-            if app.nodes.nodes.len() > before { app.status = "Document added to Nodes".into(); }
-            else { app.status = app.nodes.message.clone(); }
-            ui.request_repaint();
+            add_to_graph(
+                ui,
+                app,
+                crate::nodes::NodeKind::ImageDocument(crate::nodes::Source {
+                    document: id,
+                    layer: None,
+                }),
+                "Document added to Graph",
+            );
+            app.show_graph(app.workspace.graphs.active);
+        }
+        return;
+    }
+    if let Some(id) = action.add_asset_to_graph {
+        if app.workspace.assets.iter().any(|asset| asset.id == id) {
+            add_to_graph(
+                ui,
+                app,
+                crate::nodes::NodeKind::ImageAsset { id },
+                "Asset added to Graph",
+            );
+            app.show_graph(app.workspace.graphs.active);
         }
         return;
     }
@@ -254,6 +294,18 @@ fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
     }
     if action.new_animation {
         app.new_animation();
+    }
+    if action.new_graph {
+        app.new_graph();
+    }
+    if let Some(index) = action.switch_graph {
+        app.show_graph(index);
+    }
+    if let Some(index) = action.clone_graph {
+        app.clone_graph(index);
+    }
+    if let Some(index) = action.delete_graph {
+        app.delete_graph(index);
     }
     if let Some(index) = action.switch_doc {
         app.switch_document(index);
@@ -285,6 +337,24 @@ fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
 mod context_tests {
     use super::*;
     #[test]
+    fn workspace_dock_has_no_graph_tabs() {
+        let dock = default_dock();
+        fn tabs(node: &DockNode) -> Vec<String> {
+            match node {
+                DockNode::Leaf { tabs, .. } => tabs.clone(),
+                DockNode::Split { first, second, .. } => {
+                    let mut all = tabs(first);
+                    all.extend(tabs(second));
+                    all
+                }
+            }
+        }
+        let tabs = tabs(&dock.root);
+        assert!(tabs.iter().any(|tab| tab == "Workspace"));
+        assert!(tabs.iter().any(|tab| tab == "Library"));
+        assert!(!tabs.iter().any(|tab| tab == "Graph" || tab == "Graphs"));
+    }
+    #[test]
     fn add_document_to_nodes_uses_requested_document_and_preserves_view() {
         let mut app = EditorApp::default();
         let source = app.workspace.active_doc().id.clone();
@@ -295,13 +365,33 @@ mod context_tests {
         app.nodes.space.zoom = 0.75;
         let mut ui = Ui::new();
         apply_library(&mut ui, &mut app, LibraryAction {
-            add_document_to_nodes: Some(source.clone()), ..Default::default()
+            add_document_to_graph: Some(source.clone()), ..Default::default()
         });
         assert_eq!(app.workspace.active_doc().id, active);
         assert_eq!(app.nodes.space.pan, Vec2::new(100.0, 50.0));
         assert_eq!(app.nodes.space.zoom, 0.75);
         assert!(matches!(&app.nodes.nodes[0].kind,
-            crate::nodes::NodeKind::Image(s) if s.document == source && s.layer.is_none()));
+            crate::nodes::NodeKind::ImageDocument(s) if s.document == source && s.layer.is_none()));
+        assert!(!app.nodes.space.fit_view);
+    }
+    #[test]
+    fn add_asset_to_graph_uses_requested_asset_and_preserves_view() {
+        let mut app = EditorApp::default();
+        app.workspace
+            .import_asset_rgba("Ref".into(), &[1, 2, 3, 255].repeat(2), 2, 1)
+            .unwrap();
+        let id = app.workspace.assets[0].id.clone();
+        app.session.viewport_size = Vec2::new(1000.0, 800.0);
+        app.nodes.space.pan = Vec2::new(40.0, -20.0);
+        app.nodes.space.zoom = 1.25;
+        let mut ui = Ui::new();
+        apply_library(&mut ui, &mut app, LibraryAction {
+            add_asset_to_graph: Some(id.clone()), ..Default::default()
+        });
+        assert_eq!(app.nodes.space.pan, Vec2::new(40.0, -20.0));
+        assert_eq!(app.nodes.space.zoom, 1.25);
+        assert!(matches!(&app.nodes.nodes[0].kind,
+            crate::nodes::NodeKind::ImageAsset { id: asset } if *asset == id));
         assert!(!app.nodes.space.fit_view);
     }
     #[test]

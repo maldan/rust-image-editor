@@ -10,6 +10,9 @@ use crate::editing::{
 pub struct DocumentSession {
     pub(crate) camera_selected: bool,
     pub(crate) canvas_rect: Rect,
+    /// Last Workspace pane rect. Library drop uses this because the Library tab
+    /// is built before Workspace, so the current frame's canvas is still empty.
+    pub(crate) workspace_rect: Rect,
     pub(crate) viewport_size: Vec2,
     pub(crate) pan: Vec2,
     pub(crate) zoom: f32,
@@ -35,6 +38,7 @@ pub struct DocumentSession {
     pub(crate) preview_asset: Option<String>,
     pub(crate) preview_asset_dirty: bool,
     pub(crate) preview_document_view: Option<(Vec2, f32, f32)>,
+    pub(crate) preview_graph: bool,
     pub(crate) selection_brush_erase: bool,
     pub(crate) lasso_points: Vec<Vec2>,
     pub(crate) selection_brush_last: Option<Vec2>,
@@ -56,6 +60,7 @@ impl Default for DocumentSession {
         Self {
             camera_selected: false,
             canvas_rect: Rect::from_min_size(Vec2::ZERO, Vec2::ZERO),
+            workspace_rect: Rect::from_min_size(Vec2::ZERO, Vec2::ZERO),
             viewport_size: Vec2::ZERO,
             pan: Vec2::ZERO,
             zoom: 1.0,
@@ -81,6 +86,7 @@ impl Default for DocumentSession {
             preview_asset: None,
             preview_asset_dirty: false,
             preview_document_view: None,
+            preview_graph: false,
             selection_brush_erase: false,
             lasso_points: Vec::new(),
             selection_brush_last: None,
