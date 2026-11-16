@@ -71,10 +71,15 @@ impl EditorApp {
 
     pub fn merge_layer_down(&mut self) {
         let index = self.project().active_layer;
+        self.merge_layer_down_at(index);
+    }
+
+    pub fn merge_layer_down_at(&mut self, index: usize) {
         if index == 0 || index >= self.project().layers.len() {
             return;
         }
         self.commit_transform();
+        self.project_mut().active_layer = index;
         if !self.history.merge_down(self.workspace.active_mut()) {
             return;
         }

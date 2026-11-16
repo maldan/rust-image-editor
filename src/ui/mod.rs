@@ -222,6 +222,9 @@ fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
     if action.import {
         app.import_image(ui);
     }
+    if action.import_clipboard {
+        app.import_clipboard_image(ui);
+    }
     if action.new_document {
         app.new_document();
     }

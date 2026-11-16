@@ -57,22 +57,6 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                 app.invert_selection();
             }
         });
-        ui.add_enabled(app.session.selection.is_some(), |ui| {
-            if ui.menu_item("cut_selection", "Cut (Ctrl+X)").clicked() {
-                app.cut_selection(ui);
-            }
-        });
-        ui.add_enabled(!app.project().layers.is_empty(), |ui| {
-            if ui.menu_item("copy_layer", "Copy (Ctrl+C)").clicked() {
-                app.copy_shortcut(ui);
-            }
-        });
-        if ui.menu_item("paste_layer", "Paste (Ctrl+V)").clicked() {
-            app.paste_clipboard(ui);
-        }
-        if ui.menu_item("paste_image", "Paste Image").clicked() {
-            app.paste_image(ui);
-        }
         ui.separator();
         if ui.menu_item("editor_settings", "Settings…").clicked() {
             app.open_editor_settings();

@@ -144,7 +144,7 @@ fn layer_clipboard_moves_between_documents_without_clipping_and_undoes() {
     source.name = "Reference".into();
     source.visible = false;
     source.opacity = 0.25;
-    let text = app.copy_layer_text(0).unwrap();
+    let copied = app.copy_layer_data(0).unwrap();
     let index = app.workspace.create_document("Target");
     app.switch_document(index);
     app.project_mut()
@@ -152,7 +152,7 @@ fn layer_clipboard_moves_between_documents_without_clipping_and_undoes() {
         .unwrap();
     app.refresh_image().unwrap();
     let destination = app.project().layers[0].pixels.clone();
-    app.insert_copied_layer(crate::layer_clipboard::decode(&text).unwrap().unwrap());
+    app.insert_copied_layer(copied);
     assert_eq!(app.image_size, Some((1, 1)));
     assert_eq!(app.project().active_layer, 1);
     let pasted = &app.project().layers[1];
@@ -179,9 +179,9 @@ fn pasting_layer_into_empty_document_restores_source_canvas_and_undoes() {
         .project_mut()
         .import_rgba(&[1, 2, 3, 255].repeat(8), 4, 2)
         .unwrap();
-    let text = source.copy_layer_text(0).unwrap();
+    let copied = source.copy_layer_data(0).unwrap();
     let mut target = EditorApp::default();
-    target.insert_copied_layer(crate::layer_clipboard::decode(&text).unwrap().unwrap());
+    target.insert_copied_layer(copied);
     assert_eq!(target.image_size, Some((4, 2)));
     assert_eq!(target.project().layers.len(), 1);
     target.undo();
@@ -217,8 +217,7 @@ fn selection_cut_and_copy_paste_onto_a_new_layer_and_start_transform() {
         4,
         2,
     ));
-    let text = app.selection_clipboard_text().unwrap();
-    let copied = crate::layer_clipboard::decode(&text).unwrap().unwrap();
+    let copied = app.selection_clipboard_data().unwrap();
     assert!(copied.fragment);
     assert_eq!(copied.layer.pixels.read(4, 1, 0), [1, 1, 2, 255]);
     assert_eq!(copied.layer.pixels.read(4, 0, 0), [0; 4]);
@@ -1820,4 +1819,144 @@ fn animation_completion_decodes_into_layer_frames_instead_of_a_video() {
     assert_eq!(layer.drawings[&3].memory_bytes(), 0);
     app.accept_animation();
     assert_eq!(app.project().layers.len(), 2);
+}
+
+#[test]
+fn clipboard_image_inserts_document_layer_without_importing_asset_and_undoes() {
+    use crate::raster::Raster;
+    let mut app = EditorApp::default();
+    app.project_mut().import_rgba(&[10, 20, 30, 255], 1, 1).unwrap();
+    app.refresh_image().unwrap();
+    let original = app.project().layers[0].pixels.clone();
+    app.insert_clipboard_image(&[1, 2, 3, 255].repeat(6), 3, 2).unwrap();
+    assert!(app.workspace.assets.is_empty());
+    assert_eq!(app.image_size, Some((1, 1)));
+    assert_eq!(app.project().layers.len(), 2);
+    assert_eq!(app.project().layers[0].pixels, original);
+    assert_eq!(app.project().layers[1].pixels.read(1, 2, 1), [1, 2, 3, 255]);
+    assert!(app.session.floating.is_some());
+    app.commit_transform();
+    app.undo();
+    assert_eq!(app.project().layers.len(), 1);
+    app.redo();
+    assert_eq!(app.project().layers.len(), 2);
+
+    let mut empty = EditorApp::default();
+    empty.insert_clipboard_image(&[9, 8, 7, 255].repeat(6), 3, 2).unwrap();
+    assert_eq!(empty.image_size, Some((3, 2)));
+    assert!(empty.workspace.assets.is_empty());
+    empty.commit_transform();
+    empty.undo();
+    assert!(empty.image_size.is_none());
+    assert!(empty.insert_clipboard_image(&[0; 3], 2, 2).is_err());
+    assert!(empty.project().layers.is_empty());
+}
+
+#[test]
+fn internal_clipboard_survives_document_switch_and_repeated_paste() {
+    use crate::raster::Raster;
+    let mut app = EditorApp::default();
+    let mut ui = Ui::new();
+    app.project_mut().import_rgba(&[1, 2, 3, 255], 1, 1).unwrap();
+    app.refresh_image().unwrap();
+    app.copy_shortcut(&mut ui);
+    assert!(app.clipboard.is_some());
+    app.project_mut().layers[0].pixels.write(1, 0, 0, [9, 8, 7, 255]);
+    let index = app.workspace.create_document("Target");
+    app.switch_document(index);
+    for count in 1..=2 {
+        // Must use the internal copy regardless of the system clipboard contents.
+        app.paste_clipboard(&mut ui);
+        assert_eq!(app.project().layers.len(), count);
+        assert_eq!(app.project().layers[count - 1].pixels.read(1, 0, 0), [1, 2, 3, 255]);
+    }
+    assert!(app.workspace.assets.is_empty());
+}
+
+#[test]
+fn internal_layer_copy_preserves_animation_drawings() {
+    use crate::raster::Raster;
+    let mut app = EditorApp::default();
+    app.project_mut().import_rgba(&[1, 2, 3, 255], 1, 1).unwrap();
+    app.refresh_image().unwrap();
+    app.new_animation();
+    app.project_mut().resize_canvas(1, 1).unwrap();
+    app.seek_animation(5);
+    app.animation_drawing(true);
+    app.project_mut().layers[0].pixels.write(1, 0, 0, [9, 8, 7, 255]);
+    let copied = app.copy_layer_data(0).unwrap();
+    assert_eq!(copied.layer.drawings, app.project().layers[0].drawings);
+    assert!(copied.layer.drawings.len() >= 2);
+    app.insert_copied_layer(copied);
+    assert_eq!(app.project().layers[1].drawings, app.project().layers[0].drawings);
+}
+
+#[test]
+fn paste_ignores_missing_document_selection_before_reading_either_clipboard() {
+    let mut app = EditorApp::default();
+    let mut ui = Ui::new();
+    app.project_mut().import_rgba(&[1, 2, 3, 255], 1, 1).unwrap();
+    app.refresh_image().unwrap();
+    let copied = app.copy_layer_data(0).unwrap();
+    let selected_doc = format!("doc_{}", app.workspace.active_doc().id);
+    let original = app.project().layers[0].pixels.clone();
+    for internal in [false, true] {
+        app.clipboard = internal.then(|| copied.clone());
+        for (selected, preview) in [
+            (None, None),
+            (Some("images_root".to_string()), None),
+            (Some("asset_image".to_string()), None),
+            (Some("video_video".to_string()), None),
+            (Some("doc_other".to_string()), None),
+            (Some(selected_doc.clone()), Some("image".to_string())),
+        ] {
+            app.workspace.tree_selected = selected.clone();
+            app.session.preview_asset = preview.clone();
+            let status = app.status.clone();
+            let dirty = app.dirty;
+            app.paste_clipboard(&mut ui);
+            assert_eq!(app.project().layers.len(), 1);
+            assert_eq!(app.project().layers[0].pixels, original);
+            assert_eq!(app.workspace.tree_selected, selected);
+            assert_eq!(app.session.preview_asset, preview);
+            assert_eq!(app.status, status);
+            assert_eq!(app.dirty, dirty);
+            assert!(app.workspace.assets.is_empty());
+        }
+    }
+    app.session.preview_asset = None;
+    app.workspace.select_active_document();
+    app.paste_clipboard(&mut ui);
+    assert_eq!(app.project().layers.len(), 2);
+}
+
+#[test]
+fn copy_as_image_preserves_layer_extent_alpha_and_internal_clipboard() {
+    use crate::raster::Raster;
+    let mut app = EditorApp::default();
+    app.project_mut().import_rgba(&[1, 2, 3, 255], 1, 1).unwrap();
+    app.refresh_image().unwrap();
+    let mut ui = Ui::new();
+    app.copy_layer_at(0, &mut ui);
+    app.project_mut().add_layer();
+    let layer = &mut app.project_mut().layers[1];
+    layer.visible = false;
+    layer.opacity = 0.5;
+    layer.pixels.offset = (-10, 20);
+    layer.pixels.write(0, -2, -3, [10, 20, 30, 255]);
+    layer.pixels.write(0, 0, -2, [40, 50, 60, 128]);
+    let original = layer.pixels.clone();
+    let image = app.layer_clipboard_image(1).unwrap();
+    assert_eq!((image.width, image.height), (3, 2));
+    assert_eq!(&image.bytes[..4], &[10, 20, 30, 128]);
+    assert_eq!(&image.bytes[4..8], &[0; 4]);
+    assert_eq!(&image.bytes[20..24], &[40, 50, 60, 64]);
+    assert_eq!(app.project().layers[1].pixels, original);
+    assert_eq!(app.clipboard.as_ref().unwrap().layer.pixels.read(1, 0, 0), [1, 2, 3, 255]);
+    assert!(app.layer_clipboard_image(99).is_err());
+    app.project_mut().add_layer();
+    assert!(app.layer_clipboard_image(2).is_err());
+    app.project_mut().layers[2].pixels.write(0, 0, 0, [1, 2, 3, 255]);
+    app.project_mut().layers[2].pixels.write(0, 100000, 100000, [1, 2, 3, 255]);
+    assert!(app.layer_clipboard_image(2).is_err());
 }

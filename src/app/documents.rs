@@ -65,11 +65,16 @@ impl EditorApp {
         }
     }
 
-    pub(in crate::app) fn copy_layer_text(&mut self, index: usize) -> Result<String, String> {
+    pub(in crate::app) fn copy_layer_data(&mut self, index: usize) -> Result<crate::layer_clipboard::CopiedLayer, String> {
         self.commit_transform();
-        let project = self.project();
+        let project = self.workspace.active_mut();
+        project.flush_drawings();
         let layer = project.layers.get(index).ok_or("Choose a layer to copy")?;
-        crate::layer_clipboard::encode(layer, (project.width, project.height))
+        Ok(crate::layer_clipboard::CopiedLayer {
+            layer: layer.clone(),
+            canvas_size: (project.width, project.height),
+            fragment: false,
+        })
     }
 
     pub fn copy_layer(&mut self, ui: &mut Ui) {
@@ -95,11 +100,11 @@ impl EditorApp {
             self.status = "Apply or cancel the transform before copying".into();
             return;
         }
-        match self
-            .selection_clipboard_text()
-            .and_then(crate::layer_clipboard::write)
-        {
-            Ok(()) => self.status = "Selection copied".into(),
+        match self.selection_clipboard_data() {
+            Ok(copied) => {
+                self.clipboard = Some(copied);
+                self.status = "Selection copied".into();
+            }
             Err(error) => self.show_error(ui, error),
         }
     }
@@ -119,13 +124,14 @@ impl EditorApp {
             self.status = "Select an area to cut".into();
             return;
         }
-        if let Err(error) = self
-            .selection_clipboard_text()
-            .and_then(crate::layer_clipboard::write)
-        {
-            self.show_error(ui, error);
-            return;
-        }
+        let copied = match self.selection_clipboard_data() {
+            Ok(copied) => copied,
+            Err(error) => {
+                self.show_error(ui, error);
+                return;
+            }
+        };
+        self.clipboard = Some(copied);
         if let Err(error) = self.erase_active_selection() {
             self.show_error(ui, error);
             return;
@@ -153,20 +159,62 @@ impl EditorApp {
         }
     }
 
-    pub(in crate::app) fn selection_clipboard_text(&mut self) -> Result<String, String> {
+    pub(in crate::app) fn selection_clipboard_data(&self) -> Result<crate::layer_clipboard::CopiedLayer, String> {
         let layer = self.capture_selection_layer()?;
         let (width, height) = self.image_size.ok_or("No image")?;
-        crate::layer_clipboard::encode_fragment(&layer, (width, height))
+        Ok(crate::layer_clipboard::CopiedLayer {
+            layer,
+            canvas_size: (width, height),
+            fragment: true,
+        })
     }
 
     pub fn copy_layer_at(&mut self, index: usize, ui: &mut Ui) {
-        match self
-            .copy_layer_text(index)
-            .and_then(crate::layer_clipboard::write)
-        {
-            Ok(()) => self.status = "Layer copied with position and properties".into(),
+        match self.copy_layer_data(index) {
+            Ok(copied) => {
+                self.clipboard = Some(copied);
+                self.status = "Layer copied with position and properties".into();
+            }
             Err(error) => self.show_error(ui, error),
         }
+    }
+
+    pub fn copy_layer_as_image(&mut self, index: usize, ui: &mut Ui) {
+        let result = self.layer_clipboard_image(index).and_then(|image| {
+            arboard::Clipboard::new()
+                .and_then(|mut clipboard| clipboard.set_image(image))
+                .map_err(|error| format!("Cannot copy image to clipboard: {error}"))
+        });
+        match result {
+            Ok(()) => self.status = "Layer copied as image to system clipboard".into(),
+            Err(error) => self.show_error(ui, error),
+        }
+    }
+
+    pub(in crate::app) fn layer_clipboard_image(
+        &mut self,
+        index: usize,
+    ) -> Result<arboard::ImageData<'static>, String> {
+        self.commit_transform();
+        let layer = self.project().layers.get(index).ok_or("Choose a layer to copy")?;
+        let (x, y, right, bottom) = layer.pixels.bounds().ok_or("Layer has no pixels")?;
+        let width = x.abs_diff(right);
+        let height = y.abs_diff(bottom);
+        let bytes = (width as usize).checked_mul(height as usize)
+            .and_then(|count| count.checked_mul(4))
+            .ok_or("Layer image is too large for the clipboard")?;
+        if bytes > 256 * 1024 * 1024 {
+            return Err("Layer image is too large for the clipboard".into());
+        }
+        let mut pixels = layer.pixels.region(x, y, width, height);
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel[3] = (pixel[3] as f32 * layer.opacity).round() as u8;
+        }
+        Ok(arboard::ImageData {
+            width: width as usize,
+            height: height as usize,
+            bytes: std::borrow::Cow::Owned(pixels),
+        })
     }
 
     pub(in crate::app) fn insert_copied_layer(
@@ -285,14 +333,41 @@ impl EditorApp {
     }
 
     pub fn paste_clipboard(&mut self, ui: &mut Ui) {
-        match crate::layer_clipboard::read() {
-            Ok(Some(copied)) => self.insert_copied_layer(copied),
-            Ok(None) => self.paste_image(ui),
+        let selected_document = self.workspace.documents.get(self.workspace.active_document)
+            .is_some_and(|doc| {
+                self.workspace.tree_selected.as_deref() == Some(format!("doc_{}", doc.id).as_str())
+            });
+        if !selected_document || self.session.preview_asset.is_some() {
+            return;
+        }
+        if let Some(copied) = self.clipboard.clone() {
+            self.insert_copied_layer(copied);
+            return;
+        }
+        match paste_image_from_clipboard().and_then(|(pixels, width, height)| {
+            self.insert_clipboard_image(&pixels, width, height)
+        }) {
+            Ok(()) => {},
             Err(error) => self.show_error(ui, error),
         }
     }
 
-    pub fn paste_image(&mut self, ui: &mut Ui) {
+    pub(in crate::app) fn insert_clipboard_image(
+        &mut self, pixels: &[u8], width: u32, height: u32,
+    ) -> Result<(), String> {
+        let mut image = Project::default();
+        image.import_rgba(pixels, width, height)?;
+        let mut layer = image.layers.remove(0);
+        layer.name = "Clipboard".into();
+        self.insert_copied_layer(crate::layer_clipboard::CopiedLayer {
+            layer,
+            canvas_size: (width, height),
+            fragment: true,
+        });
+        Ok(())
+    }
+
+    pub fn import_clipboard_image(&mut self, ui: &mut Ui) {
         match paste_image_from_clipboard().and_then(|(pixels, width, height)| {
             self.workspace
                 .import_asset_rgba("Clipboard".into(), &pixels, width, height)?;

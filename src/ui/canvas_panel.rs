@@ -4,8 +4,6 @@ use mega_ui::Ui;
 pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     let mut resize = false;
     let mut trim = false;
-    ui.label("Canvas");
-    ui.separator();
     ui.space(8.0);
     ui.label(&format!("Zoom: {:.0}%", app.session.zoom * 100.0));
     ui.space(8.0);

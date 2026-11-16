@@ -347,6 +347,42 @@ fn canvas_target(
     })
 }
 
+/// Allow state changes and cached layout measurements to reach the screen,
+/// then return to event-driven rendering. New events reset rather than add frames.
+#[derive(Default)]
+struct RedrawBudget {
+    remaining: u8,
+}
+
+impl RedrawBudget {
+    const FRAMES: u8 = 3;
+
+    fn on_event(&mut self, event: &WindowEvent) -> bool {
+        let refresh = matches!(
+            event,
+            WindowEvent::CursorMoved { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::ModifiersChanged(_)
+                | WindowEvent::KeyboardInput { .. }
+                | WindowEvent::Ime(winit::event::Ime::Commit(_))
+                | WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::Focused(_)
+                | WindowEvent::CloseRequested
+        );
+        if refresh {
+            self.remaining = Self::FRAMES;
+        }
+        refresh
+    }
+
+    fn after_present(&mut self) -> bool {
+        self.remaining = self.remaining.saturating_sub(1);
+        self.remaining > 0
+    }
+}
+
 pub struct Host<S: Scene> {
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
@@ -362,6 +398,7 @@ pub struct Host<S: Scene> {
     draw_stats: DrawStats,
     closing: bool,
     keyboard_captured: bool,
+    redraw_budget: RedrawBudget,
 }
 
 impl<S: Scene> Host<S> {
@@ -386,6 +423,9 @@ impl<S: Scene> Host<S> {
             draw_stats: DrawStats::default(),
             closing: false,
             keyboard_captured: false,
+            redraw_budget: RedrawBudget {
+                remaining: RedrawBudget::FRAMES,
+            },
         };
         event_loop.run_app(&mut host).expect("run application");
     }
@@ -599,6 +639,7 @@ impl<S: Scene> Host<S> {
         gpu.queue.submit(Some(encoder.finish()));
         gpu.queue.present(frame);
         self.input.clear_edges();
+        let settle_ui = self.redraw_budget.after_present();
 
         let transform_cursor = if output.cursor == CursorIcon::Default {
             self.scene.canvas_cursor()
@@ -640,7 +681,7 @@ impl<S: Scene> Host<S> {
             self.cursor = cursor.clone();
             window.set_cursor(cursor);
         }
-        if keep_redrawing || output.needs_repaint {
+        if settle_ui || keep_redrawing || output.needs_repaint {
             window.request_redraw();
         }
     }
@@ -734,6 +775,11 @@ impl<S: Scene> ApplicationHandler for Host<S> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        if self.redraw_budget.on_event(&event) {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
         match event {
             WindowEvent::CloseRequested => match self.scene.request_close() {
                 ClosePoll::Exit => event_loop.exit(),
@@ -772,9 +818,6 @@ impl<S: Scene> ApplicationHandler for Host<S> {
                 }
                 self.last_mouse = Some(pos);
                 self.input.mouse_pos = pos;
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let down = state == ElementState::Pressed;
@@ -803,26 +846,17 @@ impl<S: Scene> ApplicationHandler for Host<S> {
                     *released = true;
                 }
                 *held = down;
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.input.scroll_delta = match delta {
                     MouseScrollDelta::LineDelta(x, y) => Vec2::new(x * 40.0, y * 40.0),
                     MouseScrollDelta::PixelDelta(p) => Vec2::new(p.x as f32, p.y as f32),
                 };
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
             }
             WindowEvent::ModifiersChanged(mods) => {
                 self.input.modifiers = mods.state();
                 self.input.key_ctrl = mods.state().control_key() || mods.state().super_key();
                 self.input.key_shift = mods.state().shift_key();
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
@@ -839,15 +873,9 @@ impl<S: Scene> ApplicationHandler for Host<S> {
                         }
                     }
                 }
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
             }
             WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
                 self.input.text.push_str(&text);
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
             }
             _ => {}
         }
@@ -1064,5 +1092,57 @@ mod text_edit_tests {
         input.key_copy = true;
         let out = frame(&mut ui, &mut text, input);
         assert_eq!(out.clipboard.as_deref(), Some("привет мир"));
+    }
+}
+
+#[cfg(test)]
+mod redraw_budget_tests {
+    use super::*;
+
+    #[test]
+    fn input_gets_three_presented_frames_without_replaying_actions_or_running_at_idle() {
+        let mut budget = RedrawBudget::default();
+        let mut input = FrameInput::default();
+        assert!(!budget.after_present());
+        assert!(budget.on_event(&WindowEvent::Ime(winit::event::Ime::Commit("a".into()))));
+        input.text.push('a');
+        input.key_paste = true;
+        input.mouse_released = true;
+        let mut text = String::new();
+        let mut pastes = 0;
+        let mut clicks = 0;
+        for expected_more in [true, true, false] {
+            // RedrawRequested itself must never restart the budget.
+            assert!(!budget.on_event(&WindowEvent::RedrawRequested));
+            text.push_str(&input.text);
+            pastes += usize::from(input.key_paste);
+            clicks += usize::from(input.mouse_released);
+            input.clear_edges();
+            assert_eq!(budget.after_present(), expected_more);
+        }
+        assert_eq!(text, "a");
+        assert_eq!(pastes, 1);
+        assert_eq!(clicks, 1);
+        assert!(!budget.after_present());
+    }
+
+    #[test]
+    fn new_input_resets_budget_and_failed_frames_do_not_consume_it() {
+        let mut budget = RedrawBudget::default();
+        let event = WindowEvent::Resized(winit::dpi::PhysicalSize::new(800, 600));
+        for _ in 0..10 {
+            assert!(budget.on_event(&event));
+        }
+        assert!(budget.after_present());
+        assert!(budget.on_event(&WindowEvent::Focused(true)));
+        // A redraw that fails before presentation does not call after_present.
+        assert!(!budget.on_event(&WindowEvent::RedrawRequested));
+        assert_eq!(budget.remaining, 3);
+        assert!(budget.after_present());
+        assert!(budget.after_present());
+        assert!(!budget.after_present());
+        // Explicit UI/animation redraws can continue without renewing this budget.
+        assert!(!budget.on_event(&WindowEvent::RedrawRequested));
+        assert!(!budget.after_present());
     }
 }
