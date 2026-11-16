@@ -13,6 +13,7 @@ impl EditorApp {
         self.animation_clock = None;
         self.close_asset_preview();
         self.video_poster = None;
+        self.video_trim = Default::default();
         self.cancel_transform();
         self.workspace = Workspace::default();
         self.ai.presets = Default::default();
@@ -358,6 +359,7 @@ impl EditorApp {
         self.video_poster = None;
         self.cancel_transform();
         self.workspace = workspace;
+        self.video_trim = Default::default();
         self.ai.presets = Default::default();
         self.refresh_image()?;
         self.dirty = false;

@@ -357,5 +357,13 @@ mod video_tests {
             "mega-image-editor-input-ref4.webp"
         );
         assert_eq!(input_upload_name("", "mp4"), "mega-image-editor-input.mp4");
+        assert_eq!(
+            input_upload_name("video1", "mp4"),
+            "mega-image-editor-input-video1.mp4"
+        );
+        assert_eq!(
+            input_upload_name("size", "webp"),
+            "mega-image-editor-input-size.webp"
+        );
     }
 }

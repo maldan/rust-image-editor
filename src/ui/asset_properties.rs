@@ -42,6 +42,13 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         app.export_video(index, ui);
     }
     ui.space(8.0);
+    let frame_ready = app.video_playback().is_some_and(|player| player.frame.is_some());
+    ui.add_enabled(frame_ready, |ui| {
+        if ui.button("video_create_document", "Create Document from Frame").clicked() {
+            app.create_document_from_video_frame(ui);
+        }
+    });
+    ui.space(8.0);
     let Some(player) = app.video_playback() else {
         return;
     };
@@ -101,6 +108,34 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         ui.label(&format!("Original: {:.3} FPS", info.fps));
         ui.label("Lower FPS skips frames at original speed.");
     });
+    ui.space(12.0);
+    ui.separator();
+    ui.space(8.0);
+    ui.label("Trim video");
+    let id = app.workspace.videos[index].id.clone();
+    if app.video_trim.asset_id.as_ref() != Some(&id) {
+        app.video_trim.asset_id = Some(id);
+        app.video_trim.start = 0.0;
+        app.video_trim.end = info.duration as f32;
+    }
+    let running = app.video_trim.job.is_some();
+    ui.add_enabled(!running, |ui| {
+        ui.label("From (seconds)");
+        ui.drag_float("video_trim_start", &mut app.video_trim.start, 0.01);
+        ui.label("To (seconds)");
+        ui.drag_float("video_trim_end", &mut app.video_trim.end, 0.01);
+        let valid = app.video_trim.start.is_finite() && app.video_trim.end.is_finite()
+            && app.video_trim.start >= 0.0
+            && app.video_trim.end > app.video_trim.start
+            && app.video_trim.end <= info.duration as f32;
+        if !valid { ui.label("Choose 0 ≤ From < To ≤ video duration"); }
+        ui.add_enabled(valid, |ui| {
+            if ui.button("video_trim", "Trim").clicked() {
+                app.trim_video(index, ui);
+            }
+        });
+    });
+    if running { ui.label("Trimming video…"); }
 }
 
 fn time(seconds: f64) -> String {

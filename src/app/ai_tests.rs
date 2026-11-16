@@ -19,6 +19,7 @@ fn ai_metadata_uses_the_workflow_model_and_matching_prompt() {
         (AiMode::AnimeDraw, "anima-preview3-base.safetensors", "drawing prompt"),
         (AiMode::AnimeRedraw, "anima-preview3-base.safetensors", "drawing prompt"),
         (AiMode::MinimaxRedraw, "minimax_h3_image_pruned_int8_convrot.safetensors", "edit prompt"),
+        (AiMode::MinimaxRefs, "minimax_h3_image_pruned_int8_convrot.safetensors", "edit prompt"),
     ] {
         ai.mode = mode;
         let metadata = ai.generation_metadata();
@@ -1587,12 +1588,20 @@ fn minimax_frame_refs_keep_checkbox_and_document_after_reopen() {
         .add_video_named(b"\0\0\0\x18ftypisomclip".to_vec(), "Clip")
         .unwrap();
     let video_id = app.workspace.videos[0].id.clone();
-    app.ai.r2v_video = true;
-    app.ai.r2v_video_id = video_id.clone();
+    app.ai.r2v_video[1] = true;
+    app.ai.r2v_video_id[1] = video_id.clone();
+    app.ai.r2v_custom_size = true;
+    app.ai.r2v_width = 768;
+    app.ai.r2v_height = 432;
+    app.ai.r2v_refs[0].enabled = false;
     app.close_ai();
     app.open_ai_minimax_r2v();
-    assert!(app.ai.r2v_video);
-    assert_eq!(app.ai.r2v_video_id, video_id);
+    assert!(app.ai.r2v_video[1]);
+    assert_eq!(app.ai.r2v_video_id[1], video_id);
+    assert!(app.ai.r2v_custom_size);
+    assert_eq!(app.ai.r2v_width, 768);
+    assert_eq!(app.ai.r2v_height, 432);
+    assert!(!app.ai.r2v_refs[0].enabled);
 }
 
 #[test]
@@ -1609,7 +1618,8 @@ fn minimax_r2v_opens_with_required_first_ref_and_names_the_video_asset() {
     assert!(app.ai.r2v_refs[0].enabled);
     assert_eq!(app.ai.r2v_refs[0].document_id, id);
     assert!(app.ai.r2v_refs[1..].iter().all(|r| !r.enabled && r.document_id == id));
-    assert!(!app.ai.r2v_video);
+    assert!(app.ai.r2v_video.iter().all(|on| !on));
+    assert!(!app.ai.r2v_custom_size);
     let bytes = b"\0\0\0\x18ftypisomtest video bytes".to_vec();
     app.ai.job = Some(crate::comfyui::Job::with_result(
         crate::comfyui::JobResult::Video(bytes.clone()),
@@ -1617,6 +1627,34 @@ fn minimax_r2v_opens_with_required_first_ref_and_names_the_video_asset() {
     app.poll_ai(&mut Ui::new());
     assert_eq!(app.workspace.videos[0].name, "Minimax H3 R2V 1.mp4");
     assert_eq!(app.workspace.videos[0].read().unwrap(), bytes);
+}
+
+#[test]
+fn minimax_refs_keep_checkbox_document_and_custom_size_after_reopen() {
+    let mut app = EditorApp::default();
+    app.project_mut()
+        .import_rgba(&[1, 2, 3, 255], 1, 1)
+        .unwrap();
+    app.workspace.create_document("Other");
+    let other = app.workspace.active_doc().id.clone();
+    app.open_ai_minimax_refs();
+    assert!(app.ai.open);
+    assert!(app.ai.mode == AiMode::MinimaxRefs);
+    assert!(!app.ai.mode.needs_input());
+    app.ai.minimax_refs[0].enabled = false;
+    app.ai.minimax_refs[2].enabled = true;
+    app.ai.minimax_refs[2].document_id = other.clone();
+    app.ai.refs_custom_size = true;
+    app.ai.refs_width = 768;
+    app.ai.refs_height = 432;
+    app.close_ai();
+    app.open_ai_minimax_refs();
+    assert!(!app.ai.minimax_refs[0].enabled);
+    assert!(app.ai.minimax_refs[2].enabled);
+    assert_eq!(app.ai.minimax_refs[2].document_id, other);
+    assert!(app.ai.refs_custom_size);
+    assert_eq!(app.ai.refs_width, 768);
+    assert_eq!(app.ai.refs_height, 432);
 }
 
 #[test]

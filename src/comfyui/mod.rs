@@ -1,6 +1,7 @@
 mod video;
 pub use video::{
     LTX_FPS, MAX_DURATION_SCALE, VideoSettings, frame_sample, generated_seconds, validate_minimax_i2v,
+    validate_minimax_r2v,
 };
 mod catalog;
 mod client;
@@ -17,6 +18,7 @@ pub use workflow::DrawSettings;
 pub use workflow::UpscaleSettings;
 pub use workflow::validate_lineart_resolution;
 pub use workflow::validate_megapixels;
+pub use workflow::validate_minimax_refs;
 
 /// Shared by input size feedback and worker-side resizing.
 pub fn scaled_size(width: u32, height: u32, scale: f32) -> Result<(u32, u32), String> {

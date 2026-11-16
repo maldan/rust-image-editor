@@ -46,6 +46,7 @@ impl Scene for EditorApp {
     fn init(ui: &mut Ui) {
         ui.set_theme(Theme::dark());
         ui.load_builtin_icons();
+        crate::ui::load_tool_icons(ui);
     }
 
     fn ui_scale(&self) -> f32 {
@@ -82,7 +83,7 @@ impl Scene for EditorApp {
         self.note_frame(self.input.dt);
         if self.input.key_escape { self.finish_deformation(true); }
         self.poll_ai(ui);
-        self.poll_video();
+        self.poll_video(ui);
         self.handle_tool_hotkeys();
         self.handle_animation_keys();
         self.tick_animation();
@@ -138,6 +139,7 @@ impl Scene for EditorApp {
                 .as_ref()
                 .is_some_and(crate::video::Playback::needs_repaint)
             || self.video_poster.is_some()
+            || self.video_trim.job.is_some()
             || (self.session.preview_asset.is_none() && self.session.selection.is_some())
             || thumb_waiting
             || !self.dirty_tiles.is_empty()

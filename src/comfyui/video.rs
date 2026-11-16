@@ -203,9 +203,36 @@ pub fn prepare_minimax_i2v(
     Ok((graph, output))
 }
 
+pub fn validate_minimax_r2v(
+    megapixels: f32,
+    seconds: i32,
+    prompt: &str,
+    has_image: bool,
+    has_video: bool,
+    custom_size: Option<(i32, i32)>,
+) -> Result<(), String> {
+    validate_minimax_i2v(megapixels, seconds, prompt)?;
+    if !has_image && !has_video {
+        return Err("Choose a reference image or video".into());
+    }
+    match custom_size {
+        Some((width, height)) => validate_r2v_custom_size(width, height),
+        None => Ok(()),
+    }
+}
+
+fn validate_r2v_custom_size(width: i32, height: i32) -> Result<(), String> {
+    if width < 64 || height < 64 || width % 8 != 0 || height % 8 != 0 {
+        return Err("Custom size must be at least 64 px and a multiple of 8".into());
+    }
+    super::scaled_size(width as u32, height as u32, 1.0)?;
+    Ok(())
+}
+
 pub fn prepare_minimax_r2v(
     images: [Option<String>; 4],
-    video: Option<String>,
+    videos: [Option<(String, bool)>; 2],
+    size_filename: &str,
     prompt: &str,
     megapixels: f32,
     seconds: i32,
@@ -213,8 +240,11 @@ pub fn prepare_minimax_r2v(
     seed: u64,
 ) -> Result<(Value, String), String> {
     validate_minimax_i2v(megapixels, seconds, prompt)?;
-    if images[0].is_none() {
-        return Err("Choose reference 1".into());
+    if images.iter().all(Option::is_none) && videos.iter().all(Option::is_none) {
+        return Err("Choose a reference image or video".into());
+    }
+    if size_filename.is_empty() {
+        return Err("Cannot read reference size".into());
     }
     let mut graph: Value = serde_json::from_str(include_str!("../../comfyui/video.minimax_h3_r2v.json"))
         .map_err(|e| format!("Invalid Minimax R2V workflow: {e}"))?;
@@ -231,16 +261,27 @@ pub fn prepare_minimax_r2v(
                 .remove(&format!("ref_images.ref_image_{i}"));
         }
     }
-    let video_id = node_id(&graph, "LoadVideo1")?;
-    if let Some(filename) = video {
-        graph[&video_id]["inputs"]["video"] = filename.into();
-    } else {
-        graph.as_object_mut().unwrap().remove(&video_id);
-        graph[&r2v]["inputs"]
-            .as_object_mut()
-            .ok_or("MiniMax H3 Reference to Video has no inputs")?
-            .remove("ref_videos.ref_video_0");
+    for i in 0..2 {
+        let id = node_id(&graph, &format!("LoadVideo{}", i + 1))?;
+        if let Some((filename, has_audio)) = &videos[i] {
+            graph[&id]["inputs"]["video"] = filename.clone().into();
+            if !has_audio {
+                graph[&r2v]["inputs"]
+                    .as_object_mut()
+                    .ok_or("MiniMax H3 Reference to Video has no inputs")?
+                    .remove(&format!("ref_video_audios.ref_video_audio_{i}"));
+            }
+        } else {
+            graph.as_object_mut().unwrap().remove(&id);
+            let inputs = graph[&r2v]["inputs"]
+                .as_object_mut()
+                .ok_or("MiniMax H3 Reference to Video has no inputs")?;
+            inputs.remove(&format!("ref_videos.ref_video_{i}"));
+            inputs.remove(&format!("ref_video_audios.ref_video_audio_{i}"));
+        }
     }
+    let size_id = node_id(&graph, "RefImageSize")?;
+    graph[&size_id]["inputs"]["image"] = size_filename.into();
     for (title, key, value) in [
         ("Megapixels", "megapixels", megapixels.into()),
         ("Prompt", "value", prompt.into()),
@@ -470,12 +511,13 @@ mod tests {
             serde_json::from_str(include_str!("../../comfyui/video.minimax_h3_r2v.json")).unwrap();
         let (graph, save) = prepare_minimax_r2v(
             [
-                Some("a.png".into()),
                 None,
+                Some("b.png".into()),
                 Some("c.png".into()),
                 None,
             ],
-            None,
+            [None, None],
+            "size.webp",
             "Two refs",
             0.4,
             7,
@@ -485,16 +527,21 @@ mod tests {
         .unwrap();
         assert_eq!(save, node_id(&original, "Save Video").unwrap());
         let r2v = node_id(&graph, "MiniMax H3 Reference to Video").unwrap();
-        assert_eq!(graph[node_id(&graph, "LoadImage1").unwrap()]["inputs"]["image"], "a.png");
-        assert!(node_id(&graph, "LoadImage2").is_err());
+        assert!(node_id(&graph, "LoadImage1").is_err());
+        assert_eq!(graph[node_id(&graph, "LoadImage2").unwrap()]["inputs"]["image"], "b.png");
         assert_eq!(graph[node_id(&graph, "LoadImage3").unwrap()]["inputs"]["image"], "c.png");
         assert!(node_id(&graph, "LoadImage4").is_err());
-        assert_eq!(graph[&r2v]["inputs"]["ref_images.ref_image_0"], serde_json::json!(["137", 0]));
-        assert!(graph[&r2v]["inputs"].get("ref_images.ref_image_1").is_none());
+        assert_eq!(graph[node_id(&graph, "RefImageSize").unwrap()]["inputs"]["image"], "size.webp");
+        assert!(graph[&r2v]["inputs"].get("ref_images.ref_image_0").is_none());
+        assert_eq!(graph[&r2v]["inputs"]["ref_images.ref_image_1"], serde_json::json!(["139", 0]));
         assert_eq!(graph[&r2v]["inputs"]["ref_images.ref_image_2"], serde_json::json!(["149", 0]));
         assert!(graph[&r2v]["inputs"].get("ref_images.ref_image_3").is_none());
         assert!(node_id(&graph, "LoadVideo1").is_err());
+        assert!(node_id(&graph, "LoadVideo2").is_err());
         assert!(graph[&r2v]["inputs"].get("ref_videos.ref_video_0").is_none());
+        assert!(graph[&r2v]["inputs"].get("ref_videos.ref_video_1").is_none());
+        assert!(graph[&r2v]["inputs"].get("ref_video_audios.ref_video_audio_0").is_none());
+        assert!(graph[&r2v]["inputs"].get("ref_video_audios.ref_video_audio_1").is_none());
         assert_eq!(graph[node_id(&graph, "Boolean (Enable Lightning LoRA)").unwrap()]["inputs"]["value"], true);
         for node in graph.as_object().unwrap().values() {
             for input in node["inputs"].as_object().unwrap().values() {
@@ -507,13 +554,9 @@ mod tests {
             }
         }
         let (graph, _) = prepare_minimax_r2v(
-            [
-                Some("a.png".into()),
-                Some("b.png".into()),
-                Some("c.png".into()),
-                Some("d.png".into()),
-            ],
-            Some("clip.mp4".into()),
+            [None, None, None, None],
+            [Some(("clip.mp4".into(), false)), None],
+            "size.webp",
             "x",
             0.9,
             5,
@@ -525,10 +568,20 @@ mod tests {
             graph[node_id(&graph, "LoadVideo1").unwrap()]["inputs"]["video"],
             "clip.mp4"
         );
+        assert!(node_id(&graph, "LoadVideo2").is_err());
+        assert_eq!(
+            graph[node_id(&graph, "RefImageSize").unwrap()]["inputs"]["image"],
+            "size.webp"
+        );
         assert_eq!(
             graph[node_id(&graph, "MiniMax H3 Reference to Video").unwrap()]["inputs"]
                 ["ref_videos.ref_video_0"],
             serde_json::json!(["151", 0])
+        );
+        assert!(
+            graph[node_id(&graph, "MiniMax H3 Reference to Video").unwrap()]["inputs"]
+                .get("ref_video_audios.ref_video_audio_0")
+                .is_none()
         );
         let (mut full, _) = prepare_minimax_r2v(
             [
@@ -537,7 +590,8 @@ mod tests {
                 Some("c.png".into()),
                 Some("d.png".into()),
             ],
-            Some("0001-0015.mp4".into()),
+            [Some(("0001-0015.mp4".into(), true)), Some(("clip-2.mp4".into(), true))],
+            "size.webp",
             "x",
             0.9,
             5,
@@ -550,7 +604,9 @@ mod tests {
             ("LoadImage2", "image"),
             ("LoadImage3", "image"),
             ("LoadImage4", "image"),
+            ("RefImageSize", "image"),
             ("LoadVideo1", "video"),
+            ("LoadVideo2", "video"),
             ("Prompt", "value"),
             ("Megapixels", "megapixels"),
             ("Duration", "value"),
@@ -561,7 +617,22 @@ mod tests {
             full[&id]["inputs"][key] = original[&id]["inputs"][key].clone();
         }
         assert_eq!(full, original);
-        assert!(prepare_minimax_r2v([None, None, None, None], None, "x", 0.5, 5, true, 0).is_err());
+        assert!(prepare_minimax_r2v(
+            [None, None, None, None],
+            [None, None],
+            "size.webp",
+            "x",
+            0.5,
+            5,
+            true,
+            0
+        )
+        .is_err());
+        assert!(validate_minimax_r2v(0.5, 5, "x", false, true, None).is_ok());
+        assert!(validate_minimax_r2v(0.5, 5, "x", false, true, Some((512, 288))).is_ok());
+        assert!(validate_minimax_r2v(0.5, 5, "x", true, false, None).is_ok());
+        assert!(validate_minimax_r2v(0.5, 5, "x", false, false, Some((512, 512))).is_err());
+        assert!(validate_minimax_r2v(0.5, 5, "x", true, false, Some((63, 512))).is_err());
     }
 
     #[test]

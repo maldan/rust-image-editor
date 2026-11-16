@@ -35,14 +35,6 @@ enum InputWorkflow {
         turbo: bool,
         last: Option<RgbaImage>,
     },
-    MinimaxR2V {
-        prompt: String,
-        megapixels: f32,
-        seconds: i32,
-        lightning: bool,
-        extras: [Option<RgbaImage>; 3],
-        video: Option<Vec<u8>>,
-    },
     Video {
         settings: super::VideoSettings,
         end_pixels: Option<RgbaImage>,
@@ -76,6 +68,21 @@ enum Request {
         pixels: RgbaImage,
         scale: f32,
         workflow: InputWorkflow,
+    },
+    MinimaxR2V {
+        images: [Option<RgbaImage>; 4],
+        videos: [Option<Vec<u8>>; 2],
+        size: Option<(u32, u32)>,
+        prompt: String,
+        megapixels: f32,
+        seconds: i32,
+        lightning: bool,
+    },
+    MinimaxRefs {
+        images: [Option<RgbaImage>; 4],
+        size: Option<(u32, u32)>,
+        prompt: String,
+        megapixels: f32,
     },
     Draw(super::DrawSettings),
     AnimeDraw(super::DrawSettings),
@@ -194,11 +201,29 @@ impl Job {
         )
     }
 
+    pub fn start_minimax_refs(
+        config: HostConfig,
+        images: [Option<RgbaImage>; 4],
+        size: Option<(u32, u32)>,
+        prompt: String,
+        megapixels: f32,
+    ) -> Self {
+        Self::start_request(
+            config,
+            Request::MinimaxRefs {
+                images,
+                size,
+                prompt,
+                megapixels,
+            },
+        )
+    }
+
     pub fn start_minimax_r2v(
         config: HostConfig,
-        pixels: RgbaImage,
-        extras: [Option<RgbaImage>; 3],
-        video: Option<Vec<u8>>,
+        images: [Option<RgbaImage>; 4],
+        videos: [Option<Vec<u8>>; 2],
+        size: Option<(u32, u32)>,
         prompt: String,
         megapixels: f32,
         seconds: i32,
@@ -206,17 +231,14 @@ impl Job {
     ) -> Self {
         Self::start_request(
             config,
-            Request::Input {
-                pixels,
-                scale: 1.0,
-                workflow: InputWorkflow::MinimaxR2V {
-                    prompt,
-                    megapixels,
-                    seconds,
-                    lightning,
-                    extras,
-                    video,
-                },
+            Request::MinimaxR2V {
+                images,
+                videos,
+                size,
+                prompt,
+                megapixels,
+                seconds,
+                lightning,
             },
         )
     }
@@ -470,6 +492,147 @@ fn encode_comfy_image(image: &RgbaImage) -> Result<Vec<u8>, String> {
     crate::project::encode_webp_rgba_quality(image.as_raw(), image.width(), image.height(), 95)
 }
 
+fn prepare_minimax_r2v_job(
+    client: &Client,
+    cancel: &AtomicBool,
+    progress: &Arc<Mutex<Progress>>,
+    images: [Option<RgbaImage>; 4],
+    videos: [Option<Vec<u8>>; 2],
+    size: Option<(u32, u32)>,
+    prompt: &str,
+    megapixels: f32,
+    seconds: i32,
+    lightning: bool,
+    seed: u64,
+) -> Result<(serde_json::Value, String), String> {
+    super::video::validate_minimax_r2v(
+        megapixels,
+        seconds,
+        prompt,
+        images.iter().any(Option::is_some),
+        videos.iter().any(Option::is_some),
+        size.map(|(w, h)| (w as i32, h as i32)),
+    )?;
+    let mut resolved_size = size;
+    if resolved_size.is_none() {
+        resolved_size = images
+            .iter()
+            .flatten()
+            .next()
+            .map(|image| (image.width(), image.height()));
+    }
+    let image_count = images.iter().filter(|image| image.is_some()).count();
+    let mut filenames = [None, None, None, None];
+    for (i, image) in images.into_iter().enumerate() {
+        let Some(image) = image else {
+            continue;
+        };
+        super::scaled_size(image.width(), image.height(), 1.0)?;
+        progress.lock().unwrap().message = format!("Uploading reference {}...", i + 1);
+        let bytes = encode_comfy_image(&image)?;
+        check_cancel(cancel)?;
+        let postfix = if image_count > 1 {
+            format!("ref{}", i + 1)
+        } else {
+            String::new()
+        };
+        filenames[i] = Some(client.upload(bytes, &postfix)?);
+        check_cancel(cancel)?;
+    }
+    let video_count = videos.iter().filter(|video| video.is_some()).count();
+    let mut video_names = [None, None];
+    for (i, video) in videos.into_iter().enumerate() {
+        let Some(bytes) = video else {
+            continue;
+        };
+        let probe = crate::video::probe_mp4(&bytes);
+        let has_audio = probe.as_ref().is_some_and(|probe| probe.has_audio);
+        if resolved_size.is_none() {
+            resolved_size = probe.map(|probe| (probe.width, probe.height));
+        }
+        progress.lock().unwrap().message = format!("Uploading reference video {}...", i + 1);
+        check_cancel(cancel)?;
+        let postfix = if video_count > 1 {
+            format!("video{}", i + 1)
+        } else {
+            String::new()
+        };
+        video_names[i] = Some((client.upload_mp4(bytes, &postfix)?, has_audio));
+        check_cancel(cancel)?;
+    }
+    let (width, height) = resolved_size.ok_or("Cannot read reference size")?;
+    super::scaled_size(width, height, 1.0)?;
+    progress.lock().unwrap().message = "Uploading size placeholder...".into();
+    let placeholder = RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
+    let bytes = encode_comfy_image(&placeholder)?;
+    check_cancel(cancel)?;
+    let size_filename = client.upload(bytes, "size")?;
+    check_cancel(cancel)?;
+    super::video::prepare_minimax_r2v(
+        filenames,
+        video_names,
+        &size_filename,
+        prompt,
+        megapixels,
+        seconds,
+        lightning,
+        seed,
+    )
+}
+
+fn prepare_minimax_refs_job(
+    client: &Client,
+    cancel: &AtomicBool,
+    progress: &Arc<Mutex<Progress>>,
+    images: [Option<RgbaImage>; 4],
+    size: Option<(u32, u32)>,
+    prompt: &str,
+    megapixels: f32,
+    seed: u64,
+) -> Result<(serde_json::Value, String), String> {
+    super::workflow::validate_minimax_refs(
+        megapixels,
+        prompt,
+        images.iter().any(Option::is_some),
+        size.map(|(w, h)| (w as i32, h as i32)),
+    )?;
+    let mut resolved_size = size;
+    if resolved_size.is_none() {
+        resolved_size = images
+            .iter()
+            .flatten()
+            .next()
+            .map(|image| (image.width(), image.height()));
+    }
+    let image_count = images.iter().filter(|image| image.is_some()).count();
+    let mut filenames = [None, None, None, None];
+    for (i, image) in images.into_iter().enumerate() {
+        let Some(image) = image else {
+            continue;
+        };
+        super::scaled_size(image.width(), image.height(), 1.0)?;
+        progress.lock().unwrap().message = format!("Uploading reference {}...", i + 1);
+        let bytes = encode_comfy_image(&image)?;
+        check_cancel(cancel)?;
+        let postfix = if image_count > 1 {
+            format!("ref{}", i + 1)
+        } else {
+            String::new()
+        };
+        filenames[i] = Some(client.upload(bytes, &postfix)?);
+        check_cancel(cancel)?;
+    }
+    let (width, height) = resolved_size.ok_or("Cannot read reference size")?;
+    super::scaled_size(width, height, 1.0)?;
+    progress.lock().unwrap().message = "Uploading size placeholder...".into();
+    let placeholder = RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
+    let bytes = encode_comfy_image(&placeholder)?;
+    check_cancel(cancel)?;
+    let size_filename = client.upload(bytes, "size")?;
+    check_cancel(cancel)?;
+    super::workflow::prepare_minimax_refs(filenames, &size_filename, prompt, megapixels, seed)
+}
+
 fn run(
     config: HostConfig,
     request: Request,
@@ -495,16 +658,43 @@ fn run(
     let video = matches!(
         &request,
         Request::Input {
-            workflow: InputWorkflow::Video { .. }
-                | InputWorkflow::MinimaxI2V { .. }
-                | InputWorkflow::MinimaxR2V { .. },
+            workflow: InputWorkflow::Video { .. } | InputWorkflow::MinimaxI2V { .. },
             ..
-        }
+        } | Request::MinimaxR2V { .. }
     );
     let (graph, save_node) = match request {
         Request::QwenDraw(settings) => super::workflow::prepare_qwen_draw(&settings, seed)?,
         Request::AnimeDraw(settings) => super::workflow::prepare_anime(None, &settings, 1.0, seed)?,
         Request::Draw(settings) => super::workflow::prepare_draw(&settings, seed)?,
+        Request::MinimaxRefs {
+            images,
+            size,
+            prompt,
+            megapixels,
+        } => prepare_minimax_refs_job(
+            &client, cancel, &progress, images, size, &prompt, megapixels, seed,
+        )?,
+        Request::MinimaxR2V {
+            images,
+            videos,
+            size,
+            prompt,
+            megapixels,
+            seconds,
+            lightning,
+        } => prepare_minimax_r2v_job(
+            &client,
+            cancel,
+            &progress,
+            images,
+            videos,
+            size,
+            &prompt,
+            megapixels,
+            seconds,
+            lightning,
+            seed,
+        )?,
         Request::Input {
             pixels,
             scale,
@@ -537,19 +727,6 @@ fn run(
                 super::video::validate_minimax_i2v(*megapixels, *seconds, prompt)?;
                 if let Some(last) = last {
                     super::scaled_size(last.width(), last.height(), 1.0)?;
-                }
-            }
-            if let InputWorkflow::MinimaxR2V {
-                prompt,
-                megapixels,
-                seconds,
-                extras,
-                ..
-            } = &workflow
-            {
-                super::video::validate_minimax_i2v(*megapixels, *seconds, prompt)?;
-                for extra in extras.iter().flatten() {
-                    super::scaled_size(extra.width(), extra.height(), 1.0)?;
                 }
             }
             if let InputWorkflow::DrawCn { settings, control } = &workflow {
@@ -586,11 +763,6 @@ fn run(
                     ..
                 }
                 | InputWorkflow::MinimaxI2V { last: Some(_), .. } => "first",
-                InputWorkflow::MinimaxR2V { extras, .. }
-                    if extras.iter().any(Option::is_some) =>
-                {
-                    "ref1"
-                }
                 _ => "",
             };
             let filename = client.upload(bytes, first_postfix)?;
@@ -660,37 +832,6 @@ fn run(
                         seconds,
                         turbo,
                         seed,
-                    )?
-                }
-                InputWorkflow::MinimaxR2V {
-                    prompt,
-                    megapixels,
-                    seconds,
-                    lightning,
-                    extras,
-                    video,
-                } => {
-                    let mut images = [Some(filename), None, None, None];
-                    for (i, extra) in extras.into_iter().enumerate() {
-                        if let Some(extra) = extra {
-                            progress.lock().unwrap().message =
-                                format!("Uploading reference {}...", i + 2);
-                            let bytes = encode_comfy_image(&extra)?;
-                            check_cancel(cancel)?;
-                            images[i + 1] =
-                                Some(client.upload(bytes, &format!("ref{}", i + 2))?);
-                            check_cancel(cancel)?;
-                        }
-                    }
-                    let video = if let Some(bytes) = video {
-                        progress.lock().unwrap().message = "Uploading reference video...".into();
-                        check_cancel(cancel)?;
-                        Some(client.upload_mp4(bytes, "")?)
-                    } else {
-                        None
-                    };
-                    super::video::prepare_minimax_r2v(
-                        images, video, &prompt, megapixels, seconds, lightning, seed,
                     )?
                 }
                 InputWorkflow::Edit(prompt) => super::workflow::prepare(&filename, &prompt, seed)?,

@@ -1,5 +1,6 @@
 use super::ai_dialog::choose;
 use crate::app::EditorApp;
+use crate::prompt_preset::PromptKind;
 use glam::Vec2;
 use mega_ui::{ScrollAxes, Ui, Window};
 
@@ -25,7 +26,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     draw_refs(ui, app, true);
                 } else if r2v {
                     draw_refs(ui, app, false);
-                    draw_r2v_video(ui, app);
+                    draw_r2v_videos(ui, app);
                 } else {
                     ui.label("Source document");
                     let names: Vec<_> = app.workspace.documents.iter().map(|d| d.name.as_str()).collect();
@@ -62,16 +63,49 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                             "Lightning",
                             &mut app.ai.minimax_r2v_lightning,
                         );
+                        ui.checkbox(
+                            "minimax_r2v_custom_size",
+                            "Custom size",
+                            &mut app.ai.r2v_custom_size,
+                        );
+                        if app.ai.r2v_custom_size {
+                            ui.horizontal(|ui| {
+                                ui.label("Width");
+                                ui.drag_int("minimax_r2v_width", &mut app.ai.r2v_width, 8);
+                                ui.label("Height");
+                                ui.drag_int("minimax_r2v_height", &mut app.ai.r2v_height, 8);
+                            });
+                        }
                     } else {
                         ui.checkbox("minimax_i2v_turbo", "Turbo", &mut app.ai.minimax_i2v_turbo);
                     }
-                    ui.label("Prompt");
+                    app.dirty |= app.ai.presets.draw(
+                        ui,
+                        "Prompt",
+                        PromptKind::Video,
+                        &mut app.workspace.prompt_presets,
+                        &mut app.ai.video_settings.prompt,
+                        None,
+                    );
                     ui.text_area("video_prompt", &mut app.ai.video_settings.prompt, Vec2::new(0.0, 130.0));
-                    if let Err(error) = crate::comfyui::validate_minimax_i2v(
-                        app.ai.minimax_i2v_megapixels,
-                        app.ai.video_settings.seconds,
-                        &app.ai.video_settings.prompt,
-                    ) {
+                    if let Err(error) = if r2v {
+                        crate::comfyui::validate_minimax_r2v(
+                            app.ai.minimax_i2v_megapixels,
+                            app.ai.video_settings.seconds,
+                            &app.ai.video_settings.prompt,
+                            app.ai.r2v_refs.iter().any(|r| r.enabled),
+                            app.ai.r2v_video.iter().any(|on| *on),
+                            app.ai
+                                .r2v_custom_size
+                                .then_some((app.ai.r2v_width, app.ai.r2v_height)),
+                        )
+                    } else {
+                        crate::comfyui::validate_minimax_i2v(
+                            app.ai.minimax_i2v_megapixels,
+                            app.ai.video_settings.seconds,
+                            &app.ai.video_settings.prompt,
+                        )
+                    } {
                         ui.label(&error);
                     }
                     return;
@@ -112,7 +146,14 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     ui.label("Duration (seconds)");
                     ui.drag_int("video_seconds", &mut app.ai.video_settings.seconds, 1);
                 });
-                ui.label("Prompt");
+                app.dirty |= app.ai.presets.draw(
+                    ui,
+                    "Prompt",
+                    PromptKind::Video,
+                    &mut app.workspace.prompt_presets,
+                    &mut app.ai.video_settings.prompt,
+                    None,
+                );
                 ui.text_area("video_prompt", &mut app.ai.video_settings.prompt, Vec2::new(0.0, 130.0));
                 for i in 0..app.ai.video_settings.loras.len() {
                     if i > 0 && app.ai.video_settings.loras[i - 1].name.is_none() {
@@ -138,9 +179,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         if running { cancel = ui.button("video_cancel", "Cancel").clicked(); ui.request_repaint(); }
         else {
             let source_valid = if i2v {
-                (0..2).all(|i| frame_ref_valid(app, &app.ai.i2v_refs, i))
+                (0..2).all(|i| frame_ref_valid(app, &app.ai.i2v_refs, i, true))
             } else if r2v {
-                (0..4).all(|i| frame_ref_valid(app, &app.ai.r2v_refs, i)) && r2v_video_valid(app)
+                (0..4).all(|i| frame_ref_valid(app, &app.ai.r2v_refs, i, false))
+                    && r2v_videos_valid(app)
             } else {
                 app.workspace.documents.iter().find(|d| d.id == app.ai.document_id)
                     .is_some_and(|d| d.project.width > 0 && d.project.height > 0
@@ -151,11 +193,23 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     .is_some_and(|d| d.project.width > 0 && d.project.height > 0
                         && app.ai.video_end_layer.is_none_or(|i| i < d.project.layers.len()))
             });
-            let settings_ok = if i2v || r2v {
+            let settings_ok = if i2v {
                 crate::comfyui::validate_minimax_i2v(
                     app.ai.minimax_i2v_megapixels,
                     app.ai.video_settings.seconds,
                     &app.ai.video_settings.prompt,
+                )
+                .is_ok()
+            } else if r2v {
+                crate::comfyui::validate_minimax_r2v(
+                    app.ai.minimax_i2v_megapixels,
+                    app.ai.video_settings.seconds,
+                    &app.ai.video_settings.prompt,
+                    app.ai.r2v_refs.iter().any(|r| r.enabled),
+                    app.ai.r2v_video.iter().any(|on| *on),
+                    app.ai
+                        .r2v_custom_size
+                        .then_some((app.ai.r2v_width, app.ai.r2v_height)),
                 )
                 .is_ok()
             } else {
@@ -179,9 +233,14 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     }
 }
 
-fn frame_ref_valid(app: &EditorApp, refs: &[super::ai_dialog::VideoRef], index: usize) -> bool {
+pub(crate) fn frame_ref_valid(
+    app: &EditorApp,
+    refs: &[super::ai_dialog::VideoRef],
+    index: usize,
+    required_first: bool,
+) -> bool {
     let reference = &refs[index];
-    if index > 0 && !reference.enabled {
+    if (!required_first || index > 0) && !reference.enabled {
         return true;
     }
     app.workspace
@@ -195,66 +254,116 @@ fn frame_ref_valid(app: &EditorApp, refs: &[super::ai_dialog::VideoRef], index: 
         })
 }
 
-fn r2v_video_valid(app: &EditorApp) -> bool {
-    !app.ai.r2v_video
-        || app
-            .workspace
-            .videos
-            .iter()
-            .any(|v| v.id == app.ai.r2v_video_id)
-}
-
-fn draw_r2v_video(ui: &mut Ui, app: &mut EditorApp) {
-    ui.horizontal(|ui| {
-        ui.checkbox("r2v_video", "Video", &mut app.ai.r2v_video);
-        if app.workspace.videos.is_empty() {
-            ui.label("No video assets");
-            return;
-        }
-        if app.ai.r2v_video
-            && app
+fn r2v_videos_valid(app: &EditorApp) -> bool {
+    (0..2).all(|i| {
+        !app.ai.r2v_video[i]
+            || app
                 .workspace
                 .videos
                 .iter()
-                .all(|v| v.id != app.ai.r2v_video_id)
-        {
-            app.ai.r2v_video_id = app.workspace.videos[0].id.clone();
-        }
-        let names: Vec<String> = app.workspace.videos.iter().map(|v| v.name.clone()).collect();
-        let options: Vec<&str> = names.iter().map(String::as_str).collect();
-        let mut index = app
-            .workspace
-            .videos
-            .iter()
-            .position(|v| v.id == app.ai.r2v_video_id)
-            .unwrap_or(0);
-        let enabled = app.ai.r2v_video;
-        ui.add_enabled(enabled, |ui| {
-            if ui.select("r2v_video_asset", &mut index, &options).changed() {
-                app.ai.r2v_video_id = app.workspace.videos[index].id.clone();
+                .any(|v| v.id == app.ai.r2v_video_id[i])
+    })
+}
+
+fn draw_r2v_videos(ui: &mut Ui, app: &mut EditorApp) {
+    for i in 0..2 {
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &format!("r2v_video_{i}"),
+                &format!("Video {}", i + 1),
+                &mut app.ai.r2v_video[i],
+            );
+            if app.workspace.videos.is_empty() {
+                ui.label("No video assets");
+                if ui.button(&format!("r2v_video_tag_{i}"), "R").clicked() {
+                    append_reference_tag(&mut app.ai.video_settings.prompt, "Video", i);
+                }
+                return;
+            }
+            if app.ai.r2v_video[i]
+                && app
+                    .workspace
+                    .videos
+                    .iter()
+                    .all(|v| v.id != app.ai.r2v_video_id[i])
+            {
+                app.ai.r2v_video_id[i] = app.workspace.videos[0].id.clone();
+            }
+            let names: Vec<String> = app.workspace.videos.iter().map(|v| v.name.clone()).collect();
+            let options: Vec<&str> = names.iter().map(String::as_str).collect();
+            let mut index = app
+                .workspace
+                .videos
+                .iter()
+                .position(|v| v.id == app.ai.r2v_video_id[i])
+                .unwrap_or(0);
+            let enabled = app.ai.r2v_video[i];
+            ui.add_enabled(enabled, |ui| {
+                if ui
+                    .select(&format!("r2v_video_asset_{i}"), &mut index, &options)
+                    .changed()
+                {
+                    app.ai.r2v_video_id[i] = app.workspace.videos[index].id.clone();
+                }
+            });
+            if ui.button(&format!("r2v_video_tag_{i}"), "R").clicked() {
+                append_reference_tag(&mut app.ai.video_settings.prompt, "Video", i);
             }
         });
-    });
+    }
 }
 
 fn draw_refs(ui: &mut Ui, app: &mut EditorApp, i2v: bool) {
-    let (prefix, labels): (&str, &[&str]) = if i2v {
-        ("i2v", &["First", "Last"])
+    if i2v {
+        let _ = draw_document_refs(
+            ui,
+            &app.workspace.documents,
+            &mut app.ai.i2v_refs,
+            "i2v",
+            &["First", "Last"],
+            true,
+        );
     } else {
-        (
+        if let Some(index) = draw_document_refs(
+            ui,
+            &app.workspace.documents,
+            &mut app.ai.r2v_refs,
             "r2v",
-            &["Reference 1", "Reference 2", "Reference 3", "Reference 4"],
-        )
-    };
-    let refs = if i2v {
-        &mut app.ai.i2v_refs[..]
-    } else {
-        &mut app.ai.r2v_refs[..]
-    };
-    refs[0].enabled = true;
+            &[
+                "Reference 1",
+                "Reference 2",
+                "Reference 3",
+                "Reference 4",
+            ],
+            false,
+        ) {
+            append_reference_tag(&mut app.ai.video_settings.prompt, "Picture", index);
+        }
+    }
+}
+
+pub(super) fn append_reference_tag(prompt: &mut String, kind: &str, index: usize) {
+    if !prompt.is_empty() && !prompt.ends_with(char::is_whitespace) {
+        prompt.push(' ');
+    }
+    prompt.push_str(&format!("<{kind} {}>", index + 1));
+}
+
+pub(crate) fn draw_document_refs(
+    ui: &mut Ui,
+    documents: &[crate::workspace::Document],
+    refs: &mut [super::ai_dialog::VideoRef],
+    prefix: &str,
+    labels: &[&str],
+    required_first: bool,
+) -> Option<usize> {
+    let mut insert_reference = None;
+    if required_first {
+        refs[0].enabled = true;
+    }
     for i in 0..refs.len() {
         ui.horizontal(|ui| {
-            if i == 0 {
+            if i == 0 && required_first {
                 let mut on = true;
                 ui.add_enabled(false, |ui| {
                     ui.checkbox(&format!("{prefix}_ref_0"), labels[0], &mut on);
@@ -266,10 +375,8 @@ fn draw_refs(ui: &mut Ui, app: &mut EditorApp, i2v: bool) {
                     &mut refs[i].enabled,
                 );
             }
-            let names: Vec<_> = app.workspace.documents.iter().map(|d| d.name.as_str()).collect();
-            let mut doc_index = app
-                .workspace
-                .documents
+            let names: Vec<_> = documents.iter().map(|d| d.name.as_str()).collect();
+            let mut doc_index = documents
                 .iter()
                 .position(|d| d.id == refs[i].document_id)
                 .unwrap_or(0);
@@ -277,10 +384,10 @@ fn draw_refs(ui: &mut Ui, app: &mut EditorApp, i2v: bool) {
                 .select(&format!("{prefix}_document_{i}"), &mut doc_index, &names)
                 .changed()
             {
-                refs[i].document_id = app.workspace.documents[doc_index].id.clone();
+                refs[i].document_id = documents[doc_index].id.clone();
                 refs[i].layer = None;
             }
-            if let Some(doc) = app.workspace.documents.get(doc_index) {
+            if let Some(doc) = documents.get(doc_index) {
                 let mut sources = vec!["Whole document".to_string()];
                 sources.extend(doc.project.layers.iter().map(|l| format!("Layer: {}", l.name)));
                 let options: Vec<_> = sources.iter().map(String::as_str).collect();
@@ -295,6 +402,12 @@ fn draw_refs(ui: &mut Ui, app: &mut EditorApp, i2v: bool) {
                     refs[i].layer = source.checked_sub(1);
                 }
             }
+            if matches!(prefix, "r2v" | "refs")
+                && ui.button(&format!("{prefix}_ref_tag_{i}"), "R").clicked()
+            {
+                insert_reference = Some(i);
+            }
         });
     }
+    insert_reference
 }

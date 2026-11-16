@@ -97,6 +97,7 @@ pub struct EditorApp {
     close_aborted: bool,
     video_preview: Option<crate::video::Playback>,
     video_poster: Option<crate::video::PosterJob>,
+    pub(crate) video_trim: video::TrimState,
 }
 
 impl Default for EditorApp {
@@ -147,6 +148,7 @@ impl EditorApp {
             close_aborted: false,
             video_preview: None,
             video_poster: None,
+            video_trim: Default::default(),
         };
         match crate::editor_settings::EditorSettings::load() {
             Ok(settings) => app.settings = settings,

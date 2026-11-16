@@ -146,6 +146,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             {
                 app.open_ai_minimax_redraw();
             }
+            if ui.menu_item("minimax_refs", "Refs...").clicked() {
+                app.open_ai_minimax_refs();
+            }
             if ui.menu_item("minimax_i2v", "I2V...").clicked() {
                 app.open_ai_minimax_i2v();
             }

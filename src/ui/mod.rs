@@ -18,6 +18,7 @@ pub mod delete_dialog;
 mod unsaved_dialog;
 mod tool_options;
 mod tools_panel;
+pub(crate) use tools_panel::load_icons as load_tool_icons;
 mod timeline;
 mod video_dialog;
 

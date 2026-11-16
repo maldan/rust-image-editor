@@ -1696,27 +1696,32 @@ mod tests {
         let original = fs::read(&path).unwrap();
         let preset = PromptPreset::new("My style".into(), "positive\nsecond line".into(), "negative".into());
         workspace.prompt_presets.push(preset.clone());
+        let video = PromptPreset::new("Camera".into(), "Orbit <Picture 1>".into(), String::new())
+            .with_kind(crate::prompt_preset::PromptKind::Video);
+        workspace.prompt_presets.push(video.clone());
         workspace.save(&path).unwrap();
         assert!(fs::read(&path).unwrap().starts_with(&original));
         let archive = MegaFile::open(&path).unwrap();
         let manifest: serde_json::Value = serde_json::from_slice(&archive.read_all(MANIFEST_PATH).unwrap()).unwrap();
         assert_eq!(manifest["prompt_presets"][0]["id"], preset.id);
         assert_eq!(manifest["prompt_presets"][0]["negative"], "negative");
+        assert_eq!(manifest["prompt_presets"][0]["kind"], "image");
+        assert_eq!(manifest["prompt_presets"][1]["kind"], "video");
         assert_eq!(manifest["version"], 9);
         drop(archive);
         let unchanged = fs::read(&path).unwrap();
         workspace.save(&path).unwrap();
         assert_eq!(fs::read(&path).unwrap(), unchanged);
         let mut loaded = Workspace::open(&path).unwrap();
-        assert_eq!(loaded.prompt_presets, vec![preset.clone()]);
+        assert_eq!(loaded.prompt_presets, vec![preset.clone(), video.clone()]);
         loaded.save(&copy).unwrap();
         loaded.optimize().unwrap();
         let mut copied = Workspace::open(&copy).unwrap();
-        assert_eq!(copied.prompt_presets, vec![preset]);
+        assert_eq!(copied.prompt_presets, vec![preset, video]);
         copied.prompt_presets.clear();
         copied.save(&copy).unwrap();
         assert!(Workspace::open(&copy).unwrap().prompt_presets.is_empty());
-        assert_eq!(Workspace::open(&path).unwrap().prompt_presets.len(), 1);
+        assert_eq!(Workspace::open(&path).unwrap().prompt_presets.len(), 2);
         copied.ensure_document_loaded(0).unwrap();
         assert_eq!(copied.active().layers[0].pixels.read(0, 0, 0), [10, 20, 30, 255]);
     }

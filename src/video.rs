@@ -1,4 +1,4 @@
-//! In-process, bounded video decoding. No child processes or temporary video files.
+//! In-process, bounded video decoding and editing.
 use crate::workspace::VideoAsset;
 use ffmpeg_next as ffmpeg;
 use image::RgbaImage;
@@ -13,6 +13,7 @@ use std::{
 };
 
 mod audio;
+pub(crate) mod trim;
 
 #[derive(Clone, Default)]
 struct Transport {
@@ -75,6 +76,55 @@ fn init() -> Result<(), String> {
 }
 fn error(context: &str, error: ffmpeg::Error) -> String {
     format!("{context}: {error}")
+}
+
+pub struct Mp4Probe {
+    pub has_audio: bool,
+    pub width: u32,
+    pub height: u32,
+}
+
+fn open_mp4(bytes: &[u8]) -> Result<ffmpeg::format::context::Input, String> {
+    init()?;
+    let asset = VideoAsset::from_bytes(bytes.to_vec());
+    let io = ffmpeg::format::context::StreamIo::from_read_seek_with_capacity(
+        asset.reader(),
+        64 * 1024,
+    )
+    .map_err(|e| error("Cannot open video stream", e))?;
+    ffmpeg::format::input_from_stream_with_interrupt(io, Some("preview.mp4"), None, || false)
+        .map_err(|e| error("Cannot read MP4", e))
+}
+
+/// Container probe: video size plus whether an audio stream exists. Unreadable input is `None`.
+pub fn probe_mp4(bytes: &[u8]) -> Option<Mp4Probe> {
+    (|| {
+        let input = open_mp4(bytes)?;
+        let has_audio = input.streams().best(ffmpeg::media::Type::Audio).is_some();
+        let stream = input
+            .streams()
+            .best(ffmpeg::media::Type::Video)
+            .ok_or_else(|| "MP4 has no video stream".to_string())?;
+        let decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+            .map_err(|e| error("Cannot configure video decoder", e))?
+            .decoder()
+            .video()
+            .map_err(|e| error("Cannot decode video codec", e))?;
+        if decoder.width() == 0 || decoder.height() == 0 {
+            return Err("MP4 has no video size".to_string());
+        }
+        Ok(Mp4Probe {
+            has_audio,
+            width: decoder.width(),
+            height: decoder.height(),
+        })
+    })()
+    .ok()
+}
+
+/// Container probe only: true if the MP4 has an audio stream. Missing or unreadable audio is false.
+pub fn mp4_has_audio(bytes: &[u8]) -> bool {
+    probe_mp4(bytes).is_some_and(|probe| probe.has_audio)
 }
 fn preview_size(
     width: u32,
@@ -839,6 +889,23 @@ impl Drop for PosterJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mp4_has_audio_detects_a_stream_without_decoding() {
+        let silent = include_bytes!("../tests/fixtures/video-preview.mp4");
+        let sounded = include_bytes!("../tests/fixtures/video-with-audio.mp4");
+        let silent_probe = probe_mp4(silent).unwrap();
+        assert!(!silent_probe.has_audio);
+        assert!(silent_probe.width > 0 && silent_probe.height > 0);
+        let sounded_probe = probe_mp4(sounded).unwrap();
+        assert!(sounded_probe.has_audio);
+        assert!(sounded_probe.width > 0 && sounded_probe.height > 0);
+        assert!(!mp4_has_audio(silent));
+        assert!(mp4_has_audio(sounded));
+        assert!(probe_mp4(b"\0\0\0\x18ftypisombroken").is_none());
+        assert!(!mp4_has_audio(b"\0\0\0\x18ftypisombroken"));
+    }
+
     #[test]
     #[ignore = "manual benchmark; generate target/seek-benchmark.mp4 first"]
     fn seek_latency_benchmark() {

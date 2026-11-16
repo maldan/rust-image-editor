@@ -3,6 +3,7 @@ use serde_json::Value;
 pub const QWEN_DRAW: &str = include_str!("../../comfyui/image.qwen_edit_21_draw.json");
 pub const EMBEDDED: &str = include_str!("../../comfyui/image.qwen_edit_21.json");
 pub const MINIMAX_REDRAW: &str = include_str!("../../comfyui/image.minimax_h3.redraw.json");
+pub const MINIMAX_REFS: &str = include_str!("../../comfyui/image.minimax_h3.refs.json");
 pub const INPAINT: &str = include_str!("../../comfyui/image.sd_inpaint.json");
 pub const REDRAW: &str = include_str!("../../comfyui/image.sd_redraw.json");
 pub const ANIME: &str = include_str!("../../comfyui/image.anima_draw.json");
@@ -407,6 +408,76 @@ pub fn prepare_minimax_redraw(
     let mut graph: Value = serde_json::from_str(MINIMAX_REDRAW)
         .map_err(|e| format!("Invalid Minimax redraw workflow: {e}"))?;
     patch(&mut graph, "LoadImage", "image", filename.into())?;
+    patch(&mut graph, "Prompt", "value", prompt.into())?;
+    patch(
+        &mut graph,
+        "ResizeMegapixels",
+        "resize_type.megapixels",
+        megapixels.into(),
+    )?;
+    patch(&mut graph, "Sampler", "seed", seed.into())?;
+    let output = node_id(&graph, "SaveImage")?;
+    Ok((graph, output))
+}
+
+pub fn validate_minimax_refs(
+    megapixels: f32,
+    prompt: &str,
+    has_image: bool,
+    custom_size: Option<(i32, i32)>,
+) -> Result<(), String> {
+    validate_megapixels(megapixels)?;
+    if prompt.trim().is_empty() {
+        return Err("Enter a prompt".into());
+    }
+    match custom_size {
+        Some((width, height)) => {
+            if width < 64 || height < 64 || width % 8 != 0 || height % 8 != 0 {
+                return Err("Custom size must be at least 64 px and a multiple of 8".into());
+            }
+            super::scaled_size(width as u32, height as u32, 1.0)?;
+            Ok(())
+        }
+        None if !has_image => Err("Choose a reference image or enable custom size".into()),
+        None => Ok(()),
+    }
+}
+
+pub fn prepare_minimax_refs(
+    images: [Option<String>; 4],
+    size_filename: &str,
+    prompt: &str,
+    megapixels: f32,
+    seed: u64,
+) -> Result<(Value, String), String> {
+    validate_megapixels(megapixels)?;
+    if prompt.trim().is_empty() {
+        return Err("Enter a prompt".into());
+    }
+    if size_filename.is_empty() {
+        return Err("Cannot read reference size".into());
+    }
+    let mut graph: Value = serde_json::from_str(MINIMAX_REFS)
+        .map_err(|e| format!("Invalid Minimax refs workflow: {e}"))?;
+    let cond = node_id(&graph, "MiniMax H3 Image Conditioning")?;
+    let pe = node_id(&graph, "Generate Text")?;
+    for i in 0..4 {
+        let id = node_id(&graph, &format!("LoadImage{}", i + 1))?;
+        if let Some(filename) = &images[i] {
+            graph[&id]["inputs"]["image"] = filename.clone().into();
+        } else {
+            graph.as_object_mut().unwrap().remove(&id);
+            graph[&cond]["inputs"]
+                .as_object_mut()
+                .ok_or("MiniMax H3 Image Conditioning has no inputs")?
+                .remove(&format!("images.image_{i}"));
+            graph[&pe]["inputs"]
+                .as_object_mut()
+                .ok_or("Generate Text has no inputs")?
+                .remove(&format!("images.image{}", i + 1));
+        }
+    }
+    patch(&mut graph, "RefImageSize", "image", size_filename.into())?;
     patch(&mut graph, "Prompt", "value", prompt.into())?;
     patch(
         &mut graph,
@@ -1095,5 +1166,75 @@ mod tests {
         for megapixels in [0.5, 16.5, f32::NAN, f32::INFINITY] {
             assert!(prepare_minimax_redraw("input.png", "x", megapixels, 0).is_err());
         }
+    }
+
+    #[test]
+    fn minimax_refs_drops_unused_load_images_and_keeps_size_placeholder() {
+        let original: Value = serde_json::from_str(MINIMAX_REFS).unwrap();
+        let (graph, save) = prepare_minimax_refs(
+            [None, Some("b.webp".into()), Some("c.webp".into()), None],
+            "size.webp",
+            "Two refs",
+            4.0,
+            7,
+        )
+        .unwrap();
+        assert_eq!(save, node_id(&original, "SaveImage").unwrap());
+        let cond = node_id(&graph, "MiniMax H3 Image Conditioning").unwrap();
+        let pe = node_id(&graph, "Generate Text").unwrap();
+        assert!(node_id(&graph, "LoadImage1").is_err());
+        assert_eq!(graph[node_id(&graph, "LoadImage2").unwrap()]["inputs"]["image"], "b.webp");
+        assert_eq!(graph[node_id(&graph, "LoadImage3").unwrap()]["inputs"]["image"], "c.webp");
+        assert!(node_id(&graph, "LoadImage4").is_err());
+        assert_eq!(graph[node_id(&graph, "RefImageSize").unwrap()]["inputs"]["image"], "size.webp");
+        assert!(graph[&cond]["inputs"].get("images.image_0").is_none());
+        assert_eq!(graph[&cond]["inputs"]["images.image_1"], serde_json::json!(["67", 0]));
+        assert_eq!(graph[&cond]["inputs"]["images.image_2"], serde_json::json!(["68", 0]));
+        assert!(graph[&cond]["inputs"].get("images.image_3").is_none());
+        assert!(graph[&pe]["inputs"].get("images.image1").is_none());
+        assert_eq!(graph[&pe]["inputs"]["images.image2"], serde_json::json!(["67", 0]));
+        assert!(graph[&pe]["inputs"].get("images.image4").is_none());
+        for node in graph.as_object().unwrap().values() {
+            for input in node["inputs"].as_object().unwrap().values() {
+                if let Some(link) = input.as_array() {
+                    assert!(
+                        graph.get(link[0].as_str().unwrap()).is_some(),
+                        "dangling workflow link"
+                    );
+                }
+            }
+        }
+        let (mut full, _) = prepare_minimax_refs(
+            [
+                Some("a.webp".into()),
+                Some("b.webp".into()),
+                Some("c.webp".into()),
+                Some("d.webp".into()),
+            ],
+            "size.webp",
+            "x",
+            4.0,
+            1,
+        )
+        .unwrap();
+        for (title, key) in [
+            ("LoadImage1", "image"),
+            ("LoadImage2", "image"),
+            ("LoadImage3", "image"),
+            ("LoadImage4", "image"),
+            ("RefImageSize", "image"),
+            ("Prompt", "value"),
+            ("ResizeMegapixels", "resize_type.megapixels"),
+            ("Sampler", "seed"),
+        ] {
+            let id = node_id(&full, title).unwrap();
+            full[&id]["inputs"][key] = original[&id]["inputs"][key].clone();
+        }
+        assert_eq!(full, original);
+        assert!(validate_minimax_refs(4.0, "x", false, None).is_err());
+        assert!(validate_minimax_refs(4.0, "x", false, Some((512, 288))).is_ok());
+        assert!(validate_minimax_refs(4.0, "x", true, None).is_ok());
+        assert!(validate_minimax_refs(0.5, "x", true, None).is_err());
+        assert!(validate_minimax_refs(4.0, "   ", true, None).is_err());
     }
 }

@@ -24,6 +24,10 @@ impl EditorApp {
         self.open_ai_mode(AiMode::MinimaxI2V);
     }
 
+    pub fn open_ai_minimax_refs(&mut self) {
+        self.open_ai_mode(AiMode::MinimaxRefs);
+    }
+
     pub fn open_ai_minimax_r2v(&mut self) {
         self.open_ai_mode(AiMode::MinimaxR2V);
     }
@@ -88,9 +92,14 @@ impl EditorApp {
             self.ai.video_end_document = None;
             self.ai.video_end_layer = None;
         }
-        if matches!(mode, AiMode::MinimaxI2V | AiMode::MinimaxR2V) {
+        if matches!(
+            mode,
+            AiMode::MinimaxI2V | AiMode::MinimaxR2V | AiMode::MinimaxRefs
+        ) {
             let refs: &mut [crate::ui::ai_dialog::VideoRef] = if mode == AiMode::MinimaxI2V {
                 &mut self.ai.i2v_refs
+            } else if mode == AiMode::MinimaxRefs {
+                &mut self.ai.minimax_refs
             } else {
                 &mut self.ai.r2v_refs
             };
@@ -166,6 +175,10 @@ impl EditorApp {
         let Some(config) = self.ai.config.clone() else {
             return;
         };
+        if self.ai.mode == AiMode::MinimaxRefs {
+            self.start_minimax_refs(config);
+            return;
+        }
         if !self.ai.mode.needs_input() {
             if let Err(error) = self.ai.draw_settings.validate() {
                 self.ai.message = error;
@@ -446,19 +459,91 @@ impl EditorApp {
         ));
     }
 
-    fn start_minimax_r2v(&mut self, config: crate::comfyui::HostConfig) {
-        if let Err(error) = crate::comfyui::validate_minimax_i2v(
-            self.ai.minimax_i2v_megapixels,
-            self.ai.video_settings.seconds,
-            &self.ai.video_settings.prompt,
+    fn start_minimax_refs(&mut self, config: crate::comfyui::HostConfig) {
+        let has_image = self.ai.minimax_refs.iter().any(|r| r.enabled);
+        let custom_size = self
+            .ai
+            .refs_custom_size
+            .then_some((self.ai.refs_width, self.ai.refs_height));
+        if let Err(error) = crate::comfyui::validate_minimax_refs(
+            self.ai.megapixels,
+            &self.ai.prompt,
+            has_image,
+            custom_size,
         ) {
             self.ai.message = error;
             return;
         }
-        self.ai.r2v_refs[0].enabled = true;
         let mut images = [None, None, None, None];
         for i in 0..4 {
-            if i > 0 && !self.ai.r2v_refs[i].enabled {
+            if !self.ai.minimax_refs[i].enabled {
+                continue;
+            }
+            let document = self.ai.minimax_refs[i].document_id.clone();
+            let layer = self.ai.minimax_refs[i].layer;
+            match self.video_frame_input(&document, layer) {
+                Ok(image) => images[i] = Some(image),
+                Err(error) => {
+                    self.ai.message = error;
+                    return;
+                }
+            }
+        }
+        let size = custom_size.map(|(w, h)| (w as u32, h as u32));
+        let (region_w, region_h) = size.or_else(|| {
+            images
+                .iter()
+                .flatten()
+                .next()
+                .map(|image| (image.width(), image.height()))
+        }).unwrap_or((self.ai.refs_width as u32, self.ai.refs_height as u32));
+        self.ai.document_id = self.workspace.active_doc().id.clone();
+        self.ai.input_region = Some(
+            crate::editing::PixelRect {
+                min_x: 0,
+                min_y: 0,
+                max_x: region_w,
+                max_y: region_h,
+            }
+            .into(),
+        );
+        self.ai.message = "Preparing input…".into();
+        self.ai.preview = None;
+        self.ai.result = None;
+        self.ai.result_metadata = None;
+        self.ai.preview_dirty = false;
+        self.ai.fraction = None;
+        self.ai.result_metadata = Some(self.ai.generation_metadata());
+        self.ai.job = Some(crate::comfyui::Job::start_minimax_refs(
+            config,
+            images,
+            size,
+            self.ai.prompt.clone(),
+            self.ai.megapixels,
+        ));
+    }
+
+    fn start_minimax_r2v(&mut self, config: crate::comfyui::HostConfig) {
+        let has_image = self.ai.r2v_refs.iter().any(|r| r.enabled);
+        let has_video = self.ai.r2v_video.iter().any(|on| *on);
+        let custom_size = self
+            .ai
+            .r2v_custom_size
+            .then_some((self.ai.r2v_width, self.ai.r2v_height));
+        if let Err(error) = crate::comfyui::validate_minimax_r2v(
+            self.ai.minimax_i2v_megapixels,
+            self.ai.video_settings.seconds,
+            &self.ai.video_settings.prompt,
+            has_image,
+            has_video,
+            custom_size,
+        ) {
+            self.ai.message = error;
+            return;
+        }
+        let mut images = [None, None, None, None];
+        for i in 0..4 {
+            if !self.ai.r2v_refs[i].enabled {
                 continue;
             }
             let document = self.ai.r2v_refs[i].document_id.clone();
@@ -471,16 +556,15 @@ impl EditorApp {
                 }
             }
         }
-        let Some(first) = images[0].take() else {
-            self.ai.message = "Choose reference 1".into();
-            return;
-        };
-        let extras = [images[1].take(), images[2].take(), images[3].take()];
-        let video = if self.ai.r2v_video {
-            let id = self.ai.r2v_video_id.clone();
+        let mut videos = [None, None];
+        for i in 0..2 {
+            if !self.ai.r2v_video[i] {
+                continue;
+            }
+            let id = self.ai.r2v_video_id[i].clone();
             match self.workspace.videos.iter().find(|v| v.id == id) {
                 Some(asset) => match asset.read() {
-                    Ok(bytes) => Some(bytes),
+                    Ok(bytes) => videos[i] = Some(bytes),
                     Err(error) => {
                         self.ai.message = error;
                         return;
@@ -491,18 +575,17 @@ impl EditorApp {
                     return;
                 }
             }
-        } else {
-            None
-        };
+        }
+        let size = custom_size.map(|(w, h)| (w as u32, h as u32));
         self.ai.message = "Preparing video input…".into();
         self.ai.fraction = None;
         self.ai.preview = None;
         self.ai.preview_dirty = false;
         self.ai.job = Some(crate::comfyui::Job::start_minimax_r2v(
             config,
-            first,
-            extras,
-            video,
+            images,
+            videos,
+            size,
             self.ai.video_settings.prompt.clone(),
             self.ai.minimax_i2v_megapixels,
             self.ai.video_settings.seconds,

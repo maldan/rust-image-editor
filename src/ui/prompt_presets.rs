@@ -1,7 +1,7 @@
 use glam::Vec2;
 use mega_ui::{ScrollAxes, TextStyle, Ui};
 
-use crate::prompt_preset::PromptPreset;
+use crate::prompt_preset::{PromptKind, PromptPreset};
 
 enum View {
     List,
@@ -20,6 +20,7 @@ mod tests {
         positive: String,
         negative: String,
         dirty: bool,
+        kind: PromptKind,
     }
 
     impl Harness {
@@ -35,6 +36,7 @@ mod tests {
                 positive: String::new(),
                 negative: String::new(),
                 dirty: false,
+                kind: PromptKind::Image,
             }
         }
 
@@ -46,9 +48,10 @@ mod tests {
             self.dirty |= self.panel.draw(
                 &mut self.ui,
                 "Prompt",
+                self.kind,
                 &mut self.items,
                 &mut self.positive,
-                Some(&mut self.negative),
+                (self.kind == PromptKind::Image).then_some(&mut self.negative),
             );
             self.ui.end_frame()
         }
@@ -99,6 +102,61 @@ mod tests {
         assert_eq!(h.positive, "positive text");
         assert_eq!(h.negative, "negative text");
         assert!(!h.panel.open && !h.dirty);
+    }
+
+    #[test]
+    fn libraries_filter_apply_and_delete_using_original_indices() {
+        for kind in [PromptKind::Image, PromptKind::Video] {
+            let mut h = Harness::new();
+            h.kind = kind;
+            let other = if kind == PromptKind::Image {
+                PromptKind::Video
+            } else {
+                PromptKind::Image
+            };
+            h.items.push(
+                PromptPreset::new("Hidden".into(), "hidden".into(), String::new()).with_kind(other),
+            );
+            h.items.push(
+                PromptPreset::new("Visible".into(), "visible".into(), String::new())
+                    .with_kind(kind),
+            );
+            let row = h.row();
+            h.click((row.min + row.max) * 0.5);
+            assert_eq!(h.positive, "visible");
+            assert!(!h.dirty);
+            h.panel.open = true;
+            let row = h.row();
+            h.click(Vec2::new(row.max.x + 16.0, row.min.y + 12.0));
+            assert_eq!(h.items.len(), 1);
+            assert_eq!(h.items[0].kind, other);
+            assert_eq!(h.items[0].positive, "hidden");
+            assert!(h.dirty);
+        }
+    }
+
+    #[test]
+    fn saving_video_preset_assigns_video_kind_without_negative_prompt() {
+        let mut h = Harness::new();
+        h.kind = PromptKind::Video;
+        h.panel.view = View::Name;
+        h.panel.name = "Camera move".into();
+        h.positive = "Orbit <Picture 1> beside <Video 2>".into();
+        h.negative = "Image negative prompt".into();
+        let output = h.frame(UiInput::default());
+        let button = output
+            .draw_list
+            .iter()
+            .rev()
+            .find(|c| c.kind == 2.0 && c.rect.height() > 24.0 && c.rect.height() <= 28.0)
+            .unwrap()
+            .rect;
+        h.click((button.min + button.max) * 0.5);
+        assert_eq!(h.items.len(), 1);
+        assert_eq!(h.items[0].kind, PromptKind::Video);
+        assert_eq!(h.items[0].positive, h.positive);
+        assert!(h.items[0].negative.is_empty());
+        assert!(h.dirty && !h.panel.open);
     }
 
     #[test]
@@ -186,6 +244,7 @@ impl PromptPresets {
         &mut self,
         ui: &mut Ui,
         label: &str,
+        kind: PromptKind,
         items: &mut Vec<PromptPreset>,
         positive: &mut String,
         mut negative: Option<&mut String>,
@@ -211,7 +270,7 @@ impl PromptPresets {
                     if !was_open {
                         self.focus_requested = true;
                     }
-                    self.contents(ui, items, !positive.trim().is_empty())
+                    self.contents(ui, items, kind, !positive.trim().is_empty())
                 },
             );
             action = result.flatten();
@@ -233,11 +292,14 @@ impl PromptPresets {
                     self.view = View::List;
                 }
                 Action::Save => {
-                    items.push(PromptPreset::new(
-                        self.name.trim().to_string(),
-                        positive.clone(),
-                        negative.as_deref().cloned().unwrap_or_default(),
-                    ));
+                    items.push(
+                        PromptPreset::new(
+                            self.name.trim().to_string(),
+                            positive.clone(),
+                            negative.as_deref().cloned().unwrap_or_default(),
+                        )
+                        .with_kind(kind),
+                    );
                     changed = true;
                     self.close();
                 }
@@ -250,7 +312,13 @@ impl PromptPresets {
         changed
     }
 
-    fn contents(&mut self, ui: &mut Ui, items: &[PromptPreset], can_save: bool) -> Option<Action> {
+    fn contents(
+        &mut self,
+        ui: &mut Ui,
+        items: &[PromptPreset],
+        kind: PromptKind,
+        can_save: bool,
+    ) -> Option<Action> {
         match self.view {
             View::List => {
                 ui.label("Search");
@@ -269,6 +337,9 @@ impl PromptPresets {
                 ui.scroll_area("preset_list", size, ScrollAxes::Vertical, |ui| {
                     let mut found = false;
                     for (index, preset) in items.iter().enumerate() {
+                        if preset.kind != kind {
+                            continue;
+                        }
                         if !preset.name.to_lowercase().contains(&query)
                             && !preset.positive.to_lowercase().contains(&query)
                         {

@@ -1,4 +1,5 @@
 use glam::Vec2;
+use crate::prompt_preset::PromptKind;
 use mega_ui::{Rect, Ui, Window};
 
 use crate::{
@@ -11,6 +12,7 @@ pub enum AiMode {
     #[default]
     Edit,
     MinimaxRedraw,
+    MinimaxRefs,
     MinimaxI2V,
     MinimaxR2V,
     Draw,
@@ -28,7 +30,10 @@ pub enum AiMode {
 
 impl AiMode {
     pub fn needs_input(self) -> bool {
-        !matches!(self, Self::Draw | Self::AnimeDraw | Self::QwenDraw)
+        !matches!(
+            self,
+            Self::Draw | Self::AnimeDraw | Self::QwenDraw | Self::MinimaxRefs
+        )
     }
     pub fn uses_video(self) -> bool {
         matches!(
@@ -51,6 +56,7 @@ impl AiMode {
             Self::Animation => "Ltx 2.3",
             Self::Edit => "Qwen 2.1 Redraw",
             Self::MinimaxRedraw => "Minimax H3 Redraw",
+            Self::MinimaxRefs => "Minimax H3 Refs",
             Self::MinimaxI2V => "Minimax H3 I2V",
             Self::MinimaxR2V => "Minimax H3 R2V",
             Self::QwenDraw => "Qwen 2.1 Draw",
@@ -70,6 +76,7 @@ impl AiMode {
             Self::Animation => "Ltx 2.3",
             Self::Edit => "AI Qwen 2.1 Redraw",
             Self::MinimaxRedraw => "AI Minimax H3 Redraw",
+            Self::MinimaxRefs => "AI Minimax H3 Refs",
             Self::MinimaxI2V => "AI Minimax H3 I2V",
             Self::MinimaxR2V => "AI Minimax H3 R2V",
             Self::QwenDraw => "AI Qwen 2.1 Draw",
@@ -166,9 +173,16 @@ pub struct AiDialog {
     pub video_end_document: Option<String>,
     pub video_end_layer: Option<usize>,
     pub r2v_refs: [VideoRef; 4],
+    pub minimax_refs: [VideoRef; 4],
+    pub refs_custom_size: bool,
+    pub refs_width: i32,
+    pub refs_height: i32,
     pub i2v_refs: [VideoRef; 2],
-    pub r2v_video: bool,
-    pub r2v_video_id: String,
+    pub r2v_video: [bool; 2],
+    pub r2v_video_id: [String; 2],
+    pub r2v_custom_size: bool,
+    pub r2v_width: i32,
+    pub r2v_height: i32,
     pub minimax_r2v_lightning: bool,
     /// Inclusive 0-based animation frames sent as the first and last conditioning images.
     pub anim_start: u32,
@@ -235,9 +249,16 @@ impl Default for AiDialog {
             video_end_document: None,
             video_end_layer: None,
             r2v_refs: Default::default(),
+            minimax_refs: Default::default(),
+            refs_custom_size: false,
+            refs_width: 512,
+            refs_height: 512,
             i2v_refs: Default::default(),
-            r2v_video: false,
-            r2v_video_id: String::new(),
+            r2v_video: [false, false],
+            r2v_video_id: [String::new(), String::new()],
+            r2v_custom_size: false,
+            r2v_width: 512,
+            r2v_height: 512,
             minimax_r2v_lightning: true,
             anim_start: 0,
             anim_end: 0,
@@ -291,6 +312,7 @@ impl AiDialog {
             AiMode::Edit => workflow::EMBEDDED,
             AiMode::QwenDraw => workflow::QWEN_DRAW,
             AiMode::MinimaxRedraw => workflow::MINIMAX_REDRAW,
+            AiMode::MinimaxRefs => workflow::MINIMAX_REFS,
             AiMode::AnimeDraw | AiMode::AnimeRedraw => workflow::ANIME,
             AiMode::Draw => workflow::DRAW,
             AiMode::Redraw => workflow::REDRAW,
@@ -415,6 +437,66 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                             || app.ai.mode == AiMode::QwenDraw
                         {
                             draw_controls(ui, &mut app.ai, width, height, &mut app.workspace.prompt_presets, &mut app.dirty);
+                        } else if app.ai.mode == AiMode::MinimaxRefs {
+                            if let Some(index) = super::video_dialog::draw_document_refs(
+                                ui,
+                                &app.workspace.documents,
+                                &mut app.ai.minimax_refs,
+                                "refs",
+                                &[
+                                    "Reference 1",
+                                    "Reference 2",
+                                    "Reference 3",
+                                    "Reference 4",
+                                ],
+                                false,
+                            ) {
+                                super::video_dialog::append_reference_tag(&mut app.ai.prompt, "Picture", index);
+                            }
+                            ui.checkbox(
+                                "minimax_refs_custom_size",
+                                "Custom size",
+                                &mut app.ai.refs_custom_size,
+                            );
+                            if app.ai.refs_custom_size {
+                                ui.horizontal(|ui| {
+                                    ui.label("Width");
+                                    ui.drag_int("minimax_refs_width", &mut app.ai.refs_width, 8);
+                                    ui.label("Height");
+                                    ui.drag_int("minimax_refs_height", &mut app.ai.refs_height, 8);
+                                });
+                            }
+                            ui.separator();
+                            app.dirty |= app.ai.presets.draw(
+                                ui,
+                                "Prompt",
+                                PromptKind::Image,
+                                &mut app.workspace.prompt_presets,
+                                &mut app.ai.prompt,
+                                None,
+                            );
+                            ui.text_area(
+                                "ai_prompt",
+                                &mut app.ai.prompt,
+                                Vec2::new(0.0, 110.0),
+                            );
+                            ui.label(&format!("Megapixels: {:.0}", app.ai.megapixels));
+                            ui.slider_stepped(
+                                "minimax_refs_megapixels",
+                                &mut app.ai.megapixels,
+                                1.0..=16.0,
+                                1.0,
+                            );
+                            if let Err(error) = crate::comfyui::validate_minimax_refs(
+                                app.ai.megapixels,
+                                &app.ai.prompt,
+                                app.ai.minimax_refs.iter().any(|r| r.enabled),
+                                app.ai
+                                    .refs_custom_size
+                                    .then_some((app.ai.refs_width, app.ai.refs_height)),
+                            ) {
+                                ui.label(&error);
+                            }
                         } else {
                             source_controls(ui, &mut app.ai, width, height);
                             if app.ai.mode == AiMode::Lineart {
@@ -431,7 +513,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                                 }
                             } else {
                                 ui.separator();
-                                app.dirty |= app.ai.presets.draw(ui, "Prompt", &mut app.workspace.prompt_presets, &mut app.ai.prompt, None);
+                                app.dirty |= app.ai.presets.draw(ui, "Prompt", PromptKind::Image, &mut app.workspace.prompt_presets, &mut app.ai.prompt, None);
                                 ui.text_area(
                                     "ai_prompt",
                                     &mut app.ai.prompt,
@@ -505,6 +587,25 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                                         && crate::comfyui::validate_megapixels(app.ai.megapixels)
                                             .is_ok()
                                         && input_valid(app, width, height)
+                                }
+                                AiMode::MinimaxRefs => {
+                                    crate::comfyui::validate_minimax_refs(
+                                        app.ai.megapixels,
+                                        &app.ai.prompt,
+                                        app.ai.minimax_refs.iter().any(|r| r.enabled),
+                                        app.ai
+                                            .refs_custom_size
+                                            .then_some((app.ai.refs_width, app.ai.refs_height)),
+                                    )
+                                    .is_ok()
+                                        && (0..4).all(|i| {
+                                            super::video_dialog::frame_ref_valid(
+                                                app,
+                                                &app.ai.minimax_refs,
+                                                i,
+                                                false,
+                                            )
+                                        })
                                 }
                             };
                         ui.horizontal(|ui| {
@@ -693,7 +794,7 @@ fn draw_controls(ui: &mut Ui, ai: &mut AiDialog, width: u32, height: u32, preset
                 }
             }
             ui.separator();
-            *dirty |= ai.presets.draw(ui, "Positive prompt", presets, &mut ai.draw_settings.positive, Some(&mut ai.draw_settings.negative));
+            *dirty |= ai.presets.draw(ui, "Positive prompt", PromptKind::Image, presets, &mut ai.draw_settings.positive, Some(&mut ai.draw_settings.negative));
             ui.text_area(
                 "draw_positive",
                 &mut ai.draw_settings.positive,
