@@ -54,10 +54,22 @@ impl Scene for EditorApp {
             .map_or(self.settings.ui_scale, |dialog| dialog.settings.ui_scale)
     }
 
+    fn prepare_ui_input(&mut self, input: &FrameInput) {
+        self.value_sliders.begin_frame(input);
+    }
+
+    fn wants_keyboard(&self) -> bool {
+        self.value_sliders.is_editing()
+    }
+
     fn begin_frame(&mut self, input: &FrameInput) {
         self.session.canvas_cursor = None;
         self.ai.preview_input = input.clone();
-        self.input = if self.ai.open
+        self.input = if self.value_sliders.is_editing() {
+            let mut blocked = FrameInput::default();
+            blocked.dt = input.dt;
+            blocked
+        } else if self.ai.open
             || self.ai_settings.is_some()
             || self.settings_dialog.is_some()
             || self.hsv.open
@@ -82,16 +94,15 @@ impl Scene for EditorApp {
         self.session.viewport_size = viewport;
         self.note_frame(self.input.dt);
         if self.input.key_escape { self.finish_deformation(true); }
+        self.poll_nodes(ui);
         self.poll_ai(ui);
         self.poll_video(ui);
-        self.handle_tool_hotkeys();
-        self.handle_animation_keys();
-        self.tick_animation();
-        if self.input.key_undo {
-            self.undo();
-        }
-        if self.input.key_redo {
-            self.redo();
+        if !self.nodes.visible {
+            self.handle_tool_hotkeys();
+            self.handle_animation_keys();
+            self.tick_animation();
+            if self.input.key_undo { self.undo(); }
+            if self.input.key_redo { self.redo(); }
         }
         if self.input.key_save {
             self.save_project(ui);
@@ -115,14 +126,16 @@ impl Scene for EditorApp {
         self.session.deform_cancel = false;
         self.session.deform_apply = false;
         self.tick_animation_preview();
-        if cut {
-            self.cut_selection(ui);
-        } else if copy {
-            self.copy_shortcut(ui);
-        } else if paste {
-            self.paste_clipboard(ui);
-        } else if self.input.key_delete {
-            self.delete_selection();
+        if !self.nodes.visible {
+            if cut {
+                self.cut_selection(ui);
+            } else if copy {
+                self.copy_shortcut(ui);
+            } else if paste {
+                self.paste_clipboard(ui);
+            } else if self.input.key_delete {
+                self.delete_selection();
+            }
         }
         // Static tools follow the pointer via mouse events. Only animated
         // overlays and unfinished uploads need another frame on their own.
@@ -138,6 +151,8 @@ impl Scene for EditorApp {
                 .video_preview
                 .as_ref()
                 .is_some_and(crate::video::Playback::needs_repaint)
+            || self.nodes.run.is_some()
+            || self.nodes.preview_job.is_some()
             || self.video_poster.is_some()
             || self.video_trim.job.is_some()
             || (self.session.preview_asset.is_none() && self.session.selection.is_some())
@@ -151,6 +166,10 @@ impl Scene for EditorApp {
         queue: &wgpu::Queue,
         renderer: &mut mega_ui::wgpu::UiRenderer,
     ) {
+        if self.nodes.atlas_dirty {
+            renderer.set_texture_rgba(device, queue, crate::nodes::PREVIEW_TEXTURE, &self.nodes.atlas, crate::nodes::ATLAS, crate::nodes::ATLAS, "node previews");
+            self.nodes.atlas_dirty = false;
+        }
         self.workspace.prepare_thumb_atlas();
         if self.workspace.thumb_needs_upload() {
             let (width, height) = self.workspace.thumb_atlas_size;

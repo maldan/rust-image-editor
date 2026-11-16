@@ -25,6 +25,7 @@ mod animation;
 mod documents;
 mod history;
 mod layers;
+mod nodes;
 mod rename;
 mod video;
 pub(crate) use rename::RenameTarget;
@@ -55,6 +56,7 @@ pub enum UnsavedAction {
 }
 
 pub struct EditorApp {
+    pub nodes: crate::nodes::NodeEditor,
     animation_clock: Option<(String, f64)>,
     pub workspace: Workspace,
     pub input: FrameInput,
@@ -65,6 +67,7 @@ pub struct EditorApp {
     layers_reload: bool,
     floating_reload: bool,
     pub session: DocumentSession,
+    pub(crate) value_sliders: ui::value_slider::ValueSliderState,
     pub dirty: bool,
     pub status: String,
     /// Smoothed redraw rate. Idle gaps between frames are not included.
@@ -110,6 +113,7 @@ impl Default for EditorApp {
 impl EditorApp {
     pub fn new(initial: Option<PathBuf>) -> Self {
         let mut app = Self {
+            nodes: Default::default(),
             animation_clock: None,
             workspace: Workspace::default(),
             input: FrameInput::default(),
@@ -119,6 +123,7 @@ impl EditorApp {
             layers_reload: false,
             floating_reload: false,
             session: DocumentSession::default(),
+            value_sliders: Default::default(),
             dirty: false,
             status: "Import assets, place them on a document, or resize canvas".into(),
             fps: 0.0,

@@ -1368,6 +1368,7 @@ impl Workspace {
             let height = meta.height;
             for layer_meta in &meta.layers {
                 layers.push(Layer {
+                    identity: Default::default(),
                     ai_metadata: layer_meta.ai_metadata.clone(),
                     z: layer_meta.z,
                     drawings: Default::default(),

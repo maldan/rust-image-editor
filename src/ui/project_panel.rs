@@ -1,5 +1,6 @@
 use mega_ui::Ui;
 
+use super::value_slider::{ValueSlider, ValueSliderState};
 use crate::app::EditorApp;
 use crate::host::FrameInput;
 
@@ -25,7 +26,16 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         .map(|layer| (layer.name.clone(), layer.visible, layer.opacity))
         .collect();
     let active = app.project().active_layer;
-    let command = controls(ui, &rows, active, &app.input, &mut app.layer_drag);
+    let opacity_id = format!("layer_opacity:{}:{active}", app.workspace.active_doc().id);
+    let command = controls(
+        ui,
+        &rows,
+        active,
+        &app.input,
+        &mut app.layer_drag,
+        &mut app.value_sliders,
+        &opacity_id,
+    );
     if app.project().animation.is_some()
         && let Some(layer) = app.project().layers.get(active)
     {
@@ -75,6 +85,8 @@ fn controls(
     active: usize,
     input: &FrameInput,
     drag: &mut Option<usize>,
+    sliders: &mut ValueSliderState,
+    opacity_id: &str,
 ) -> LayerCommand {
     let mut command = LayerCommand {
         select: None,
@@ -144,7 +156,10 @@ fn controls(
                 if ui.menu_item("delete", "Delete").clicked() {
                     command.delete = Some(index);
                 }
-                if ui.menu_item_enabled("merge_down", "Merge Down", index > 0).clicked() {
+                if ui
+                    .menu_item_enabled("merge_down", "Merge Down", index > 0)
+                    .clicked()
+                {
                     command.merge_down = Some(index);
                 }
             });
@@ -167,9 +182,13 @@ fn controls(
         ui.space(12.0);
         if let Some((_, _, opacity)) = rows.get(active) {
             let mut opacity = *opacity;
-            ui.label(&format!("Opacity: {:.0}%", opacity * 100.0));
-            if ui
-                .slider("layer_opacity", &mut opacity, 0.0..=1.0)
+            if sliders
+                .draw(
+                    ui,
+                    opacity_id,
+                    &mut opacity,
+                    ValueSlider::percent("Opacity", 0.0),
+                )
                 .changed()
             {
                 command.opacity = Some(opacity);

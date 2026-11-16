@@ -455,7 +455,9 @@ impl History {
         self.redo.clear();
     }
 
-    pub fn insert_layer(&mut self, project: &mut Project, layer: Layer, canvas_size: (u32, u32)) {
+    pub fn insert_layer(&mut self, project: &mut Project, mut layer: Layer, canvas_size: (u32, u32)) {
+        // A pasted copy is a new layer; snapshots and Undo retain their identity.
+        layer.identity = Default::default();
         let index = project.layers.len();
         let active_before = project.active_layer;
         let size_before = (project.width, project.height);
@@ -964,6 +966,7 @@ mod tests {
         let mut history = History::default();
         history.push(edit);
         let layers = vec![crate::project::Layer {
+            identity: Default::default(),
             ai_metadata: None,
             z: 0.0,
             drawings: Default::default(),
@@ -1006,6 +1009,7 @@ mod tests {
             width: 128,
             height: 64,
             layers: vec![crate::project::Layer {
+                identity: Default::default(),
                 ai_metadata: None,
                 z: 0.0,
                 drawings: Default::default(),

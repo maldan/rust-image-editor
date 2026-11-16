@@ -1,10 +1,16 @@
 use mega_ui::Ui;
 
+use super::value_slider::{ValueSlider, ValueSliderState};
 use crate::app::DocumentSession;
 use crate::editing::Tool;
 
 /// `Some(horizontal)` asks the editor to flip the active transform.
-pub fn draw(ui: &mut Ui, session: &mut DocumentSession, image_ready: bool) -> Option<bool> {
+pub fn draw(
+    ui: &mut Ui,
+    session: &mut DocumentSession,
+    image_ready: bool,
+    sliders: &mut ValueSliderState,
+) -> Option<bool> {
     let mut flip = None;
 
     match session.tool {
@@ -41,27 +47,48 @@ pub fn draw(ui: &mut Ui, session: &mut DocumentSession, image_ready: bool) -> Op
             ui.label("Mesh density takes effect after Apply/Cancel.");
         }
         Tool::Brush => {
-            ui.checkbox("brush_erase", "Erase mode", &mut session.erase_mode);
-            ui.space(10.0);
-            if !session.erase_mode {
-                ui.label("Color");
-                ui.color_edit("brush_color", &mut session.brush_color);
-                ui.space(14.0);
-            }
-            ui.label(&format!("Size: {:.0} px", session.brush_size));
-            ui.slider_stepped("brush_size", &mut session.brush_size, 1.0..=256.0, 1.0);
+            ui.column_with(
+                mega_ui::LayoutOpts {
+                    spacing: Some(8.0),
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.row_with(
+                        mega_ui::LayoutOpts {
+                            spacing: Some(8.0),
+                            ..Default::default()
+                        },
+                        |ui| {
+                            ui.checkbox("brush_erase", "Erase mode", &mut session.erase_mode);
+                            if !session.erase_mode {
+                                ui.space(8.0);
+                                ui.label("Color");
+                                ui.color_edit("brush_color", &mut session.brush_color);
+                            }
+                        },
+                    );
+                    sliders.draw(
+                        ui,
+                        "brush_size",
+                        &mut session.brush_size,
+                        ValueSlider::new("Size", 1.0, 256.0, 1.0, "px"),
+                    );
 
-            ui.space(12.0);
-            ui.label(&format!("Hardness: {:.0}%", session.brush_hardness * 100.0));
-            ui.slider("brush_hardness", &mut session.brush_hardness, 0.0..=1.0);
+                    sliders.draw(
+                        ui,
+                        "brush_hardness",
+                        &mut session.brush_hardness,
+                        ValueSlider::percent("Hardness", 0.0),
+                    );
 
-            ui.space(12.0);
-            ui.label(&format!("Opacity: {:.0}%", session.brush_opacity * 100.0));
-            ui.slider("brush_opacity", &mut session.brush_opacity, 0.01..=1.0);
-            ui.space(8.0);
-            ui.label("Ctrl — eyedropper");
-            ui.label("Shift+drag — size");
-            ui.label("B brush · F fill · T transform · E erase");
+                    sliders.draw(
+                        ui,
+                        "brush_opacity",
+                        &mut session.brush_opacity,
+                        ValueSlider::percent("Opacity", 0.01),
+                    );
+                },
+            );
         }
         Tool::RectangleSelect
         | Tool::Lasso
@@ -175,5 +202,38 @@ fn draw_select_mode(ui: &mut Ui, session: &mut DocumentSession) {
             ui.label("Click points · click first or Enter to close");
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::Vec2;
+
+    #[test]
+    fn brush_header_color_and_erase_stay_above_sliders_in_a_tall_panel() {
+        let mut ui = Ui::new();
+        let mut session = DocumentSession::default();
+        let mut sliders = ValueSliderState::default();
+        let mut output = mega_ui::UiOutput::default();
+        for _ in 0..3 {
+            ui.begin_frame(mega_ui::UiInput { viewport: Vec2::new(440.0, 600.0), ..Default::default() });
+            draw(&mut ui, &mut session, true, &mut sliders);
+            output = ui.end_frame();
+        }
+        assert!(output.draw_list.iter().any(|c| {
+            c.colors == [[0.0, 0.0, 0.0, 1.0]; 4] && c.rect.width() > 30.0
+                && c.rect.min.y >= 0.0 && c.rect.max.y <= 28.0
+        }), "color swatch must be in the header, not centered down the panel");
+        for pressed in [true, false] {
+            ui.begin_frame(mega_ui::UiInput {
+                viewport: Vec2::new(440.0, 600.0), mouse_pos: Vec2::new(8.0, 8.0),
+                mouse_pressed: pressed, mouse_down: pressed, mouse_released: !pressed,
+                ..Default::default()
+            });
+            draw(&mut ui, &mut session, true, &mut sliders);
+            ui.end_frame();
+        }
+        assert!(session.erase_mode, "Erase mode must be clickable in the top row");
     }
 }

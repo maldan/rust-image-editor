@@ -14,6 +14,8 @@ pub struct AiMetadata {
 
 #[derive(Debug, Clone)]
 pub struct Layer {
+    /// Session-local identity for references such as node sources.
+    pub identity: std::sync::Arc<()>,
     pub ai_metadata: Option<AiMetadata>,
     pub z: f32,
     /// Held drawings keyed by their first frame. `pixels` is the editable current drawing.
@@ -366,6 +368,7 @@ impl Project {
         self.width = width;
         self.height = height;
         self.layers = vec![Layer {
+            identity: Default::default(),
             ai_metadata: None,
             z: 0.0,
             drawings: Default::default(),
@@ -384,6 +387,7 @@ impl Project {
         }
         let index = self.layers.len() + 1;
         self.layers.push(Layer {
+            identity: Default::default(),
             ai_metadata: None,
             z: 0.0,
             drawings: Default::default(),
@@ -492,6 +496,7 @@ impl Project {
             self.width = width;
             self.height = height;
             self.layers.push(Layer {
+                identity: Default::default(),
                 ai_metadata: None,
                 z: 0.0,
                 drawings: Default::default(),

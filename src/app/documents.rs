@@ -16,6 +16,7 @@ impl EditorApp {
         self.video_trim = Default::default();
         self.cancel_transform();
         self.workspace = Workspace::default();
+        self.nodes = Default::default();
         self.ai.presets = Default::default();
         self.image_size = None;
         self.dirty_tiles.clear();
@@ -280,6 +281,7 @@ impl EditorApp {
             return Err("Selection has no pixels".into());
         }
         Ok(crate::project::Layer {
+            identity: Default::default(),
             ai_metadata: source.ai_metadata.clone(),
             z: source.z,
             drawings: Default::default(),
@@ -434,6 +436,7 @@ impl EditorApp {
         self.video_poster = None;
         self.cancel_transform();
         self.workspace = workspace;
+        self.nodes = Default::default();
         self.video_trim = Default::default();
         self.ai.presets = Default::default();
         self.refresh_image()?;

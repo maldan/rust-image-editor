@@ -296,6 +296,9 @@ pub trait Scene {
     }
     fn init(ui: &mut Ui);
     fn ui_scale(&self) -> f32 { 1.0 }
+    /// Raw input for editor-owned UI components, before scene shortcuts are filtered.
+    fn prepare_ui_input(&mut self, _input: &FrameInput) {}
+    fn wants_keyboard(&self) -> bool { false }
     fn begin_frame(&mut self, input: &FrameInput);
     fn build(&mut self, ui: &mut Ui, viewport: Vec2, stats: DrawStats) -> bool;
     fn sync_canvas(
@@ -534,6 +537,7 @@ impl<S: Scene> Host<S> {
         self.last_frame = now;
         self.elapsed += dt;
         let viewport = Vec2::new(size.width as f32, size.height as f32);
+        self.scene.prepare_ui_input(&self.input);
         let mut frame_input = self.input.for_scene(self.keyboard_captured);
         frame_input.dt = dt;
         self.scene.begin_frame(&frame_input);
@@ -547,7 +551,7 @@ impl<S: Scene> Host<S> {
         self.ui.begin_frame(ui_input);
         let keep_redrawing = self.scene.build(&mut self.ui, viewport, self.draw_stats);
         let output = self.ui.end_frame();
-        self.keyboard_captured = output.want_capture_keyboard;
+        self.keyboard_captured = output.want_capture_keyboard || self.scene.wants_keyboard();
         if let Some(text) = &output.clipboard {
             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                 let _ = clipboard.set_text(text.clone());

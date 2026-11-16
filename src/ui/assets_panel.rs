@@ -40,6 +40,7 @@ pub struct LibraryAction {
     pub switch_doc: Option<usize>,
     pub delete_doc: Option<usize>,
     pub clone_doc: Option<usize>,
+    pub add_document_to_nodes: Option<String>,
     pub place_asset: Option<usize>,
     pub delete_asset: Option<usize>,
     pub preview_asset: Option<usize>,
@@ -365,6 +366,9 @@ pub fn draw(
                                             .clicked()
                                         {
                                             delete_doc = Some(index);
+                                        }
+                                        if ui.menu_item("add_to_nodes", "Add to Nodes").clicked() {
+                                            action.add_document_to_nodes = Some(workspace.documents[index].id.clone());
                                         }
                                     },
                                 );
@@ -858,7 +862,7 @@ mod tests {
     #[test]
     fn library_context_actions_target_their_row_without_switching_or_previewing() {
         for kind in 0..4 {
-            for item in 0..if kind >= 2 { 3 } else { 2 } {
+            for item in 0..if kind >= 2 { 4 } else { 2 } {
                 let mut workspace = Workspace::default();
                 workspace
                     .import_asset_rgba("Image".into(), &[1, 2, 3, 255], 1, 1)
@@ -964,7 +968,9 @@ mod tests {
                     action.place_asset,
                     action.reorder
                 );
-                if kind >= 2 && item == 0 {
+                if kind >= 2 && item == 3 {
+                    assert_eq!(action.add_document_to_nodes.as_deref(), Some(workspace.documents[kind - 2].id.as_str()));
+                } else if kind >= 2 && item == 0 {
                     assert_eq!(action.clone_doc, Some(kind - 2));
                 } else if item == usize::from(kind >= 2) {
                     assert_eq!(action.rename, Some(targets[kind].clone()));

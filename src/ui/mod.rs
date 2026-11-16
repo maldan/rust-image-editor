@@ -8,6 +8,7 @@ mod animation_dialog;
 mod asset_properties;
 mod assets_panel;
 mod canvas;
+mod nodes;
 mod canvas_panel;
 mod camera_panel;
 pub mod hsv_dialog;
@@ -17,6 +18,7 @@ pub mod rename_dialog;
 pub mod delete_dialog;
 mod unsaved_dialog;
 mod tool_options;
+pub(crate) mod value_slider;
 mod tools_panel;
 pub(crate) use tools_panel::load_icons as load_tool_icons;
 mod timeline;
@@ -43,7 +45,7 @@ pub fn default_dock() -> DockState {
         ),
         DockNode::split_h(
             0.76,
-            DockNode::leaf(&["Workspace"]),
+            DockNode::leaf(&["Workspace", "Nodes"]),
             DockNode::leaf(&["Layers", "Canvas"]),
         ),
     ))
@@ -153,7 +155,14 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
         context_panel(&mut dock.root, preview);
         camera_dock(&mut dock.root, !preview && app.project().animation.is_some());
         let hidden_canvas = if preview { hide_canvas_tabs(&mut dock.root) } else { Vec::new() };
+        app.nodes.visible = false;
+        app.session.canvas_rect = mega_ui::Rect { min: Vec2::ZERO, max: Vec2::ZERO };
         ui.dock_space("main", dock_size, &mut dock, |ui, tab| {
+            if tab == "Nodes" {
+                app.nodes.visible = true;
+                nodes::draw(ui, app);
+                return;
+            }
             if tab == "Workspace" {
                 canvas::draw(ui, app);
                 if timeline::visible(app) { timeline::draw(ui, app); }
@@ -169,7 +178,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                 }
                 "Tool Options" => {
                     let image_ready = app.image_size.is_some();
-                    if let Some(horizontal) = tool_options::draw(ui, &mut app.session, image_ready) {
+                    if let Some(horizontal) = tool_options::draw(ui, &mut app.session, image_ready, &mut app.value_sliders) {
                         app.flip_transform(horizontal);
                     }
                 }
@@ -208,6 +217,21 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
 }
 
 fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
+    if let Some(id) = action.add_document_to_nodes {
+        if app.workspace.documents.iter().any(|doc| doc.id == id) {
+            // Place the new node near the visible centre without changing pan or zoom.
+            let center = app.session.viewport_size * 0.5;
+            let zoom = app.nodes.space.zoom.max(1e-4);
+            let offset = Vec2::splat((app.nodes.nodes.len() % 5) as f32 * 35.0);
+            app.nodes.space.context_world = Some((center - app.nodes.space.pan) / zoom + offset);
+            let before = app.nodes.nodes.len();
+            app.nodes.add(crate::nodes::NodeKind::Image(crate::nodes::Source { document: id, layer: None }));
+            if app.nodes.nodes.len() > before { app.status = "Document added to Nodes".into(); }
+            else { app.status = app.nodes.message.clone(); }
+            ui.request_repaint();
+        }
+        return;
+    }
     if let Some((kind, id, slot)) = action.reorder {
         if app.workspace.reorder_library(kind, &id, slot) {
             app.dirty = true;
@@ -260,6 +284,26 @@ fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
 #[cfg(test)]
 mod context_tests {
     use super::*;
+    #[test]
+    fn add_document_to_nodes_uses_requested_document_and_preserves_view() {
+        let mut app = EditorApp::default();
+        let source = app.workspace.active_doc().id.clone();
+        app.new_document();
+        let active = app.workspace.active_doc().id.clone();
+        app.session.viewport_size = Vec2::new(1000.0, 800.0);
+        app.nodes.space.pan = Vec2::new(100.0, 50.0);
+        app.nodes.space.zoom = 0.75;
+        let mut ui = Ui::new();
+        apply_library(&mut ui, &mut app, LibraryAction {
+            add_document_to_nodes: Some(source.clone()), ..Default::default()
+        });
+        assert_eq!(app.workspace.active_doc().id, active);
+        assert_eq!(app.nodes.space.pan, Vec2::new(100.0, 50.0));
+        assert_eq!(app.nodes.space.zoom, 0.75);
+        assert!(matches!(&app.nodes.nodes[0].kind,
+            crate::nodes::NodeKind::Image(s) if s.document == source && s.layer.is_none()));
+        assert!(!app.nodes.space.fit_view);
+    }
     #[test]
     fn context_panel_switches_titles_without_rebuilding_the_dock() {
         let mut dock = default_dock();
