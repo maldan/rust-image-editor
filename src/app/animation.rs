@@ -79,6 +79,7 @@ impl EditorApp {
     }
 
     pub fn new_animation(&mut self) {
+        self.video_editor.close_view();
         self.new_document();
         let doc = &mut self.workspace.documents[self.workspace.active_document];
         doc.name = format!("Animation {}", self.workspace.active_document + 1);

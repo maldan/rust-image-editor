@@ -389,20 +389,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     if app.ai.presets.open && app.input.key_escape {
         app.input.key_escape = false;
     }
-    if let Some(load) = &app.ai.catalog_load {
-        if let Some(result) = load.poll() {
-            match result {
-                Ok((catalog, message)) => {
-                    app.ai.catalog = catalog;
-                    app.ai.catalog_message = message;
-                }
-                Err(error) => app.ai.catalog_message = error,
-            }
-            app.ai.catalog_load = None;
-        } else {
-            ui.request_repaint();
-        }
-    }
+    app.poll_catalog(ui);
     if matches!(
         app.ai.mode,
         AiMode::Video | AiMode::MinimaxI2V | AiMode::MinimaxR2V

@@ -76,6 +76,7 @@ impl Scene for EditorApp {
             || self.rename.is_some()
             || self.unsaved.is_some()
             || self.delete_prompt.is_some()
+            || self.effect_dialog.is_some()
         {
             let mut blocked = FrameInput::default();
             blocked.key_escape = input.key_escape;
@@ -97,7 +98,10 @@ impl Scene for EditorApp {
         self.poll_all_graphs(ui);
         self.poll_ai(ui);
         self.poll_video(ui);
-        if !self.nodes.visible {
+        if let Some(error) = self.video_editor.tick(self.input.dt) {
+            self.status = error;
+        }
+        if !self.nodes.visible && self.video_editor.active.is_none() {
             self.handle_tool_hotkeys();
             self.handle_animation_keys();
             self.tick_animation();
@@ -117,6 +121,7 @@ impl Scene for EditorApp {
         let paste = self.input.key_paste;
         let copy = self.input.key_copy;
         let cut = self.input.key_cut;
+        self.video_editor.preview_opacity.clear();
         ui::draw(ui, self, viewport);
         if self.session.deform_cancel || self.input.key_escape {
             self.finish_deformation(true);
@@ -125,8 +130,10 @@ impl Scene for EditorApp {
         }
         self.session.deform_cancel = false;
         self.session.deform_apply = false;
-        self.tick_animation_preview();
-        if !self.nodes.visible {
+        if self.video_editor.active.is_none() {
+            self.tick_animation_preview();
+        }
+        if !self.nodes.visible && self.video_editor.active.is_none() {
             if cut {
                 self.cut_selection(ui);
             } else if copy {
@@ -147,6 +154,7 @@ impl Scene for EditorApp {
             || self.rename.is_some()
             || self.unsaved.is_some()
             || self.delete_prompt.is_some()
+            || self.effect_dialog.is_some()
             || self
                 .video_preview
                 .as_ref()
@@ -154,9 +162,24 @@ impl Scene for EditorApp {
             || self.graphs_need_repaint()
             || self.video_poster.is_some()
             || self.video_trim.job.is_some()
+            || self.video_editor.needs_repaint()
             || (self.session.preview_asset.is_none() && self.session.selection.is_some())
             || thumb_waiting
             || !self.dirty_tiles.is_empty()
+    }
+
+    fn finish_ui(&self, output: &mut mega_ui::UiOutput) {
+        if self.video_editor.preview_opacity.is_empty() {
+            return;
+        }
+        for command in output.draw_list.iter_mut().filter(|command| command.kind == 1.0) {
+            let Some(slot) = command.tex.checked_sub(crate::video_document::PREVIEW_TEXTURE) else { continue };
+            if let Some(&opacity) = self.video_editor.preview_opacity.get(slot as usize) {
+                for color in &mut command.colors {
+                    color[3] *= opacity;
+                }
+            }
+        }
     }
 
     fn sync_ui_textures(
@@ -165,6 +188,14 @@ impl Scene for EditorApp {
         queue: &wgpu::Queue,
         renderer: &mut mega_ui::wgpu::UiRenderer,
     ) {
+        let layers = self.video_editor.previews.iter_mut().filter(|track| track.frame().is_some());
+        for (index, track) in layers.enumerate() {
+            let slot = crate::video_document::PREVIEW_TEXTURE + index as u32;
+            if let Some(frame) = track.upload_frame(slot) {
+                renderer.set_texture_rgba(device, queue, slot,
+                    frame.as_raw(), frame.width(), frame.height(), "video document preview");
+            }
+        }
         if self.nodes.live_dirty {
             if let Some(preview) = &self.nodes.live_display {
                 renderer.set_texture_rgba(device, queue, crate::nodes::LIVE_PREVIEW_TEXTURE, &preview.pixels, crate::nodes::CELL, crate::nodes::CELL, "live node preview");
@@ -334,6 +365,9 @@ impl Scene for EditorApp {
     }
 
     fn canvas_present(&self) -> Option<(Rect, CanvasView, CanvasOverlay)> {
+        if self.video_editor.active.is_some() {
+            return None;
+        }
         let view = self.canvas_view()?;
         if self.session.preview_asset.is_some() {
             return Some((

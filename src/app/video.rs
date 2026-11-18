@@ -9,6 +9,39 @@ pub(crate) struct TrimState {
 }
 
 impl EditorApp {
+    pub fn new_video_document(&mut self) {
+        let index = self.video_editor.new_document();
+        self.show_video_document(index);
+    }
+
+    pub fn show_video_document(&mut self, index: usize) {
+        if index >= self.video_editor.documents.len() {
+            return;
+        }
+        self.finish_deformation(false);
+        self.commit_transform();
+        self.animation_clock = None;
+        self.close_asset_preview();
+        self.close_graph_view();
+        self.video_editor.open(index);
+        self.workspace.tree_selected = Some(format!("video_document_{index}"));
+    }
+
+    pub fn delete_video_document(&mut self, index: usize) {
+        if index >= self.video_editor.documents.len() {
+            return;
+        }
+        if self.video_editor.active == Some(index) {
+            self.video_editor.close_view();
+            self.workspace.select_active_document();
+        }
+        self.video_editor.documents.remove(index);
+        if let Some(active) = &mut self.video_editor.active && *active > index {
+            *active -= 1;
+            self.workspace.tree_selected = Some(format!("video_document_{active}"));
+        }
+    }
+
     pub fn trim_video(&mut self, index: usize, ui: &mut Ui) {
         if self.video_trim.job.is_some() { return; }
         let Some(asset) = self.workspace.videos.get(index) else { return; };
@@ -45,6 +78,19 @@ impl EditorApp {
         let _ = self.reload_active_view();
         self.dirty = true;
         self.status = format!("Document: {name}");
+    }
+
+    pub fn copy_video_frame(&mut self, ui: &mut Ui) {
+        let Some(frame) = self.video_preview.as_ref().and_then(|player| player.frame.as_ref()) else { return; };
+        let image = arboard::ImageData {
+            width: frame.width() as usize,
+            height: frame.height() as usize,
+            bytes: std::borrow::Cow::Borrowed(frame.as_raw()),
+        };
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_image(image)) {
+            Ok(()) => self.status = "Video frame copied to clipboard".into(),
+            Err(error) => self.show_error(ui, format!("Cannot copy image to clipboard: {error}")),
+        }
     }
 
     pub fn export_video(&mut self, index: usize, ui: &mut Ui) {
@@ -106,8 +152,13 @@ impl EditorApp {
         }
         if let Some(job) = &self.video_poster {
             if let Some(result) = job.poll() {
-                if let Ok(thumb) = result {
-                    if self.workspace.set_video_thumb(&job.id, thumb) {
+                if let Ok(inspection) = result {
+                    if let Some(asset) = self.workspace.videos.iter_mut().find(|v| v.id == job.id) {
+                        asset.info = Some(inspection.info);
+                    }
+                    if let Some(thumb) = inspection.thumb
+                        && self.workspace.set_video_thumb(&job.id, thumb)
+                    {
                         self.dirty = true;
                     }
                 }
@@ -119,9 +170,9 @@ impl EditorApp {
                 .workspace
                 .videos
                 .iter_mut()
-                .find(|v| !v.poster_attempted)
+                .find(|v| !v.inspection_attempted)
             {
-                asset.poster_attempted = true;
+                asset.inspection_attempted = true;
                 self.video_poster = Some(crate::video::PosterJob::start(asset.clone()));
             }
         }
@@ -131,6 +182,59 @@ impl EditorApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_document_is_available_during_session_and_omitted_from_project() {
+        let mut app = EditorApp::default();
+        app.new_video_document();
+        app.video_editor.current_mut().unwrap().fps = 30;
+        app.switch_document(0);
+        assert!(app.video_editor.current().is_none());
+        app.show_video_document(0);
+        assert_eq!(app.video_editor.current().unwrap().fps, 30);
+        assert!(!app.dirty);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("video-document.mgimg");
+        app.workspace.save(&path).unwrap();
+        assert_eq!(app.video_editor.documents.len(), 1);
+        app.open_path(&path).unwrap();
+        assert!(app.video_editor.documents.is_empty());
+        assert_eq!(app.workspace.documents.len(), 1);
+    }
+
+    #[test]
+    fn saved_video_with_thumbnail_loads_info_in_background() {
+        use std::time::{Duration, Instant};
+
+        let mut app = EditorApp::default();
+        let bytes = include_bytes!("../../tests/fixtures/video-preview.mp4").to_vec();
+        app.workspace.add_video_named(bytes, "Source").unwrap();
+        let thumb = vec![127; (crate::workspace::THUMB_SIZE.pow(2) * 4) as usize];
+        let id = app.workspace.videos[0].id.clone();
+        assert!(app.workspace.set_video_thumb(&id, thumb.clone()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("video.mgimg");
+        app.workspace.save(&path).unwrap();
+        app.open_path(&path).unwrap();
+
+        let mut ui = Ui::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        app.poll_video(&mut ui);
+        while app.video_poster.is_some() {
+            assert!(Instant::now() < deadline, "video inspection timed out");
+            std::thread::sleep(Duration::from_millis(5));
+            app.poll_video(&mut ui);
+        }
+
+        let asset = &app.workspace.videos[0];
+        let info = asset.info.unwrap();
+        assert_eq!((info.width, info.height), (64, 48));
+        assert!((info.duration - 1.0).abs() < 0.001);
+        assert!((info.fps - 4.0).abs() < 0.001);
+        assert_eq!(asset.thumb, thumb);
+        assert!(!app.dirty);
+    }
 
     #[test]
     fn trim_adds_a_new_asset_preserves_source_and_survives_save() {

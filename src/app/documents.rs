@@ -10,6 +10,8 @@ impl EditorApp {
     }
 
     pub fn new_project(&mut self, ui: &mut Ui) {
+        self.effect_dialog = None;
+        self.video_editor = Default::default();
         self.animation_clock = None;
         self.close_asset_preview();
         self.close_graph_view();
@@ -436,6 +438,8 @@ impl EditorApp {
     pub fn open_path(&mut self, path: &Path) -> Result<(), String> {
         let mut workspace = Workspace::open(path)?;
         workspace.ensure_document_loaded(workspace.active_document)?;
+        self.effect_dialog = None;
+        self.video_editor = Default::default();
         self.close_asset_preview();
         self.close_graph_view();
         self.video_poster = None;
@@ -504,6 +508,10 @@ impl EditorApp {
             self.status = error;
             return;
         }
+        if self.video_editor.active.is_some() {
+            self.video_editor.close_view();
+            self.workspace.select_active_document();
+        }
         self.close_asset_preview();
         self.close_graph_view();
         if index == self.workspace.active_document {
@@ -521,6 +529,7 @@ impl EditorApp {
     }
 
     pub fn new_document(&mut self) {
+        self.video_editor.close_view();
         self.animation_clock = None;
         self.cancel_transform();
         self.close_asset_preview();

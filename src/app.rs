@@ -103,6 +103,8 @@ pub struct EditorApp {
     video_preview: Option<crate::video::Playback>,
     video_poster: Option<crate::video::PosterJob>,
     pub(crate) video_trim: video::TrimState,
+    pub(crate) video_editor: crate::video_document::VideoEditor,
+    pub(crate) effect_dialog: Option<ui::clip_effects::Dialog>,
 }
 
 impl Default for EditorApp {
@@ -157,6 +159,8 @@ impl EditorApp {
             video_preview: None,
             video_poster: None,
             video_trim: Default::default(),
+            video_editor: Default::default(),
+            effect_dialog: None,
         };
         match crate::editor_settings::EditorSettings::load() {
             Ok(settings) => app.settings = settings,
@@ -288,6 +292,7 @@ impl EditorApp {
         if self.session.preview_asset.as_ref() == Some(&id) {
             return;
         }
+        self.video_editor.close_view();
         self.video_preview = None;
         self.commit_transform();
         self.brush_last = None;

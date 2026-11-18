@@ -59,6 +59,7 @@ impl EditorApp {
     }
 
     pub fn show_graph(&mut self, index: usize) {
+        self.video_editor.close_view();
         self.close_asset_preview();
         self.switch_graph(index);
         self.session.preview_graph = true;

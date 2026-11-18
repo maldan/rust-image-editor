@@ -60,6 +60,7 @@ enum InputWorkflow {
     Redraw {
         settings: super::DrawSettings,
         denoise: f32,
+        seed: u64,
     },
 }
 
@@ -83,6 +84,7 @@ enum Request {
         size: Option<(u32, u32)>,
         prompt: String,
         megapixels: f32,
+        seed: u64,
     },
     Draw(super::DrawSettings),
     AnimeDraw(super::DrawSettings),
@@ -207,6 +209,7 @@ impl Job {
         size: Option<(u32, u32)>,
         prompt: String,
         megapixels: f32,
+        seed: u64,
     ) -> Self {
         Self::start_request(
             config,
@@ -215,6 +218,7 @@ impl Job {
                 size,
                 prompt,
                 megapixels,
+                seed,
             },
         )
     }
@@ -347,13 +351,18 @@ impl Job {
         scale: f32,
         settings: super::DrawSettings,
         denoise: f32,
+        seed: u64,
     ) -> Self {
         Self::start_request(
             config,
             Request::Input {
                 pixels,
                 scale,
-                workflow: InputWorkflow::Redraw { settings, denoise },
+                workflow: InputWorkflow::Redraw {
+                    settings,
+                    denoise,
+                    seed,
+                },
             },
         )
     }
@@ -633,6 +642,17 @@ fn prepare_minimax_refs_job(
     super::workflow::prepare_minimax_refs(filenames, &size_filename, prompt, megapixels, seed)
 }
 
+const JSON_SEED_MAX: u64 = (1 << 53) - 1;
+
+/// `0` picks a new seed; any other value is sent to ComfyUI as an exact JSON integer.
+pub(crate) fn comfy_seed(seed: u64) -> u64 {
+    if seed == 0 {
+        rand::random::<u64>() & JSON_SEED_MAX
+    } else {
+        seed.min(JSON_SEED_MAX)
+    }
+}
+
 fn run(
     config: HostConfig,
     request: Request,
@@ -653,8 +673,15 @@ fn run(
         COUNTER.fetch_add(1, Ordering::Relaxed)
     );
     check_cancel(cancel)?;
-    // Fresh randomness for every Run/Regenerate; stay within exact JSON integer range.
-    let seed = rand::random::<u64>() & ((1_u64 << 53) - 1);
+    // 0 stays random (dialog + node default). A set node seed is kept as-is.
+    let seed = match &request {
+        Request::MinimaxRefs { seed, .. } => comfy_seed(*seed),
+        Request::Input {
+            workflow: InputWorkflow::Redraw { seed, .. },
+            ..
+        } => comfy_seed(*seed),
+        _ => comfy_seed(0),
+    };
     let video = matches!(
         &request,
         Request::Input {
@@ -671,6 +698,7 @@ fn run(
             size,
             prompt,
             megapixels,
+            ..
         } => prepare_minimax_refs_job(
             &client, cancel, &progress, images, size, &prompt, megapixels, seed,
         )?,
@@ -856,9 +884,11 @@ fn run(
                 InputWorkflow::AnimeRedraw { settings, denoise } => {
                     super::workflow::prepare_anime(Some(&filename), &settings, denoise, seed)?
                 }
-                InputWorkflow::Redraw { settings, denoise } => {
-                    super::workflow::prepare_redraw(&filename, &settings, denoise, seed)?
-                }
+                InputWorkflow::Redraw {
+                    settings,
+                    denoise,
+                    ..
+                } => super::workflow::prepare_redraw(&filename, &settings, denoise, seed)?,
             }
         }
     };
@@ -908,6 +938,13 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comfy_seed_keeps_explicit_values_and_randomizes_zero() {
+        assert_eq!(comfy_seed(42), 42);
+        assert_eq!(comfy_seed(JSON_SEED_MAX + 8), JSON_SEED_MAX);
+        assert!(comfy_seed(0) <= JSON_SEED_MAX);
+    }
 
     #[test]
     fn video_job_uploads_input_submits_graph_and_downloads_mp4() {

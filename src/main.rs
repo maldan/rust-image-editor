@@ -19,6 +19,8 @@ mod safe_save;
 mod tiles;
 mod ui;
 mod video;
+mod video_document;
+mod video_effects;
 mod view;
 mod win_assoc;
 mod workspace;

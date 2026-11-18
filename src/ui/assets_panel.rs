@@ -3,7 +3,9 @@ use mega_ui::{Rect, TextStyle, Ui};
 
 use crate::app::RenameTarget;
 use crate::host::{FrameInput, THUMB_ATLAS};
-use crate::workspace::{LibraryKind, THUMB_VIEW, ThumbDrag, Workspace};
+use crate::nodes::{NodeEditor, NodeKind};
+use crate::video_document::VideoEditor;
+use crate::workspace::{LibraryKind, THUMB_VIEW, ThumbDrag, VideoAsset, Workspace};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LibraryGroup {
@@ -32,6 +34,10 @@ pub struct LibraryDrag {
 
 #[derive(Default)]
 pub struct LibraryAction {
+    pub new_video_document: bool,
+    pub open_video_document: Option<usize>,
+    pub delete_video_document: Option<usize>,
+    pub drop_video: Option<usize>,
     pub reorder: Option<(LibraryKind, String, usize)>,
     pub import: bool,
     pub import_clipboard: bool,
@@ -57,6 +63,8 @@ pub struct LibraryAction {
 pub fn draw(
     ui: &mut Ui,
     workspace: &mut Workspace,
+    active_graph: Option<&NodeEditor>,
+    video_editor: &VideoEditor,
     input: &FrameInput,
     drop_target: Rect,
     graph_mode: bool,
@@ -108,9 +116,14 @@ pub fn draw(
             }
         });
     });
-    if ui.button("graph_new", "New Graph").clicked() {
-        action.new_graph = true;
-    }
+    ui.horizontal(|ui| {
+        ui.flex(0.5, |ui| {
+            action.new_video_document = ui.button("video_doc_new", "New Video").clicked();
+        });
+        ui.flex(1.0, |ui| {
+            action.new_graph = ui.button("graph_new", "New Graph").clicked();
+        });
+    });
     ui.space(8.0);
 
     let mut switch_doc: Option<usize> = None;
@@ -234,6 +247,7 @@ pub fn draw(
                     &format!("Videos ({video_count})"),
                     true,
                     |ui| {
+                        let mut start_drag = None;
                         for (index, video) in workspace.videos.iter().enumerate() {
                             let id = format!("video_{}", video.id);
                             let selected = workspace.tree_selected.as_deref() == Some(id.as_str());
@@ -243,7 +257,7 @@ pub fn draw(
                                 &id,
                                 selected,
                                 &video.name,
-                                &format_bytes(video.byte_size),
+                                &video_metadata(video),
                                 meta_style,
                                 |ui| {
                                     let thumb = ui.area(
@@ -258,6 +272,11 @@ pub fn draw(
                                     );
                                     if video.thumb.is_empty() {
                                         ui.text_at(thumb.rect.min + Vec2::new(8.0, 28.0), "Video");
+                                    }
+                                    if video_editor.active.is_some() && row_input
+                                        && thumb.hovered && input.mouse_pressed
+                                    {
+                                        start_drag = Some(ThumbDrag::Video(index));
                                     }
                                     if row_input && thumb.active && input.mouse_released {
                                         thumb_release = true;
@@ -277,7 +296,7 @@ pub fn draw(
                                     }
                                 },
                             );
-                            if row_input {
+                            if row_input && !matches!(start_drag.or(workspace.asset_drag), Some(ThumbDrag::Video(_))) {
                                 reorder_row(
                                     ui,
                                     &clicked,
@@ -291,11 +310,14 @@ pub fn draw(
                             }
                             if row_input
                                 && (clicked.response.clicked() || thumb_release)
-                                && !dragging
+                                && !dragging && !workspace.asset_dragging
                             {
                                 pick = Some(id);
                                 action.open_video = Some(index);
                             }
+                        }
+                        if let Some(kind) = start_drag {
+                            workspace.begin_thumb_drag(kind, input.mouse_pos);
                         }
                     },
                 );
@@ -427,9 +449,30 @@ pub fn draw(
                 ui.tree_node_icon_open(
                     "document_videos_root",
                     "folder",
-                    "Videos (0)",
+                    &format!("Videos ({})", video_editor.documents.len()),
                     true,
-                    |_| {},
+                    |ui| {
+                        for (index, doc) in video_editor.documents.iter().enumerate() {
+                            let id = format!("video_document_{index}");
+                            let meta = format!("{}×{} · {} FPS", doc.width, doc.height, doc.fps);
+                            let response = item_row(
+                                ui, &id, video_editor.active == Some(index), &doc.name, &meta, meta_style,
+                                |ui| {
+                                    let thumb = ui.area("video_document_thumb", Vec2::splat(thumb_size));
+                                    draw_video_document_thumb(ui, doc, thumb.rect);
+                                    thumb.rect
+                                },
+                            ).response;
+                            ui.context_menu(&id, response.hovered, |ui| {
+                                if ui.menu_item("delete", "Delete").clicked() {
+                                    action.delete_video_document = Some(index);
+                                }
+                            });
+                            if row_input && response.clicked() && !dragging {
+                                action.open_video_document = Some(index);
+                            }
+                        }
+                    },
                 );
             },
         );
@@ -442,9 +485,14 @@ pub fn draw(
                 for (index, graph) in workspace.graphs.entries.iter().enumerate() {
                     let id = format!("graph_{}", graph.id);
                     let selected = workspace.tree_selected.as_deref() == Some(id.as_str());
+                    let editor = if index == workspace.graphs.active {
+                        active_graph.or(graph.editor.as_ref())
+                    } else {
+                        graph.editor.as_ref()
+                    };
                     let clicked = item_row(ui, &id, selected, &graph.name, "Graph", meta_style, |ui| {
                         let thumb = ui.area(&format!("graph_thumb_{index}"), Vec2::splat(thumb_size));
-                        ui.fill_rect(thumb.rect, [0.12, 0.12, 0.14, 1.0]);
+                        draw_graph_thumb(ui, editor, thumb.rect);
                         thumb.rect
                     });
                     ui.context_menu(&format!("graph_menu_{index}"), clicked.response.hovered, |ui| {
@@ -479,6 +527,8 @@ pub fn draw(
             }
             if workspace.asset_dragging {
                 let cell = match kind {
+                    ThumbDrag::Video(index) => workspace.videos.get(index)
+                        .map(|_| asset_count + workspace.documents.len() + index),
                     ThumbDrag::Image(index) => workspace.assets.get(index).map(|_| index),
                     ThumbDrag::Document(index) => workspace
                         .documents
@@ -504,9 +554,18 @@ pub fn draw(
                     .asset_drag_origin
                     .is_some_and(|origin| input.mouse_pos.distance(origin) < 6.0 * ui.scale());
             let dropped = workspace.asset_dragging && drop_target.contains(input.mouse_pos);
+            let dropped_on_track = workspace.asset_dragging
+                && video_editor.track.is_some_and(|track| track.lane_at(input.mouse_pos).is_some());
             workspace.clear_asset_drag();
-            if dropped {
+            if let ThumbDrag::Video(index) = kind {
+                if dropped_on_track {
+                    action.drop_video = Some(index);
+                } else if clicked {
+                    action.open_video = Some(index);
+                }
+            } else if dropped && video_editor.active.is_none() {
                 match kind {
+                    ThumbDrag::Video(_) => unreachable!(),
                     ThumbDrag::Image(index) if graph_mode => {
                         if let Some(asset) = workspace.assets.get(index) {
                             action.add_asset_to_graph = Some(asset.id.clone());
@@ -522,6 +581,7 @@ pub fn draw(
                 }
             } else if clicked {
                 match kind {
+                    ThumbDrag::Video(_) => unreachable!(),
                     ThumbDrag::Image(index) => preview_asset = Some(index),
                     ThumbDrag::Document(index) => switch_doc = Some(index),
                 }
@@ -621,7 +681,9 @@ fn item_row(
             ui.flex(1.0, |ui| {
                 let name_w = (ui.available_size().x / ui.scale()).max(8.0);
                 ui.label_fixed(name_w, name);
-                ui.label_styled(meta, meta_style);
+                for line in meta.lines() {
+                    ui.label_styled(line, meta_style);
+                }
             });
         });
     });
@@ -631,6 +693,30 @@ fn item_row(
         rect,
         body,
     }
+}
+
+fn video_metadata(video: &VideoAsset) -> String {
+    let size = format_bytes(video.byte_size);
+    let Some(info) = video.info else {
+        return size;
+    };
+    let mut details = Vec::new();
+    if info.duration.is_finite() && info.duration > 0.0 {
+        let seconds = info.duration.floor() as u64;
+        details.push(format!(
+            "{:02}:{:02}:{:02}",
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60
+        ));
+    }
+    if info.fps.is_finite() && info.fps > 0.0 {
+        let fps = format!("{:.3}", info.fps);
+        let fps = fps.trim_end_matches('0').trim_end_matches('.');
+        details.push(format!("{fps} FPS"));
+    }
+    details.push(format!("{}×{}", info.width, info.height));
+    format!("{size}\n{}", details.join(" · "))
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -643,6 +729,70 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.1} KB", n / KB)
     } else {
         format!("{:.1} MB", n / MB)
+    }
+}
+
+fn draw_video_document_thumb(ui: &mut Ui, doc: &crate::video_document::VideoDocument, rect: Rect) {
+    ui.fill_rect(rect, [0.12, 0.12, 0.14, 1.0]);
+    let track = rect.inset(9.0 * ui.scale());
+    let height = (track.height() / doc.lane_count as f32).min(12.0 * ui.scale());
+    let y = (track.min.y + track.max.y - height * doc.lane_count as f32) * 0.5;
+    ui.fill_rect(Rect::from_min_size(Vec2::new(track.min.x, y), Vec2::new(track.width(), height * doc.lane_count as f32)), [0.22, 0.24, 0.29, 1.0]);
+    for clip in &doc.clips {
+        let x = track.min.x + track.width() * (clip.range.start / doc.duration) as f32;
+        let width = track.width() * ((clip.range.end() - clip.range.start) / doc.duration) as f32;
+        let row_y = y + (doc.lane_count - 1 - clip.range.lane) as f32 * height;
+        ui.fill_rect(Rect::from_min_size(Vec2::new(x, row_y), Vec2::new(width, height * 0.82)), [0.28, 0.55, 0.77, 1.0]);
+    }
+}
+
+fn draw_graph_thumb(ui: &mut Ui, editor: Option<&NodeEditor>, rect: Rect) {
+    ui.fill_rect(rect, [0.12, 0.12, 0.14, 1.0]);
+    let Some(editor) = editor else { return };
+    let mut positions = editor.nodes.iter().map(|node| node.position).filter(|p| p.is_finite());
+    let Some(first) = positions.next() else { return };
+    let (min, max) = positions.fold((first, first), |(min, max), pos| {
+        (min.min(pos), max.max(pos))
+    });
+    let span = max - min;
+    if !span.is_finite() {
+        return;
+    }
+
+    let node_size = Vec2::new(160.0, 92.0);
+    let thumb_size = rect.max - rect.min;
+    let available = thumb_size * 0.8;
+    let ratio = available / (span + node_size);
+    let fit = ratio.min_element();
+    let block = (node_size * fit).clamp(
+        Vec2::new(5.0, 3.0) * ui.scale(),
+        Vec2::new(0.38, 0.24) * thumb_size,
+    );
+    let center = rect.min + thumb_size * 0.5;
+    let centers: std::collections::HashMap<_, _> = editor.nodes
+        .iter()
+        .filter(|node| node.position.is_finite())
+        .map(|node| (node.id.as_str(), center + ((node.position - min) - span * 0.5) * fit))
+        .collect();
+
+    for link in &editor.space.links {
+        if let (Some(&from), Some(&to)) = (
+            centers.get(link.from_node.as_str()),
+            centers.get(link.to_node.as_str()),
+        ) && from.distance_squared(to) > 1.0
+        {
+            ui.line(from, to, ui.scale(), [0.53, 0.58, 0.67, 1.0]);
+        }
+    }
+    for node in &editor.nodes {
+        let Some(&center) = centers.get(node.id.as_str()) else { continue };
+        let color = match &node.kind {
+            kind if kind.is_image_source() => [0.33, 0.64, 0.55, 1.0],
+            kind if kind.uses_comfy() => [0.40, 0.55, 0.82, 1.0],
+            NodeKind::Output(_) => [0.72, 0.56, 0.35, 1.0],
+            _ => [0.52, 0.56, 0.64, 1.0],
+        };
+        ui.fill_rect(Rect::from_min_size(center - block * 0.5, block).round_px(), color);
     }
 }
 
@@ -659,6 +809,19 @@ fn draw_thumb(ui: &mut Ui, workspace: &Workspace, cell: usize, rect: mega_ui::Re
 mod tests {
     use super::*;
     use crate::workspace::THUMB_SIZE;
+
+    #[test]
+    fn video_card_formats_duration_fps_and_resolution() {
+        let mut video = VideoAsset::from_bytes(vec![0; 1024]);
+        assert_eq!(video_metadata(&video), "1.0 KB");
+        video.info = Some(crate::video::VideoInfo {
+            width: 1920,
+            height: 1080,
+            duration: 143.75,
+            fps: 30_000.0 / 1001.0,
+        });
+        assert_eq!(video_metadata(&video), "1.0 KB\n00:02:23 · 29.97 FPS · 1920×1080");
+    }
 
     fn library_frame(
         ui: &mut Ui,
@@ -693,6 +856,8 @@ mod tests {
                 action = draw(
                     ui,
                     workspace,
+                    None,
+                    &VideoEditor::default(),
                     input,
                     Rect::from_min_size(Vec2::new(500.0, 0.0), Vec2::new(300.0, 1600.0)),
                     graph_mode,
@@ -1185,6 +1350,8 @@ mod tests {
                 draw(
                     ui,
                     &mut workspace,
+                    None,
+                    &VideoEditor::default(),
                     &FrameInput::default(),
                     Rect::from_min_size(Vec2::ZERO, Vec2::splat(200.0)),
                     false,

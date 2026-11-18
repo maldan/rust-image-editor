@@ -1,6 +1,6 @@
 use super::*;
 use crate::nodes::{
-    self, Destination, NodeKind, PreparedOutput, Preview, PreviewResult, Run, Source,
+    self, Destination, GraphOutput, NodeKind, PreparedOutput, Preview, PreviewResult, Run, Source,
 };
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, mpsc};
@@ -76,7 +76,7 @@ impl EditorApp {
             let (order, destination) =
                 nodes::graph_plan(&self.nodes.nodes, &self.nodes.space.links, id)?;
             let mut destination_frame = None;
-            if let Destination::Layer(document) = &destination {
+            if let Some(Destination::Layer(document)) = &destination {
                 let index = self
                     .workspace
                     .documents
@@ -96,12 +96,7 @@ impl EditorApp {
                     projects.insert(node.id.clone(), self.node_kind_snapshot(&node.kind)?);
                 }
             }
-            let config = if order.iter().any(|node| {
-                matches!(
-                    node.kind,
-                    NodeKind::Lineart { .. } | NodeKind::MinimaxRefs { .. }
-                )
-            }) {
+            let config = if order.iter().any(|node| node.kind.uses_comfy()) {
                 Some(crate::comfyui::HostConfig::load()?)
             } else {
                 None
@@ -125,12 +120,13 @@ impl EditorApp {
                 let worker_live_preview = live_preview.clone();
                 let progress = Arc::new(std::sync::Mutex::new(nodes::NodeProgress::default()));
                 let worker_progress = progress.clone();
+                let times = Arc::new(std::sync::Mutex::new(nodes::ExecutionTimes::default()));
+                let worker_times = times.clone();
                 self.nodes.live_display = None;
                 for node in &order {
-                    if matches!(
-                        node.kind,
-                        NodeKind::MinimaxRefs { .. } | NodeKind::Lineart { .. }
-                    ) {
+                    self.nodes.space.set_node_annotation(&node.id, None);
+                    self.nodes.space.set_node_progress(&node.id, None);
+                    if node.kind.uses_comfy() {
                         self.nodes.previews.remove(&node.id);
                     }
                 }
@@ -148,6 +144,7 @@ impl EditorApp {
                                 &worker_current_node,
                                 &worker_live_preview,
                                 &worker_progress,
+                                &worker_times,
                             )
                         })
                         .unwrap_or_else(|_| Err("Pipeline worker failed".into()));
@@ -164,6 +161,7 @@ impl EditorApp {
                             current_node,
                             live_preview,
                             progress,
+                            times,
                         });
                     }
                     Err(error) => self.nodes.message = format!("Cannot start pipeline: {error}"),
@@ -177,11 +175,32 @@ impl EditorApp {
         if let Some(run) = &self.nodes.run {
             let current = run.current_node.lock().unwrap().clone();
             let live_preview = run.live_preview.lock().unwrap().take();
-            self.nodes.space.running_nodes.clear();
+            let progress = run.progress.lock().unwrap().clone();
+            let stopping = run.cancel.load(std::sync::atomic::Ordering::Relaxed);
+            let (finished, running) = {
+                let times = run.times.lock().unwrap();
+                (times.finished.clone(), times.running.clone())
+            };
+            for id in std::mem::take(&mut self.nodes.space.running_nodes) {
+                self.nodes.space.set_node_progress(&id, None);
+            }
             if let Some(id) =
                 current.filter(|id| self.nodes.nodes.iter().any(|node| node.id == *id))
             {
+                if !stopping && progress.node == id {
+                    self.nodes.space.set_node_progress(&id, progress.fraction);
+                }
                 self.nodes.space.running_nodes.insert(id);
+            }
+            for (id, duration) in finished {
+                if self.nodes.nodes.iter().any(|node| node.id == id) {
+                    self.nodes.space.set_node_annotation(&id, Some(&format_node_duration(duration)));
+                }
+            }
+            if let Some((id, started)) = running {
+                if self.nodes.nodes.iter().any(|node| node.id == id) {
+                    self.nodes.space.set_node_annotation(&id, Some(&format_node_duration(started.elapsed())));
+                }
             }
             let result = match run.receiver.try_recv() {
                 Ok(result) => Some(result),
@@ -204,14 +223,32 @@ impl EditorApp {
             }
             if let Some(result) = result {
                 let run = self.nodes.run.take().unwrap();
-                self.nodes.space.running_nodes.clear();
+                // The worker can finish between the timing snapshot and receiving
+                // its result; read completed times once more before dropping Run.
+                for (id, duration) in &run.times.lock().unwrap().finished {
+                    if self.nodes.nodes.iter().any(|node| &node.id == id) {
+                        self.nodes.space.set_node_annotation(id, Some(&format_node_duration(*duration)));
+                    }
+                }
+                for id in std::mem::take(&mut self.nodes.space.running_nodes) {
+                    self.nodes.space.set_node_progress(&id, None);
+                }
                 let result = if run.cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     Err("Cancelled".into())
                 } else if !self.nodes.nodes.iter().any(|n| n.id == run.node) {
                     Err("Output was deleted; result discarded".into())
                 } else {
                     result.and_then(|result| {
-                        if matches!(run.destination, Destination::Memory) {
+                        let result = match result {
+                            GraphOutput::Image(image) => image,
+                            GraphOutput::Video(bytes) => {
+                                let index = self.workspace.add_video_named(bytes, "Ltx 2.3 I2V")?;
+                                self.dirty = true;
+                                return Ok(format!("Video saved: {}", self.workspace.videos[index].name));
+                            }
+                        };
+                        let destination = run.destination.clone().ok_or("Expected a video")?;
+                        if matches!(destination, Destination::Memory) {
                             self.nodes
                                 .memory
                                 .insert(run.node.clone(), result.layer.clone());
@@ -220,7 +257,7 @@ impl EditorApp {
                         }
                         self.store_node_result(&run.node, &result);
                         self.apply_node_output(
-                            run.destination.clone(),
+                            destination,
                             run.destination_frame,
                             result,
                         )
@@ -331,8 +368,11 @@ impl EditorApp {
             ));
         }
         // Destination is captured at Run, never inferred from the active document.
-        let target = match &destination {
-            Destination::NewDocument => None,
+        let index = match &destination {
+            Destination::NewDocument => {
+                let name = format!("Document {}", self.workspace.documents.len() + 1);
+                self.workspace.add_document(&name)
+            }
             Destination::Memory => unreachable!(),
             Destination::Layer(id) => {
                 let index = self
@@ -351,31 +391,34 @@ impl EditorApp {
                 {
                     return Err("Destination animation frame changed; run again".into());
                 }
-                Some(index)
+                index
             }
         };
-        self.finish_deformation(false);
-        self.commit_transform();
-        self.animation_clock = None;
-        if let Some(index) = target {
-            if index != self.workspace.active_document {
-                self.switch_document(index);
-            }
+        if index == self.workspace.active_document {
+            self.finish_deformation(false);
+            self.commit_transform();
+            self.animation_clock = None;
+            self.history.bind_animation_edits(self.workspace.active());
+            self.history
+                .insert_layer(self.workspace.active_mut(), result.layer, result.size);
+            self.sync_layer_structure();
         } else {
-            self.new_document();
+            let document = &mut self.workspace.documents[index];
+            let mut layer = result.layer;
+            layer.identity = Default::default();
+            if document.project.width == 0 || document.project.height == 0 {
+                (document.project.width, document.project.height) = result.size;
+            }
+            document.project.layers.push(layer);
+            document.project.active_layer = document.project.layers.len() - 1;
+            document.mark_thumb_dirty();
+            self.dirty = true;
         }
-        self.close_asset_preview();
-        self.history.bind_animation_edits(self.workspace.active());
-        self.history
-            .insert_layer(self.workspace.active_mut(), result.layer, result.size);
-        self.sync_layer_structure();
-        self.session.camera_selected = false;
-        self.session.fit_image = true;
         Ok(format!(
             "Node output: {} × {} px → {}",
             result.size.0,
             result.size.1,
-            self.workspace.active_doc().name
+            self.workspace.documents[index].name
         ))
     }
 
@@ -471,6 +514,14 @@ impl EditorApp {
     }
 }
 
+fn format_node_duration(duration: std::time::Duration) -> String {
+    if duration.as_secs_f64() < 1.0 {
+        format!("{} ms", duration.as_millis())
+    } else {
+        format!("{:.1} s", duration.as_secs_f64())
+    }
+}
+
 fn asset_preview_signature(id: &str, width: u32, height: u32, pixels_hash: u64) -> u64 {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     id.hash(&mut hash);
@@ -545,14 +596,23 @@ mod tests {
         app.run_node_output("node_3");
         assert!(app.nodes.run.is_some());
         app.project_mut().layers[0].pixels.write(0, 0, 0, [255; 4]);
+        app.session.preview_graph = true;
         finish(&mut app);
+        for id in ["node_1", "node_2", "node_3"] {
+            assert!(app.nodes.space.node_annotation(id).is_some(), "missing timing for {id}");
+            assert_eq!(app.nodes.space.node_progress(id), None);
+        }
+        assert!(app.session.preview_graph);
         assert_eq!(app.workspace.documents.len(), 2);
-        assert_eq!((app.project().width, app.project().height), (2, 1));
-        assert_eq!(app.project().layers[0].pixels.read(0, 0, 0)[3], 128);
+        assert_eq!((app.project().width, app.project().height), (4, 2));
+        let created = &app.workspace.documents[1].project;
+        assert_eq!((created.width, created.height), (2, 1));
+        assert_eq!(created.layers[0].pixels.read(0, 0, 0)[3], 128);
         assert!(app.dirty);
         app.run_node_output("node_3");
         finish(&mut app);
         assert_eq!(app.workspace.documents.len(), 3);
+        assert!(app.session.preview_graph);
     }
 
     #[test]
@@ -560,27 +620,75 @@ mod tests {
         let mut app = fixture();
         let (sender, receiver) = mpsc::channel();
         let current_node = Arc::new(std::sync::Mutex::new(None));
+        let progress = Arc::new(std::sync::Mutex::new(nodes::NodeProgress::default()));
+        let times = Arc::new(std::sync::Mutex::new(nodes::ExecutionTimes::default()));
         app.nodes.run = Some(Run {
             node: "node_3".into(),
-            destination: Destination::Memory,
+            destination: Some(Destination::Memory),
             destination_frame: None,
             receiver,
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             current_node: current_node.clone(),
             live_preview: Arc::new(std::sync::Mutex::new(None)),
-            progress: Arc::new(std::sync::Mutex::new(nodes::NodeProgress::default())),
+            progress: progress.clone(),
+            times: times.clone(),
         });
         let mut ui = Ui::new();
         for id in ["node_1", "node_2"] {
             *current_node.lock().unwrap() = Some(id.into());
+            *progress.lock().unwrap() = nodes::NodeProgress { node: id.into(), message: "Generating".into(), fraction: Some(0.4) };
+            times.lock().unwrap().running = Some((id.into(), std::time::Instant::now()));
             app.poll_nodes(&mut ui);
             assert_eq!(app.nodes.space.running_nodes.len(), 1);
             assert!(app.nodes.space.running_nodes.contains(id));
+            assert_eq!(app.nodes.space.node_progress(id), Some(0.4));
+            assert!(app.nodes.space.node_annotation(id).is_some());
         }
+        assert_eq!(app.nodes.space.node_progress("node_1"), None);
         sender.send(Err("test failure".into())).unwrap();
         app.poll_nodes(&mut ui);
         assert!(app.nodes.space.running_nodes.is_empty());
+        assert_eq!(app.nodes.space.node_progress("node_2"), None);
         assert!(app.nodes.run.is_none());
+    }
+
+    #[test]
+    fn nodes_failed_operation_keeps_its_execution_time() {
+        let mut app = fixture();
+        app.nodes.nodes[1].kind = NodeKind::Resize { scale: -1.0 };
+        app.run_node_output("node_3");
+        finish(&mut app);
+        assert!(app.nodes.space.node_annotation("node_1").is_some());
+        assert!(app.nodes.space.node_annotation("node_2").is_some());
+        assert!(app.nodes.space.node_annotation("node_3").is_none());
+        assert!(app.nodes.space.running_nodes.is_empty());
+    }
+
+    #[test]
+    fn nodes_save_video_worker_result_as_asset() {
+        let mut app = fixture();
+        app.nodes.nodes[2].kind = NodeKind::Generate(nodes::Generation::LtxVideo {
+            settings: Default::default(),
+            scale: 1.0,
+        });
+        let bytes = include_bytes!("../../tests/fixtures/video-preview.mp4");
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Ok(GraphOutput::Video(bytes.to_vec()))).unwrap();
+        app.nodes.run = Some(Run {
+            node: "node_3".into(),
+            destination: None,
+            destination_frame: None,
+            receiver,
+            cancel: Arc::default(),
+            current_node: Arc::default(),
+            live_preview: Arc::default(),
+            progress: Arc::default(),
+            times: Arc::default(),
+        });
+        app.poll_nodes(&mut Ui::new());
+        assert_eq!(app.workspace.videos[0].read().unwrap(), bytes);
+        assert_eq!(app.workspace.documents.len(), 1);
+        assert!(app.dirty);
     }
 
     #[test]
@@ -588,16 +696,17 @@ mod tests {
         let mut app = fixture();
         let result = nodes::evaluate(app.project().clone(), vec![]).unwrap();
         let (sender, receiver) = mpsc::channel();
-        sender.send(Ok(result)).unwrap();
+        sender.send(Ok(GraphOutput::Image(result))).unwrap();
         app.nodes.run = Some(Run {
             node: "node_3".into(),
-            destination: Destination::NewDocument,
+            destination: Some(Destination::NewDocument),
             destination_frame: None,
             receiver,
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             current_node: Arc::new(std::sync::Mutex::new(Some("node_2".into()))),
             live_preview: Arc::new(std::sync::Mutex::new(None)),
             progress: Arc::new(std::sync::Mutex::new(nodes::NodeProgress::default())),
+            times: Arc::new(std::sync::Mutex::new(nodes::ExecutionTimes::default())),
         });
         app.poll_nodes(&mut Ui::new());
         assert_eq!(app.workspace.documents.len(), 1);
@@ -625,17 +734,35 @@ mod tests {
     }
 
     #[test]
-    fn nodes_layer_destination_is_captured_and_insertion_supports_undo_redo() {
+    fn nodes_layer_destination_is_captured_without_opening_the_document() {
         let mut app = fixture();
         let id = app.workspace.active_doc().id.clone();
         app.nodes.nodes[2].kind = NodeKind::Output(Destination::Layer(id.clone()));
         app.run_node_output("node_3");
         app.new_document();
+        let opened = app.workspace.active_doc().id.clone();
+        finish(&mut app);
+        assert_eq!(app.workspace.active_doc().id, opened);
+        let dest = app
+            .workspace
+            .documents
+            .iter()
+            .find(|d| d.id == id)
+            .unwrap();
+        assert_eq!(dest.project.layers.len(), 2);
+        assert_eq!((dest.project.width, dest.project.height), (4, 2));
+        assert_eq!(dest.project.layers[1].pixels.bounds().unwrap().2, 2);
+    }
+
+    #[test]
+    fn nodes_layer_destination_on_open_document_supports_undo_redo() {
+        let mut app = fixture();
+        let id = app.workspace.active_doc().id.clone();
+        app.nodes.nodes[2].kind = NodeKind::Output(Destination::Layer(id.clone()));
+        app.run_node_output("node_3");
         finish(&mut app);
         assert_eq!(app.workspace.active_doc().id, id);
         assert_eq!(app.project().layers.len(), 2);
-        assert_eq!((app.project().width, app.project().height), (4, 2));
-        assert_eq!(app.project().layers[1].pixels.bounds().unwrap().2, 2);
         app.undo();
         assert_eq!(app.project().layers.len(), 1);
         app.redo();

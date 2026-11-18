@@ -1,6 +1,39 @@
 use super::*;
 
 impl EditorApp {
+    pub(crate) fn poll_catalog(&mut self, ui: &mut Ui) {
+        if let Some(load) = &self.ai.catalog_load {
+            if let Some(result) = load.poll() {
+                match result {
+                    Ok((catalog, message)) => {
+                        self.ai.catalog = catalog;
+                        self.ai.catalog_message = message;
+                    }
+                    Err(error) => self.ai.catalog_message = error,
+                }
+                self.ai.catalog_load = None;
+            } else {
+                ui.request_repaint();
+            }
+        }
+    }
+
+    pub(crate) fn ensure_sd_catalog(&mut self) {
+        if self.ai.catalog_load.is_some()
+            || !self.ai.catalog.models.is_empty()
+            || !self.ai.catalog.loras.is_empty()
+            || !self.ai.catalog_message.is_empty()
+        {
+            return;
+        }
+        let Ok(config) = crate::comfyui::HostConfig::load() else {
+            return;
+        };
+        self.ai.config = Some(config.clone());
+        self.ai.catalog_load = Some(crate::comfyui::CatalogLoad::start(config, false));
+        self.ai.catalog_message = "Loading models / LoRAs...".into();
+    }
+
     pub fn open_ai_video(&mut self) {
         self.open_ai_mode(AiMode::Video);
     }
@@ -304,6 +337,7 @@ impl EditorApp {
                 self.ai.scale,
                 self.ai.draw_settings.clone(),
                 self.ai.denoise,
+                0,
             )
         } else if self.ai.mode == AiMode::Lineart {
             crate::comfyui::Job::start_lineart(
@@ -345,17 +379,9 @@ impl EditorApp {
         let doc = self.workspace.documents.iter()
             .find(|d| d.id == self.ai.document_id)
             .ok_or("Choose a source document")?;
-        let (width, height) = crate::comfyui::scaled_size(
+        self.ai.video_settings.clone().with_source_size(
             doc.project.width, doc.project.height, self.ai.video_scale,
-        )?;
-        // LTX requires dimensions in multiples of 64.
-        let width = ((width + 32) / 64 * 64).max(64);
-        let height = ((height + 32) / 64 * 64).max(64);
-        crate::comfyui::scaled_size(width, height, 1.0)?;
-        let mut settings = self.ai.video_settings.clone();
-        settings.width = width as i32;
-        settings.height = height as i32;
-        Ok(settings)
+        )
     }
 
     fn start_video(&mut self) {
@@ -520,6 +546,7 @@ impl EditorApp {
             size,
             self.ai.prompt.clone(),
             self.ai.megapixels,
+            0,
         ));
     }
 

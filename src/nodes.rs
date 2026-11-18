@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, mpsc};
 
+mod generation;
+pub(crate) use generation::Generation;
+
 pub const GRAPH_VERSION: u32 = 1;
 
 pub const IMAGE_PORT: u16 = 100;
@@ -36,8 +39,22 @@ pub enum NodeKind {
     ImageDocument(Source),
     ImageAsset { id: String },
     Resize { scale: f32 },
+    Invert,
     Lineart { resolution: i32 },
-    MinimaxRefs { prompt: String, megapixels: f32 },
+    MinimaxRefs {
+        prompt: String,
+        megapixels: f32,
+        seed: u64,
+    },
+    SdxlRedraw {
+        denoise: f32,
+        seed: u64,
+        model: Option<String>,
+        loras: [crate::comfyui::LoraSelection; 3],
+        positive: String,
+        negative: String,
+    },
+    Generate(Generation),
     Output(Destination),
 }
 
@@ -45,6 +62,31 @@ impl NodeKind {
     pub(crate) fn is_image_source(&self) -> bool {
         matches!(self, Self::ImageDocument(_) | Self::ImageAsset { .. })
     }
+
+    pub(crate) fn uses_comfy(&self) -> bool {
+        matches!(
+            self,
+            Self::Lineart { .. } | Self::MinimaxRefs { .. } | Self::SdxlRedraw { .. } | Self::Generate(_)
+        )
+    }
+
+    pub(crate) fn sdxl_redraw() -> Self {
+        Self::SdxlRedraw {
+            denoise: 0.3,
+            seed: 0,
+            model: None,
+            loras: empty_loras(),
+            positive: String::new(),
+            negative: String::new(),
+        }
+    }
+}
+
+fn empty_loras() -> [crate::comfyui::LoraSelection; 3] {
+    std::array::from_fn(|_| crate::comfyui::LoraSelection {
+        name: None,
+        strength: 1.0,
+    })
 }
 
 #[derive(Clone)]
@@ -71,12 +113,6 @@ pub struct PreviewResult {
     pub pixels: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum Operation {
-    Resize(f32),
-    Lineart(i32),
-}
-
 pub struct LivePreview {
     pub node: String,
     pub size: (u32, u32),
@@ -91,21 +127,64 @@ pub struct NodeProgress {
     pub fraction: Option<f32>,
 }
 
+#[derive(Default)]
+pub struct ExecutionTimes {
+    pub running: Option<(String, std::time::Instant)>,
+    pub finished: HashMap<String, std::time::Duration>,
+}
+
+struct NodeTimer<'a> {
+    node: String,
+    started: std::time::Instant,
+    times: &'a std::sync::Mutex<ExecutionTimes>,
+}
+
+impl<'a> NodeTimer<'a> {
+    fn start(node: &str, times: &'a std::sync::Mutex<ExecutionTimes>) -> Self {
+        let started = std::time::Instant::now();
+        times.lock().unwrap().running = Some((node.into(), started));
+        Self { node: node.into(), started, times }
+    }
+}
+
+impl Drop for NodeTimer<'_> {
+    fn drop(&mut self) {
+        let mut times = self.times.lock().unwrap();
+        times.finished.insert(self.node.clone(), self.started.elapsed());
+        times.running = None;
+    }
+}
+
 pub struct PreparedOutput {
     pub layer: Layer,
     pub size: (u32, u32),
     pub thumbnail: Vec<u8>,
 }
 
+pub enum GraphOutput {
+    Image(PreparedOutput),
+    Video(Vec<u8>),
+}
+
+impl GraphOutput {
+    fn into_image(self) -> Result<PreparedOutput, String> {
+        match self {
+            Self::Image(image) => Ok(image),
+            Self::Video(_) => Err("Expected an image output".into()),
+        }
+    }
+}
+
 pub struct Run {
     pub node: String,
-    pub destination: Destination,
+    pub destination: Option<Destination>,
     pub destination_frame: Option<u32>,
-    pub receiver: mpsc::Receiver<Result<PreparedOutput, String>>,
+    pub receiver: mpsc::Receiver<Result<GraphOutput, String>>,
     pub cancel: Arc<std::sync::atomic::AtomicBool>,
     pub current_node: Arc<std::sync::Mutex<Option<String>>>,
     pub live_preview: Arc<std::sync::Mutex<Option<LivePreview>>>,
     pub progress: Arc<std::sync::Mutex<NodeProgress>>,
+    pub times: Arc<std::sync::Mutex<ExecutionTimes>>,
 }
 
 impl Drop for Run {
@@ -238,7 +317,9 @@ impl NodeEditor {
             .is_some_and(|run| deleted.contains(&run.node))
         {
             self.run = None;
-            self.space.running_nodes.clear();
+            for id in std::mem::take(&mut self.space.running_nodes) {
+                self.space.set_node_progress(&id, None);
+            }
             self.message = "Run cancelled: output was deleted".into();
         }
         for id in &deleted {
@@ -255,7 +336,7 @@ impl NodeEditor {
 }
 
 /// Validate the complete graph, including disconnected cycles. Missing inputs are
-/// allowed while editing; the execution planner requires them on the chosen path.
+/// allowed while editing; graph_plan requires them on the chosen path.
 pub fn validate(nodes: &[Node], links: &[NodeLink]) -> Result<(), String> {
     let mut inputs = HashSet::new();
     for link in links {
@@ -269,13 +350,26 @@ pub fn validate(nodes: &[Node], links: &[NodeLink]) -> Result<(), String> {
             .ok_or("Destination node was deleted")?;
         let ok = match (&from.kind, link.from_port.as_str(), &to.kind, link.to_port.as_str(), link.ty) {
             (NodeKind::Output(_), ..) => false,
+            (NodeKind::Generate(generation), ..) if generation.is_video() => false,
+            (_, "image", NodeKind::Generate(generation), "image", IMAGE_PORT) => generation.needs_image(),
+            (_, "image", NodeKind::Generate(generation), "end_image", IMAGE_PORT) => generation.is_video(),
             (from, "size", NodeKind::Resize { .. }, "size", SIZE_PORT) if from.is_image_source() => true,
             (_, "image", NodeKind::MinimaxRefs { .. }, port, IMAGE_PORT)
                 if ["image_1", "image_2", "image_3", "image_4"].contains(&port) =>
             {
                 true
             }
-            (_, "image", NodeKind::Resize { .. } | NodeKind::Lineart { .. } | NodeKind::Output(_), "image", IMAGE_PORT) => {
+            (
+                _,
+                "image",
+                NodeKind::Resize { .. }
+                | NodeKind::Invert
+                | NodeKind::Lineart { .. }
+                | NodeKind::SdxlRedraw { .. }
+                | NodeKind::Output(_),
+                "image",
+                IMAGE_PORT,
+            ) => {
                 true
             }
             _ => false,
@@ -313,80 +407,20 @@ pub fn validate(nodes: &[Node], links: &[NodeLink]) -> Result<(), String> {
     Ok(())
 }
 
-/// The initial operations have one input each, so a topological execution plan
-/// is simply the selected output's upstream chain, in reverse order.
-pub fn plan(
-    nodes: &[Node],
-    links: &[NodeLink],
-    output: &str,
-) -> Result<(Source, Vec<Operation>, Destination), String> {
-    validate(nodes, links)?;
-    let node = nodes
-        .iter()
-        .find(|n| n.id == output)
-        .ok_or("Output node was deleted")?;
-    let NodeKind::Output(destination) = &node.kind else {
-        return Err("Choose an Output node".into());
-    };
-    let mut current = output;
-    let mut scales = Vec::new();
-    loop {
-        let link = links
-            .iter()
-            .find(|l| l.to_node == current && l.to_port == "image")
-            .ok_or("Connect the Image input first")?;
-        let node = nodes
-            .iter()
-            .find(|n| n.id == link.from_node)
-            .ok_or("Source node was deleted")?;
-        match &node.kind {
-            NodeKind::ImageDocument(source) => {
-                scales.reverse();
-                return Ok((source.clone(), scales, destination.clone()));
-            }
-            NodeKind::ImageAsset { .. } => {
-                scales.reverse();
-                return Ok((
-                    Source {
-                        document: String::new(),
-                        layer: None,
-                    },
-                    scales,
-                    destination.clone(),
-                ));
-            }
-            NodeKind::Resize { scale } => {
-                if !scale.is_finite() || *scale <= 0.0 {
-                    return Err("Scale must be a finite number greater than zero".into());
-                }
-                scales.push(Operation::Resize(*scale));
-                current = &node.id;
-            }
-            NodeKind::Lineart { resolution } => {
-                crate::comfyui::validate_lineart_resolution(*resolution)?;
-                scales.push(Operation::Lineart(*resolution));
-                current = &node.id;
-            }
-            NodeKind::MinimaxRefs { .. } => {
-                return Err("Multi-input node requires graph execution".into());
-            }
-            NodeKind::Output(_) => return Err("Output cannot be an image source".into()),
-        }
-    }
-}
-
 pub fn graph_plan(
     nodes: &[Node],
     links: &[NodeLink],
     output: &str,
-) -> Result<(Vec<Node>, Destination), String> {
+) -> Result<(Vec<Node>, Option<Destination>), String> {
     validate(nodes, links)?;
     let root = nodes
         .iter()
         .find(|n| n.id == output)
         .ok_or("Output node was deleted")?;
-    let NodeKind::Output(destination) = &root.kind else {
-        return Err("Choose an Output node".into());
+    let destination = match &root.kind {
+        NodeKind::Output(destination) => Some(destination.clone()),
+        NodeKind::Generate(generation) if generation.is_video() => None,
+        _ => return Err("Choose an Output or LTX Video node".into()),
     };
     fn visit(
         id: &str,
@@ -402,14 +436,35 @@ pub fn graph_plan(
             .iter()
             .find(|n| n.id == id)
             .ok_or("Node was deleted")?;
-        if matches!(
+        let needs_image = matches!(
             node.kind,
-            NodeKind::Resize { .. } | NodeKind::Lineart { .. } | NodeKind::Output(_)
-        ) && !links
+            NodeKind::Resize { .. }
+                | NodeKind::Invert
+                | NodeKind::Lineart { .. }
+                | NodeKind::SdxlRedraw { .. }
+                | NodeKind::Output(_)
+        ) || matches!(&node.kind, NodeKind::Generate(generation) if generation.needs_image());
+        if needs_image && !links
             .iter()
             .any(|l| l.to_node == id && l.to_port == "image")
         {
             return Err("Connect the Image input first".into());
+        }
+        if let NodeKind::Lineart { resolution } = &node.kind {
+            crate::comfyui::validate_lineart_resolution(*resolution)?;
+        }
+        if let NodeKind::SdxlRedraw {
+            denoise, loras, ..
+        } = &node.kind
+        {
+            crate::comfyui::DrawSettings {
+                loras: loras.clone(),
+                ..Default::default()
+            }
+            .validate_redraw(*denoise)?;
+        }
+        if let NodeKind::Generate(generation) = &node.kind {
+            generation.validate()?;
         }
         for link in links.iter().filter(|l| l.to_node == id) {
             visit(&link.from_node, nodes, links, seen, order)?;
@@ -419,7 +474,7 @@ pub fn graph_plan(
     }
     let mut order = Vec::new();
     visit(output, nodes, links, &mut HashSet::new(), &mut order)?;
-    Ok((order, destination.clone()))
+    Ok((order, destination))
 }
 
 pub fn evaluate_graph(
@@ -431,13 +486,15 @@ pub fn evaluate_graph(
     current_node: &std::sync::Mutex<Option<String>>,
     live_preview: &std::sync::Mutex<Option<LivePreview>>,
     node_progress: &std::sync::Mutex<NodeProgress>,
-) -> Result<PreparedOutput, String> {
+    times: &std::sync::Mutex<ExecutionTimes>,
+) -> Result<GraphOutput, String> {
     use std::sync::atomic::Ordering;
     let mut images: HashMap<String, Arc<RgbaImage>> = HashMap::new();
     for node in order {
         if cancel.load(Ordering::Relaxed) {
             return Err("Cancelled".into());
         }
+        let _timer = NodeTimer::start(&node.id, times);
         *current_node.lock().unwrap() = Some(node.id.clone());
         *node_progress.lock().unwrap() = NodeProgress {
             node: node.id.clone(),
@@ -472,6 +529,11 @@ pub fn evaluate_graph(
                     .unwrap_or_else(|| image.dimensions());
                 resize_rgba(&image, width, height, scale)?
             }
+            NodeKind::Invert => {
+                let mut image = (*input("image").ok_or("Connect the Image input first")?).clone();
+                invert_rgba(&mut image);
+                image
+            }
             NodeKind::Lineart { resolution } => {
                 crate::comfyui::validate_lineart_resolution(resolution)?;
                 let image = input("image").ok_or("Connect the Image input first")?;
@@ -481,9 +543,13 @@ pub fn evaluate_graph(
                     1.0,
                     resolution,
                 );
-                wait_graph_job(job, cancel, &node.id, live_preview, node_progress)?
+                wait_graph_image(job, cancel, &node.id, live_preview, node_progress)?
             }
-            NodeKind::MinimaxRefs { prompt, megapixels } => {
+            NodeKind::MinimaxRefs {
+                prompt,
+                megapixels,
+                seed,
+            } => {
                 let inputs = ["image_1", "image_2", "image_3", "image_4"]
                     .map(|port| input(port).map(|img| (*img).clone()));
                 let job = crate::comfyui::Job::start_minimax_refs(
@@ -492,12 +558,52 @@ pub fn evaluate_graph(
                     None,
                     prompt,
                     megapixels,
+                    seed,
                 );
-                wait_graph_job(job, cancel, &node.id, live_preview, node_progress)?
+                wait_graph_image(job, cancel, &node.id, live_preview, node_progress)?
+            }
+            NodeKind::SdxlRedraw {
+                denoise,
+                seed,
+                model,
+                loras,
+                positive,
+                negative,
+            } => {
+                let image = input("image").ok_or("Connect the Image input first")?;
+                let job = crate::comfyui::Job::start_redraw(
+                    config.clone().ok_or("ComfyUI is not configured")?,
+                    (*image).clone(),
+                    1.0,
+                    crate::comfyui::DrawSettings {
+                        model,
+                        loras,
+                        positive,
+                        negative,
+                        ..Default::default()
+                    },
+                    denoise,
+                    seed,
+                );
+                wait_graph_image(job, cancel, &node.id, live_preview, node_progress)?
+            }
+            NodeKind::Generate(generation) => {
+                let job = generation.start(
+                    config.clone().ok_or("ComfyUI is not configured")?,
+                    input("image"),
+                    input("end_image"),
+                )?;
+                match wait_graph_job(job, cancel, &node.id, live_preview, node_progress)? {
+                    crate::comfyui::JobResult::Done(image) if !generation.is_video() => image,
+                    crate::comfyui::JobResult::Video(bytes) if generation.is_video() => {
+                        return Ok(GraphOutput::Video(bytes));
+                    }
+                    _ => return Err("Unexpected generation result".into()),
+                }
             }
             NodeKind::Output(_) => {
                 let image = input("image").ok_or("Connect the Image input first")?;
-                return prepare_image_output(&image);
+                return prepare_image_output(&image).map(GraphOutput::Image);
             }
         };
         check_size(image.width(), image.height())?;
@@ -506,13 +612,26 @@ pub fn evaluate_graph(
     Err("Output node is missing".into())
 }
 
-fn wait_graph_job(
+fn wait_graph_image(
     job: crate::comfyui::Job,
     cancel: &std::sync::atomic::AtomicBool,
     node_id: &str,
     live_preview: &std::sync::Mutex<Option<LivePreview>>,
     node_progress: &std::sync::Mutex<NodeProgress>,
 ) -> Result<RgbaImage, String> {
+    match wait_graph_job(job, cancel, node_id, live_preview, node_progress)? {
+        crate::comfyui::JobResult::Done(image) => Ok(image),
+        _ => Err("Expected an image".into()),
+    }
+}
+
+fn wait_graph_job(
+    job: crate::comfyui::Job,
+    cancel: &std::sync::atomic::AtomicBool,
+    node_id: &str,
+    live_preview: &std::sync::Mutex<Option<LivePreview>>,
+    node_progress: &std::sync::Mutex<NodeProgress>,
+) -> Result<crate::comfyui::JobResult, String> {
     use std::sync::atomic::Ordering;
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -539,11 +658,11 @@ fn wait_graph_job(
         match job.poll() {
             Some(crate::comfyui::JobResult::Done(image)) => {
                 publish_live_preview(node_id, &image, live_preview, true);
-                return Ok(image);
+                return Ok(crate::comfyui::JobResult::Done(image));
             }
             Some(crate::comfyui::JobResult::Failed(error)) => return Err(error),
             Some(crate::comfyui::JobResult::Cancelled) => return Err("Cancelled".into()),
-            Some(crate::comfyui::JobResult::Video(_)) => return Err("Expected an image".into()),
+            Some(result @ crate::comfyui::JobResult::Video(_)) => return Ok(result),
             None => std::thread::sleep(std::time::Duration::from_millis(50)),
         }
     }
@@ -565,6 +684,17 @@ fn publish_live_preview(
         pixels,
         finished,
     });
+}
+
+fn invert_rgba(image: &mut RgbaImage) {
+    for pixel in image.pixels_mut() {
+        if pixel.0[3] == 0 {
+            continue;
+        }
+        pixel.0[0] = 255 - pixel.0[0];
+        pixel.0[1] = 255 - pixel.0[1];
+        pixel.0[2] = 255 - pixel.0[2];
+    }
 }
 
 fn resize_rgba(image: &RgbaImage, width: u32, height: u32, scale: f32) -> Result<RgbaImage, String> {
@@ -620,64 +750,63 @@ pub fn source_project(project: &Project, source: &Source) -> Result<Project, Str
 
 #[cfg(test)]
 pub fn evaluate(project: Project, scales: Vec<f32>) -> Result<PreparedOutput, String> {
-    evaluate_operations(
-        project,
-        scales.into_iter().map(Operation::Resize).collect(),
+    let mut nodes = vec![Node {
+        id: "src".into(),
+        position: Vec2::ZERO,
+        kind: NodeKind::ImageDocument(Source {
+            document: String::new(),
+            layer: None,
+        }),
+        cell: 0,
+    }];
+    let mut links = Vec::new();
+    let mut prev = "src".to_string();
+    for (i, scale) in scales.into_iter().enumerate() {
+        let id = format!("r{i}");
+        links.push(NodeLink {
+            id: links.len() as u64 + 1,
+            from_node: prev.clone(),
+            from_port: "image".into(),
+            to_node: id.clone(),
+            to_port: "image".into(),
+            ty: IMAGE_PORT,
+        });
+        nodes.push(Node {
+            id: id.clone(),
+            position: Vec2::ZERO,
+            kind: NodeKind::Resize { scale },
+            cell: i + 1,
+        });
+        prev = id;
+    }
+    links.push(NodeLink {
+        id: links.len() as u64 + 1,
+        from_node: prev,
+        from_port: "image".into(),
+        to_node: "out".into(),
+        to_port: "image".into(),
+        ty: IMAGE_PORT,
+    });
+    nodes.push(Node {
+        id: "out".into(),
+        position: Vec2::ZERO,
+        kind: NodeKind::Output(Destination::Memory),
+        cell: nodes.len(),
+    });
+    let mut projects = HashMap::new();
+    projects.insert("src".into(), project);
+    evaluate_graph(
+        nodes,
+        links,
+        projects,
         None,
         &std::sync::atomic::AtomicBool::new(false),
-    )
-}
-
-pub fn evaluate_operations(
-    project: Project,
-    operations: Vec<Operation>,
-    config: Option<crate::comfyui::HostConfig>,
-    cancel: &std::sync::atomic::AtomicBool,
-) -> Result<PreparedOutput, String> {
-    use std::sync::atomic::Ordering;
-    check_size(project.width, project.height)?;
-    let pixels = crate::editing::composite_layers(&project.layers, project.width, project.height);
-    let mut image = RgbaImage::from_raw(project.width, project.height, pixels)
-        .ok_or("Invalid source pixels")?;
-    for operation in operations {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("Cancelled".into());
-        }
-        match operation {
-            Operation::Resize(scale) => {
-                let (width, height) = image.dimensions();
-                image = resize_rgba(&image, width, height, scale)?;
-            }
-            Operation::Lineart(resolution) => {
-                crate::comfyui::validate_lineart_resolution(resolution)?;
-                let job = crate::comfyui::Job::start_lineart(
-                    config.clone().ok_or("ComfyUI is not configured")?,
-                    image,
-                    1.0,
-                    resolution,
-                );
-                image = loop {
-                    if cancel.load(Ordering::Relaxed) {
-                        job.cancel();
-                        return Err("Cancelled".into());
-                    }
-                    match job.poll() {
-                        Some(crate::comfyui::JobResult::Done(image)) => break image,
-                        Some(crate::comfyui::JobResult::Failed(error)) => return Err(error),
-                        Some(crate::comfyui::JobResult::Cancelled) => {
-                            return Err("Cancelled".into());
-                        }
-                        Some(crate::comfyui::JobResult::Video(_)) => {
-                            return Err("Expected an image from Lineart".into());
-                        }
-                        None => std::thread::sleep(std::time::Duration::from_millis(50)),
-                    }
-                };
-                check_size(image.width(), image.height())?;
-            }
-        }
-    }
-    prepare_image_output(&image)
+        &std::sync::Mutex::new(None),
+        &std::sync::Mutex::new(None),
+        &std::sync::Mutex::new(NodeProgress::default()),
+        &std::sync::Mutex::new(ExecutionTimes::default()),
+    )?
+    .into_image()
 }
 
 fn prepare_image_output(image: &RgbaImage) -> Result<PreparedOutput, String> {
@@ -837,8 +966,11 @@ fn node_kind_name(kind: &NodeKind) -> &'static str {
         NodeKind::ImageDocument(_) => "image_document",
         NodeKind::ImageAsset { .. } => "image_asset",
         NodeKind::Resize { .. } => "resize",
+        NodeKind::Invert => "invert",
         NodeKind::Lineart { .. } => "lineart",
         NodeKind::MinimaxRefs { .. } => "minimax_refs",
+        NodeKind::SdxlRedraw { .. } => "sdxl_redraw",
+        NodeKind::Generate(_) => "generate",
         NodeKind::Output(_) => "output",
     }
 }
@@ -848,10 +980,34 @@ fn node_kind_data(kind: &NodeKind) -> serde_json::Value {
         NodeKind::ImageDocument(source) => serde_json::json!({ "document": source.document }),
         NodeKind::ImageAsset { id } => serde_json::json!({ "asset": id }),
         NodeKind::Resize { scale } => serde_json::json!({ "scale": scale }),
+        NodeKind::Invert => serde_json::json!({}),
         NodeKind::Lineart { resolution } => serde_json::json!({ "resolution": resolution }),
-        NodeKind::MinimaxRefs { prompt, megapixels } => {
-            serde_json::json!({ "prompt": prompt, "megapixels": megapixels })
+        NodeKind::MinimaxRefs {
+            prompt,
+            megapixels,
+            seed,
+        } => {
+            serde_json::json!({ "prompt": prompt, "megapixels": megapixels, "seed": seed })
         }
+        NodeKind::SdxlRedraw {
+            denoise,
+            seed,
+            model,
+            loras,
+            positive,
+            negative,
+        } => serde_json::json!({
+            "denoise": denoise,
+            "seed": seed,
+            "model": model,
+            "positive": positive,
+            "negative": negative,
+            "loras": loras.iter().map(|lora| serde_json::json!({
+                "name": lora.name,
+                "strength": lora.strength
+            })).collect::<Vec<_>>(),
+        }),
+        NodeKind::Generate(generation) => serde_json::json!(generation),
         NodeKind::Output(Destination::Memory) => serde_json::json!({ "destination": "memory" }),
         NodeKind::Output(Destination::NewDocument) => {
             serde_json::json!({ "destination": "new_document" })
@@ -864,6 +1020,8 @@ fn node_kind_data(kind: &NodeKind) -> serde_json::Value {
 
 fn node_kind_from_file(kind: &str, data: serde_json::Value) -> Result<NodeKind, String> {
     match kind {
+        "generate" => serde_json::from_value(data).map(NodeKind::Generate)
+            .map_err(|error| format!("Invalid generation node: {error}")),
         "image_document" => {
             let document = data
                 .get("document")
@@ -890,6 +1048,7 @@ fn node_kind_from_file(kind: &str, data: serde_json::Value) -> Result<NodeKind, 
                 .ok_or("Resize node is missing scale")? as f32;
             Ok(NodeKind::Resize { scale })
         }
+        "invert" => Ok(NodeKind::Invert),
         "lineart" => {
             let resolution = data
                 .get("resolution")
@@ -907,7 +1066,62 @@ fn node_kind_from_file(kind: &str, data: serde_json::Value) -> Result<NodeKind, 
                 .get("megapixels")
                 .and_then(serde_json::Value::as_f64)
                 .unwrap_or(4.0) as f32;
-            Ok(NodeKind::MinimaxRefs { prompt, megapixels })
+            let seed = data
+                .get("seed")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            Ok(NodeKind::MinimaxRefs {
+                prompt,
+                megapixels,
+                seed,
+            })
+        }
+        "sdxl_redraw" => {
+            let denoise = data
+                .get("denoise")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.3) as f32;
+            let seed = data
+                .get("seed")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let model = data
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let positive = data
+                .get("positive")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let negative = data
+                .get("negative")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let mut loras = empty_loras();
+            if let Some(items) = data.get("loras").and_then(serde_json::Value::as_array) {
+                for (slot, item) in loras.iter_mut().zip(items) {
+                    slot.name = item
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    if let Some(strength) = item
+                        .get("strength")
+                        .and_then(serde_json::Value::as_f64)
+                    {
+                        slot.strength = strength as f32;
+                    }
+                }
+            }
+            Ok(NodeKind::SdxlRedraw {
+                denoise,
+                seed,
+                model,
+                loras,
+                positive,
+                negative,
+            })
         }
         "output" => {
             let destination = data.get("destination").ok_or("Output node is missing destination")?;
@@ -972,6 +1186,37 @@ mod tests {
     use crate::raster::Raster;
 
     #[test]
+    fn ltx_graph_round_trip_keeps_both_frame_inputs_and_video_destination() {
+        let mut graph = NodeEditor::default();
+        for id in ["first", "last"] {
+            graph.add(NodeKind::ImageAsset { id: id.into() });
+        }
+        graph.add(NodeKind::Generate(Generation::LtxVideo {
+            settings: crate::comfyui::VideoSettings {
+                prompt: "Camera pans left".into(),
+                seconds: 8,
+                ..Default::default()
+            },
+            scale: 0.5,
+        }));
+        let mut end_frame = link("node_2", "node_3");
+        end_frame.id = 2;
+        end_frame.to_port = "end_image".into();
+        graph.space.links = vec![link("node_1", "node_3"), end_frame];
+
+        let graph = decode_graph(&encode_graph(&graph).unwrap()).unwrap();
+        let (order, destination) = graph_plan(&graph.nodes, &graph.space.links, "node_3").unwrap();
+        assert_eq!(order.len(), 3);
+        assert!(destination.is_none());
+        assert!(matches!(
+            &order[2].kind,
+            NodeKind::Generate(Generation::LtxVideo { settings, scale })
+                if settings.seconds == 8 && settings.prompt == "Camera pans left" && *scale == 0.5
+        ));
+        assert!(graph_plan(&graph.nodes, &graph.space.links[1..], "node_3").is_err());
+    }
+
+    #[test]
     fn nodes_receive_comfy_progress_preview_and_cancel_wait() {
         let (job, _sender) = crate::comfyui::Job::pending();
         job.progress.lock().unwrap().preview =
@@ -988,7 +1233,7 @@ mod tests {
         let worker_slot = slot.clone();
         let worker_progress = progress.clone();
         let worker = std::thread::spawn(move || {
-            wait_graph_job(
+            wait_graph_image(
                 job,
                 &worker_cancel,
                 "minimax",
@@ -1069,6 +1314,15 @@ mod tests {
         }
     }
 
+    fn planned(graph: &NodeEditor, output: &str) -> Vec<String> {
+        graph_plan(&graph.nodes, &graph.space.links, output)
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|n| n.id)
+            .collect()
+    }
+
     #[test]
     fn nodes_plan_only_the_selected_output_and_preserve_operation_order() {
         let mut graph = graph();
@@ -1080,16 +1334,11 @@ mod tests {
             link("node_4", "node_3"),
         ];
         assert_eq!(
-            plan(&graph.nodes, &graph.space.links, "node_3").unwrap().1,
-            [Operation::Resize(0.5), Operation::Resize(2.0)]
+            planned(&graph, "node_3"),
+            ["node_1", "node_2", "node_4", "node_3"]
         );
         graph.space.links = vec![link("node_1", "node_3")];
-        assert!(
-            plan(&graph.nodes, &graph.space.links, "node_3")
-                .unwrap()
-                .1
-                .is_empty()
-        );
+        assert_eq!(planned(&graph, "node_3"), ["node_1", "node_3"]);
     }
 
     #[test]
@@ -1102,11 +1351,11 @@ mod tests {
             link("node_4", "node_3"),
         ];
         assert_eq!(
-            plan(&graph.nodes, &graph.space.links, "node_3").unwrap().1,
-            [Operation::Resize(0.5), Operation::Lineart(512)]
+            planned(&graph, "node_3"),
+            ["node_1", "node_2", "node_4", "node_3"]
         );
         graph.nodes[3].kind = NodeKind::Lineart { resolution: 513 };
-        assert!(plan(&graph.nodes, &graph.space.links, "node_3").is_err());
+        assert!(graph_plan(&graph.nodes, &graph.space.links, "node_3").is_err());
     }
 
     #[test]
@@ -1115,6 +1364,7 @@ mod tests {
         graph.add(NodeKind::MinimaxRefs {
             prompt: "test".into(),
             megapixels: 4.0,
+            seed: 0,
         });
         let mut first = link("node_2", "node_4");
         first.to_port = "image_1".into();
@@ -1152,10 +1402,13 @@ mod tests {
                 .unwrap_err()
                 .contains("Cycles")
         );
-        assert!(plan(&graph.nodes, &[], "node_3").is_err());
+        assert!(graph_plan(&graph.nodes, &[], "node_3").is_err());
         graph.space.links = vec![link("node_1", "node_2"), link("node_2", "node_3")];
         graph.nodes[1].kind = NodeKind::Resize { scale: f32::NAN };
-        assert!(plan(&graph.nodes, &graph.space.links, "node_3").is_err());
+        assert!(graph_plan(&graph.nodes, &graph.space.links, "node_3").is_ok());
+        let mut snapshot = Project::default();
+        snapshot.import_rgba(&[1, 2, 3, 255].repeat(4), 2, 2).unwrap();
+        assert!(evaluate(snapshot, vec![f32::NAN]).is_err());
         graph.nodes[1].kind = NodeKind::Resize { scale: 0.5 };
         graph.space.links.push(NodeLink {
             id: 9,
@@ -1167,8 +1420,8 @@ mod tests {
         });
         assert!(validate(&graph.nodes, &graph.space.links).is_ok());
         assert_eq!(
-            plan(&graph.nodes, &graph.space.links, "node_3").unwrap().1,
-            [Operation::Resize(0.5)]
+            planned(&graph, "node_3"),
+            ["node_1", "node_2", "node_3"]
         );
         graph.space.links.last_mut().unwrap().from_port = "image".into();
         assert!(validate(&graph.nodes, &graph.space.links).is_err());
@@ -1214,9 +1467,44 @@ mod tests {
             &std::sync::Mutex::new(None),
             &std::sync::Mutex::new(None),
             &std::sync::Mutex::new(NodeProgress::default()),
+            &std::sync::Mutex::new(ExecutionTimes::default()),
         )
-        .unwrap();
+        .unwrap().into_image().unwrap();
         assert_eq!(result.size, (8, 4));
+    }
+
+    #[test]
+    fn nodes_invert_flips_rgb_and_keeps_alpha() {
+        let mut source = Project::default();
+        source
+            .import_rgba(&[20, 40, 60, 128, 1, 2, 3, 0], 2, 1)
+            .unwrap();
+        let mut graph = NodeEditor::default();
+        graph.add(NodeKind::ImageDocument(Source {
+            document: "pixels".into(),
+            layer: None,
+        }));
+        graph.add(NodeKind::Invert);
+        graph.add(NodeKind::Output(Destination::Memory));
+        graph.space.links = vec![link("node_1", "node_2"), link("node_2", "node_3")];
+        let (order, _) = graph_plan(&graph.nodes, &graph.space.links, "node_3").unwrap();
+        let mut projects = HashMap::new();
+        projects.insert("node_1".into(), source);
+        let result = evaluate_graph(
+            order,
+            graph.space.links,
+            projects,
+            None,
+            &std::sync::atomic::AtomicBool::new(false),
+            &std::sync::Mutex::new(None),
+            &std::sync::Mutex::new(None),
+            &std::sync::Mutex::new(NodeProgress::default()),
+            &std::sync::Mutex::new(ExecutionTimes::default()),
+        )
+        .unwrap().into_image().unwrap();
+        assert_eq!(result.layer.pixels.read(0, 0, 0), [235, 215, 195, 128]);
+        assert_eq!(result.layer.pixels.read(0, 1, 0)[3], 0);
+        assert!(graph_plan(&graph.nodes, &[], "node_3").is_err());
     }
 
     #[test]
@@ -1303,5 +1591,85 @@ mod tests {
         assert_eq!(loaded.space.links[0].id, 7);
         assert_eq!(loaded.next_id, 4);
         assert_eq!(loaded.space.next_link_id, 8);
+    }
+
+    #[test]
+    fn minimax_refs_seed_roundtrips_and_defaults_to_random() {
+        let mut editor = NodeEditor::default();
+        editor.add(NodeKind::MinimaxRefs {
+            prompt: "x".into(),
+            megapixels: 4.0,
+            seed: 42,
+        });
+        let loaded = decode_graph(&encode_graph(&editor).unwrap()).unwrap();
+        assert!(matches!(
+            &loaded.nodes[0].kind,
+            NodeKind::MinimaxRefs { seed: 42, .. }
+        ));
+        assert!(matches!(
+            node_kind_from_file(
+                "minimax_refs",
+                serde_json::json!({ "prompt": "x", "megapixels": 4.0 })
+            )
+            .unwrap(),
+            NodeKind::MinimaxRefs { seed: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn sdxl_redraw_roundtrips_and_requires_image() {
+        let mut editor = NodeEditor::default();
+        let mut loras = empty_loras();
+        loras[0].name = Some("style.safetensors".into());
+        loras[0].strength = 0.7;
+        editor.add(NodeKind::SdxlRedraw {
+            denoise: 0.4,
+            seed: 9,
+            model: Some("sdxl.safetensors".into()),
+            loras,
+            positive: "cat".into(),
+            negative: "blur".into(),
+        });
+        let loaded = decode_graph(&encode_graph(&editor).unwrap()).unwrap();
+        match &loaded.nodes[0].kind {
+            NodeKind::SdxlRedraw {
+                denoise,
+                seed,
+                model,
+                loras,
+                positive,
+                negative,
+            } => {
+                assert_eq!(*denoise, 0.4);
+                assert_eq!(*seed, 9);
+                assert_eq!(model.as_deref(), Some("sdxl.safetensors"));
+                assert_eq!(loras[0].name.as_deref(), Some("style.safetensors"));
+                assert_eq!(loras[0].strength, 0.7);
+                assert_eq!(positive, "cat");
+                assert_eq!(negative, "blur");
+            }
+            _ => panic!("expected sdxl redraw"),
+        }
+        assert!(matches!(
+            node_kind_from_file("sdxl_redraw", serde_json::json!({})).unwrap(),
+            NodeKind::SdxlRedraw {
+                denoise,
+                seed: 0,
+                model: None,
+                ..
+            } if (denoise - 0.3).abs() < f32::EPSILON
+        ));
+        editor.add(NodeKind::Output(Destination::Memory));
+        assert!(graph_plan(&editor.nodes, &[], "node_2").is_err());
+        editor.nodes[0].kind = NodeKind::SdxlRedraw {
+            denoise: 1.5,
+            seed: 0,
+            model: None,
+            loras: empty_loras(),
+            positive: String::new(),
+            negative: String::new(),
+        };
+        editor.space.links = vec![link("node_1", "node_2")];
+        assert!(graph_plan(&editor.nodes, &editor.space.links, "node_2").is_err());
     }
 }

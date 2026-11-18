@@ -48,7 +48,8 @@ pub struct VideoAsset {
     pub name: String,
     pub byte_size: u64,
     pub thumb: Vec<u8>,
-    pub poster_attempted: bool,
+    pub info: Option<crate::video::VideoInfo>,
+    pub inspection_attempted: bool,
     bytes: Option<Arc<Vec<u8>>>,
     deferred: Option<DeferredAsset>,
 }
@@ -60,7 +61,8 @@ impl VideoAsset {
             name: String::new(),
             byte_size: bytes.len() as u64,
             thumb: Vec::new(),
-            poster_attempted: true,
+            info: None,
+            inspection_attempted: true,
             bytes: Some(Arc::new(bytes)),
             deferred: None,
         }
@@ -434,6 +436,7 @@ fn empty_thumb() -> Vec<u8> {
 
 #[derive(Clone, Copy, Debug)]
 pub enum ThumbDrag {
+    Video(usize),
     Image(usize),
     Document(usize),
 }
@@ -544,7 +547,8 @@ impl Workspace {
             id,
             byte_size: bytes.len() as u64,
             thumb: Vec::new(),
-            poster_attempted: false,
+            info: None,
+            inspection_attempted: false,
             bytes: Some(Arc::new(bytes)),
             deferred: None,
         });
@@ -560,7 +564,6 @@ impl Workspace {
             return false;
         };
         video.thumb = thumb;
-        video.poster_attempted = true;
         self.invalidate_thumb_atlas();
         true
     }
@@ -671,14 +674,20 @@ impl Workspace {
         &self.documents[self.active_document]
     }
 
-    pub fn create_document(&mut self, name: &str) -> usize {
+    /// Append a document without changing the open view.
+    pub fn add_document(&mut self, name: &str) -> usize {
         let id = self.alloc_id("doc");
         self.documents
             .push(Document::new(id, name.into(), Project::default()));
-        self.active_document = self.documents.len() - 1;
-        self.select_active_document();
         self.invalidate_thumb_atlas();
-        self.active_document
+        self.documents.len() - 1
+    }
+
+    pub fn create_document(&mut self, name: &str) -> usize {
+        let index = self.add_document(name);
+        self.active_document = index;
+        self.select_active_document();
+        index
     }
 
     pub fn select_active_document(&mut self) {
@@ -1484,13 +1493,13 @@ impl Workspace {
                     .map_err(|e| format!("Cannot read video metadata: {e}"))?
                     .size;
                 let thumb = read_preview(&source, meta.preview.as_deref())?.unwrap_or_default();
-                let poster_attempted = !thumb.is_empty();
                 Ok(VideoAsset {
                     id: meta.id.clone(),
                     name: meta.name.clone(),
                     byte_size,
                     thumb,
-                    poster_attempted,
+                    info: None,
+                    inspection_attempted: false,
                     bytes: None,
                     deferred: Some(DeferredAsset {
                         source: source.clone(),
@@ -2008,7 +2017,7 @@ mod tests {
         let mut loaded = Workspace::open(&path).unwrap();
         assert!(loaded.videos[0].bytes.is_none());
         assert_eq!(loaded.videos[0].thumb, poster);
-        assert!(loaded.videos[0].poster_attempted);
+        assert!(!loaded.videos[0].inspection_attempted);
         let before = fs::read(&path).unwrap();
         loaded.save(&path).unwrap();
         assert_eq!(fs::read(&path).unwrap(), before);

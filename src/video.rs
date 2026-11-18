@@ -222,6 +222,7 @@ struct VideoDecoder {
     max_size: (u32, u32),
     control: Arc<DecoderControl>,
     info: VideoInfo,
+    source_fps: f64,
     start_time: f64,
     previous_timestamp: Option<f64>,
     #[cfg(test)]
@@ -290,6 +291,7 @@ impl VideoDecoder {
         };
         Ok(Self {
             info,
+            source_fps: rate,
             start_time,
             previous_timestamp: None,
             #[cfg(test)]
@@ -507,9 +509,10 @@ fn play(
     asset: &VideoAsset,
     worker: &Arc<DecoderControl>,
     output: &Mutex<PlaybackState>,
+    cache_limit: usize,
 ) -> Result<(), String> {
     let mut decoder = VideoDecoder::open(asset, worker.clone(), (1920, 1080))?;
-    let mut cache = FrameCache::new(FRAME_CACHE_BYTES);
+    let mut cache = FrameCache::new(cache_limit);
     output.lock().unwrap().info = Some(decoder.info);
     let mut revision = u64::MAX;
     let mut target = 0.0;
@@ -651,12 +654,40 @@ fn publish(
 
 impl Playback {
     pub fn start(asset: VideoAsset) -> Self {
-        let control = Arc::new(DecoderControl { audio: Some(audio::start(asset.clone())), ..Default::default() });
+        Self::start_with_cache(asset, 0.0, false, None, FRAME_CACHE_BYTES)
+    }
+
+    pub(crate) fn start_at(
+        asset: VideoAsset,
+        position: f64,
+        paused: bool,
+        fps_override: Option<f64>,
+    ) -> Self {
+        Self::start_with_cache(asset, position, paused, fps_override, 96 * 1024 * 1024)
+    }
+
+    fn start_with_cache(
+        asset: VideoAsset,
+        position: f64,
+        paused: bool,
+        fps_override: Option<f64>,
+        cache_limit: usize,
+    ) -> Self {
+        let control = Arc::new(DecoderControl {
+            audio: Some(audio::start(asset.clone())),
+            transport: Mutex::new(Transport {
+                paused,
+                seek: (position > 0.0).then_some(position),
+                fps: fps_override,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
         let state = Arc::new(Mutex::new(PlaybackState::default()));
         let worker = control.clone();
         let output = state.clone();
         std::thread::spawn(move || {
-            let result = play(&asset, &worker, &output);
+            let result = play(&asset, &worker, &output, cache_limit);
             if !worker.stopped.load(Ordering::Relaxed) {
                 if let Err(error) = result {
                     if let Some(audio) = &worker.audio { audio.stop(); }
@@ -672,9 +703,9 @@ impl Playback {
             dirty: false,
             failed: false,
             info: None,
-            position: 0.0,
-            paused: false,
-            fps_override: None,
+            position,
+            paused,
+            fps_override,
             has_audio: false,
             volume: 1.0,
             audio_error: None,
@@ -722,15 +753,16 @@ impl Playback {
         if !seconds.is_finite() {
             return;
         }
-        let Some(info) = self.info else {
-            return;
-        };
-        let seconds = seconds.clamp(0.0, info.duration);
+        let seconds = self.info.map_or(seconds.max(0.0), |info| seconds.clamp(0.0, info.duration));
         self.position = seconds;
         self.command(Some(seconds));
     }
     pub fn needs_repaint(&self) -> bool {
         !self.failed && (!self.paused || self.pending_update)
+    }
+
+    pub(crate) fn frame_pending(&self) -> bool {
+        self.pending_update
     }
     pub fn poll(&mut self) -> Option<String> {
         let mut state = self.state.lock().unwrap();
@@ -840,10 +872,15 @@ fn fit_timeline_frame(image: RgbaImage, width: u32, height: u32) -> Result<RgbaI
     ))
 }
 
+pub struct VideoInspection {
+    pub info: VideoInfo,
+    pub thumb: Option<Vec<u8>>,
+}
+
 pub struct PosterJob {
     pub id: String,
     control: Arc<DecoderControl>,
-    receiver: mpsc::Receiver<Result<Vec<u8>, String>>,
+    receiver: mpsc::Receiver<Result<VideoInspection, String>>,
 }
 impl PosterJob {
     pub fn start(asset: VideoAsset) -> Self {
@@ -854,14 +891,22 @@ impl PosterJob {
         std::thread::spawn(move || {
             let result = (|| {
                 let mut decoder = VideoDecoder::open(&asset, worker.clone(), (84, 84))?;
-                let frame = decoder
-                    .next_frame(None)?
-                    .ok_or("Video has no decodable frames")?;
-                Ok(crate::workspace::make_thumb(
-                    frame.image.as_raw(),
-                    frame.image.width(),
-                    frame.image.height(),
-                ))
+                let info = VideoInfo {
+                    fps: decoder.source_fps,
+                    ..decoder.info
+                };
+                let thumb = if asset.thumb.is_empty() {
+                    decoder.next_frame(None).ok().flatten().map(|frame| {
+                        crate::workspace::make_thumb(
+                            frame.image.as_raw(),
+                            frame.image.width(),
+                            frame.image.height(),
+                        )
+                    })
+                } else {
+                    None
+                };
+                Ok(VideoInspection { info, thumb })
             })();
             let _ = sender.send(result);
             worker.finished.store(true, Ordering::Release);
@@ -872,7 +917,7 @@ impl PosterJob {
             receiver,
         }
     }
-    pub fn poll(&self) -> Option<Result<Vec<u8>, String>> {
+    pub fn poll(&self) -> Option<Result<VideoInspection, String>> {
         match self.receiver.try_recv() {
             Ok(result) => Some(result),
             Err(mpsc::TryRecvError::Empty) => None,
@@ -1065,7 +1110,12 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(result) = poster.poll() {
-                let pixels = result.unwrap();
+                let inspection = result.unwrap();
+                let info = inspection.info;
+                assert_eq!((info.width, info.height), (64, 48));
+                assert!((info.duration - 1.0).abs() < 0.001);
+                assert!((info.fps - 4.0).abs() < 0.001);
+                let pixels = inspection.thumb.unwrap();
                 assert_eq!(
                     pixels.len(),
                     (crate::workspace::THUMB_SIZE * crate::workspace::THUMB_SIZE * 4) as usize

@@ -23,6 +23,8 @@ mod tools_panel;
 pub(crate) use tools_panel::load_icons as load_tool_icons;
 mod timeline;
 mod video_dialog;
+mod video_timeline;
+pub(crate) mod clip_effects;
 
 use glam::Vec2;
 use mega_ui::{DockNode, DockState, Ui};
@@ -143,7 +145,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     let status_h = 24.0 * scale;
 
     let modal_open =
-        app.ai.open || app.ai_settings.is_some() || app.settings_dialog.is_some() || app.hsv.open || app.rename.is_some() || app.unsaved.is_some() || app.delete_prompt.is_some();
+        app.ai.open || app.ai_settings.is_some() || app.settings_dialog.is_some() || app.hsv.open || app.rename.is_some() || app.unsaved.is_some() || app.delete_prompt.is_some() || app.effect_dialog.is_some();
     ui.add_enabled(!modal_open, |ui| {
         ui.menu_bar(|ui| {
             menu_bar::draw(ui, app);
@@ -153,9 +155,11 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
         let mut dock = std::mem::replace(&mut app.dock, DockState::new(DockNode::leaf(&["tmp"])));
         let graph_mode = app.session.preview_graph;
         let preview = app.session.preview_asset.is_some();
-        context_panel(&mut dock.root, preview || graph_mode);
-        camera_dock(&mut dock.root, !preview && !graph_mode && app.project().animation.is_some());
-        let hidden_canvas = if preview || graph_mode { hide_canvas_tabs(&mut dock.root) } else { Vec::new() };
+        let video_document = app.video_editor.active.is_some();
+        context_panel(&mut dock.root, preview || graph_mode || video_document);
+        clip_effects::dock(&mut dock.root, video_document);
+        camera_dock(&mut dock.root, !preview && !graph_mode && !video_document && app.project().animation.is_some());
+        let hidden_canvas = if preview || graph_mode || video_document { hide_canvas_tabs(&mut dock.root) } else { Vec::new() };
         app.nodes.visible = false;
         app.session.canvas_rect = mega_ui::Rect { min: Vec2::ZERO, max: Vec2::ZERO };
         ui.dock_space("main", dock_size, &mut dock, |ui, tab| {
@@ -163,6 +167,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                 if graph_mode {
                     app.nodes.visible = true;
                     nodes::draw(ui, app);
+                } else if app.video_editor.active.is_some() {
+                    video_timeline::draw(ui, app);
                 } else {
                     canvas::draw(ui, app);
                     if timeline::visible(app) { timeline::draw(ui, app); }
@@ -170,7 +176,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                 return;
             }
             let size = ui.available_size().max(Vec2::splat(1.0));
-            let axes = if tab == "Library" { mega_ui::ScrollAxes::Vertical } else { mega_ui::ScrollAxes::Both };
+            let axes = if tab == "Library" || tab == "Effects" { mega_ui::ScrollAxes::Vertical } else { mega_ui::ScrollAxes::Both };
             ui.scroll_area(&format!("dock_scroll_{tab}"), size, axes, |ui| match tab {
                 "Tools" => {
                     if let Some(tool) = tools_panel::draw(ui, &mut app.session) {
@@ -187,6 +193,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                     let action = assets_panel::draw(
                         ui,
                         &mut app.workspace,
+                        Some(&app.nodes),
+                        &app.video_editor,
                         &app.input,
                         app.session.workspace_rect,
                         graph_mode,
@@ -196,8 +204,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                 }
                 "Camera" => camera_panel::draw(ui, app),
                 "Canvas" => canvas_panel::draw(ui, app),
+                "Effects" => clip_effects::panel(ui, app),
                 "Layers" | "Properties" => {
-                    if app.session.preview_asset.is_some() { asset_properties::draw(ui, app); }
+                    if app.video_editor.active.is_some() { video_timeline::properties(ui, app); }
+                    else if app.session.preview_asset.is_some() { asset_properties::draw(ui, app); }
                     else if !graph_mode { project_panel::draw(ui, app); }
                 }
                 _ => {}
@@ -207,6 +217,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
         app.dock = dock;
         if preview != app.session.preview_asset.is_some()
             || graph_mode != app.session.preview_graph
+            || video_document != app.video_editor.active.is_some()
         {
             ui.request_repaint();
         }
@@ -214,7 +225,11 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
         ui.status_bar(|ui| {
             ui.label(&app.status.clone());
             ui.spacer();
-            ui.label("Middle drag: pan · Wheel: zoom · Ctrl+S: save · Ctrl+Z/Y: undo/redo · Ctrl+X/C/V: cut/copy/paste · Delete: erase selection");
+            if app.video_editor.active.is_some() {
+                ui.label("Wheel: zoom · Shift+wheel: tracks · Middle drag: pan");
+            } else {
+                ui.label("Middle drag: pan · Wheel: zoom · Ctrl+S: save · Ctrl+Z/Y: undo/redo · Ctrl+X/C/V: cut/copy/paste · Delete: erase selection");
+            }
             let fps = if app.fps > 0.0 { format!("{:.0} FPS", app.fps) } else { "— FPS".into() };
             ui.label(&fps);
         });
@@ -226,6 +241,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     rename_dialog::draw(ui, app);
     unsaved_dialog::draw(ui, app);
     delete_dialog::draw(ui, app);
+    clip_effects::modal(ui, app);
 }
 
 fn add_to_graph(ui: &mut Ui, app: &mut EditorApp, kind: crate::nodes::NodeKind, ok: &str) {
@@ -245,6 +261,34 @@ fn add_to_graph(ui: &mut Ui, app: &mut EditorApp, kind: crate::nodes::NodeKind, 
 }
 
 fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
+    if let Some(index) = action.drop_video {
+        if let (Some(track), Some(doc), Some(asset)) = (
+            app.video_editor.track,
+            app.video_editor.current(),
+            app.workspace.videos.get(index),
+        ) && let Some(lane) = track.lane_at(app.input.mouse_pos) {
+            let density = f64::from(doc.pixels_per_second * ui.scale());
+            let seconds = doc.view_start + f64::from(app.input.mouse_pos.x - track.rect.min.x) / density;
+            let radius = f64::from(7.0 * ui.scale()) / density;
+            if asset.info.is_none() {
+                ui.notify_error("Video information is unavailable");
+            } else if !app.video_editor.insert(asset, lane, seconds, radius) {
+                ui.notify_error("Drop the clip on free space");
+            }
+        }
+        ui.request_repaint();
+        return;
+    }
+    if action.new_video_document {
+        app.new_video_document();
+    }
+    if let Some(index) = action.open_video_document {
+        app.show_video_document(index);
+        ui.request_repaint();
+    }
+    if let Some(index) = action.delete_video_document {
+        app.delete_video_document(index);
+    }
     if let Some(id) = action.add_document_to_graph {
         if app.workspace.documents.iter().any(|doc| doc.id == id) {
             add_to_graph(

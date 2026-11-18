@@ -301,6 +301,7 @@ pub trait Scene {
     fn wants_keyboard(&self) -> bool { false }
     fn begin_frame(&mut self, input: &FrameInput);
     fn build(&mut self, ui: &mut Ui, viewport: Vec2, stats: DrawStats) -> bool;
+    fn finish_ui(&self, _output: &mut mega_ui::UiOutput) {}
     fn sync_canvas(
         &mut self,
         device: &wgpu::Device,
@@ -550,7 +551,8 @@ impl<S: Scene> Host<S> {
         self.ui.set_scale(self.scene.ui_scale());
         self.ui.begin_frame(ui_input);
         let keep_redrawing = self.scene.build(&mut self.ui, viewport, self.draw_stats);
-        let output = self.ui.end_frame();
+        let mut output = self.ui.end_frame();
+        self.scene.finish_ui(&mut output);
         self.keyboard_captured = output.want_capture_keyboard || self.scene.wants_keyboard();
         if let Some(text) = &output.clipboard {
             if let Ok(mut clipboard) = arboard::Clipboard::new() {

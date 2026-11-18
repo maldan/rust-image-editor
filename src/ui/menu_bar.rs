@@ -23,13 +23,17 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         if ui.menu_item("import", "Import Asset…").clicked() {
             app.import_image(ui);
         }
-        if ui.menu_item("export", "Export PNG…").clicked() {
+        if ui.menu_item_enabled("export", "Export PNG…", app.video_editor.active.is_none()).clicked() {
             app.export_image(ui, false);
         }
-        if ui.menu_item("export_webp", "Export WebP…").clicked() {
+        if ui.menu_item_enabled("export_webp", "Export WebP…", app.video_editor.active.is_none()).clicked() {
             app.export_image(ui, true);
         }
     });
+
+    if app.video_editor.active.is_some() {
+        return;
+    }
 
     ui.menu("edit", "Edit", |ui| {
         if ui.menu_item("undo", "Undo").clicked() {

@@ -1,7 +1,7 @@
 use super::workflow::{LoraSelection, node_id};
 use serde_json::Value;
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct VideoSettings {
     pub width: i32,
     pub height: i32,
@@ -59,6 +59,16 @@ pub fn frame_sample(slot: u32, slots: u32, sources: usize) -> usize {
 }
 
 impl VideoSettings {
+    pub fn with_source_size(mut self, width: u32, height: u32, scale: f32) -> Result<Self, String> {
+        let (width, height) = super::scaled_size(width, height, scale)?;
+        let width = ((width + 32) / 64 * 64).max(64);
+        let height = ((height + 32) / 64 * 64).max(64);
+        super::scaled_size(width, height, 1.0)?;
+        self.width = width as i32;
+        self.height = height as i32;
+        Ok(self)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.width < 64 || self.height < 64 || self.width % 64 != 0 || self.height % 64 != 0 {
             return Err("Video size must be at least 64 px and a multiple of 64".into());

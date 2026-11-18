@@ -12,7 +12,7 @@ pub const LINEART: &str = include_str!("../../comfyui/image.to_lineart.json");
 pub const DRAW_CN: &str = include_str!("../../comfyui/image.sd_draw_cn.json");
 pub const UPSCALE: &str = include_str!("../../comfyui/image.sd_upscale.json");
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct UpscaleSettings {
     pub scale_by: f32,
     pub denoise: f32,
@@ -59,7 +59,7 @@ pub fn prepare_upscale(
     prepare_sd(graph, settings, seed)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct ControlNetSettings {
     pub strength: f32,
     pub start_percent: f32,
@@ -140,13 +140,13 @@ pub fn prepare_lineart(filename: &str, resolution: i32) -> Result<(Value, String
     Ok((graph, output))
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct LoraSelection {
     pub name: Option<String>,
     pub strength: f32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct DrawSettings {
     pub model: Option<String>,
     pub loras: [LoraSelection; 3],

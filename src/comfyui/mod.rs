@@ -15,6 +15,7 @@ pub use config::HostConfig;
 pub use job::{Job, JobResult};
 pub use workflow::ControlNetSettings;
 pub use workflow::DrawSettings;
+pub use workflow::LoraSelection;
 pub use workflow::UpscaleSettings;
 pub use workflow::validate_lineart_resolution;
 pub use workflow::validate_megapixels;

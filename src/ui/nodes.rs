@@ -1,11 +1,24 @@
 use crate::app::EditorApp;
-use crate::nodes::{self, Destination, NodeKind, Source};
+use crate::nodes::{self, Destination, Generation, NodeKind, Source};
 use glam::Vec2;
 use mega_ui::{NodePortSide, Ui};
 
 const PREVIEW_DISPLAY_SIZE: f32 = 192.0;
 
 pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
+    app.poll_catalog(ui);
+    if app
+        .nodes
+        .nodes
+        .iter()
+        .any(|node| match &node.kind {
+            NodeKind::SdxlRedraw { .. } => true,
+            NodeKind::Generate(generation) => generation.uses_catalog(),
+            _ => false,
+        })
+    {
+        app.ensure_sd_catalog();
+    }
     app.refresh_node_previews();
     let mut editor = std::mem::take(&mut app.nodes);
     let previous_template = nodes::encode_graph(&editor).ok();
@@ -60,8 +73,11 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                 NodeKind::ImageDocument(_) => "Image Document",
                 NodeKind::ImageAsset { .. } => "Image Asset",
                 NodeKind::Resize { .. } => "Resize",
+                NodeKind::Invert => "Invert",
                 NodeKind::Lineart { .. } => "Lineart",
                 NodeKind::MinimaxRefs { .. } => "Minimax H3 Refs",
+                NodeKind::SdxlRedraw { .. } => "SDXL Redraw",
+                NodeKind::Generate(generation) => generation.label(),
                 NodeKind::Output(_) => "Output",
             };
             let id = node.id.clone();
@@ -140,6 +156,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     *scale = scale.max(0.001);
                     ui.node_port(NodePortSide::Output, "image", nodes::IMAGE_PORT);
                 }
+                NodeKind::Invert => {
+                    ui.node_port(NodePortSide::Input, "image", nodes::IMAGE_PORT);
+                    ui.node_port(NodePortSide::Output, "image", nodes::IMAGE_PORT);
+                }
                 NodeKind::Lineart { resolution } => {
                     ui.node_port(NodePortSide::Input, "image", nodes::IMAGE_PORT);
                     ui.label("Resolution (64–2048, step 64)");
@@ -178,7 +198,11 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     }
                     ui.node_port(NodePortSide::Output, "image", nodes::IMAGE_PORT);
                 }
-                NodeKind::MinimaxRefs { prompt, megapixels } => {
+                NodeKind::MinimaxRefs {
+                    prompt,
+                    megapixels,
+                    seed,
+                } => {
                     // The node sizes itself from its contents; reserve a wider
                     // content area so the prompt and controls can fill it.
                     ui.area("minimax_width", Vec2::new(320.0 * ui.scale(), ui.scale()));
@@ -193,6 +217,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                         megapixels,
                         super::value_slider::ValueSlider::new("Megapixels", 1.0, 16.0, 1.0, " MP"),
                     );
+                    ui.label("Seed (0 = random)");
+                    seed_field(ui, seed);
                     draw_progress(ui, progress.as_ref(), &id);
                     if live_display
                         .as_ref()
@@ -223,6 +249,89 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                         );
                     }
                     ui.node_port(NodePortSide::Output, "image", nodes::IMAGE_PORT);
+                }
+                NodeKind::SdxlRedraw {
+                    denoise,
+                    seed,
+                    model,
+                    loras,
+                    positive,
+                    negative,
+                } => {
+                    ui.area("sdxl_width", Vec2::new(320.0 * ui.scale(), ui.scale()));
+                    ui.node_port(NodePortSide::Input, "image", nodes::IMAGE_PORT);
+                    app.value_sliders.draw(
+                        ui,
+                        &format!("{id}_denoise"),
+                        denoise,
+                        super::value_slider::ValueSlider::percent("Denoise", 0.0),
+                    );
+                    ui.label("Model");
+                    super::ai_dialog::choose(
+                        ui,
+                        &format!("{id}_model"),
+                        model,
+                        &app.ai.catalog.models,
+                        "Default (workflow)",
+                    );
+                    if !app.ai.catalog_message.is_empty() {
+                        ui.label(&app.ai.catalog_message);
+                    }
+                    for i in 0..loras.len() {
+                        if i > 0 && loras[i - 1].name.is_none() {
+                            for lora in &mut loras[i..] {
+                                lora.name = None;
+                            }
+                            break;
+                        }
+                        ui.label(&format!("LoRA {}", i + 1));
+                        super::ai_dialog::choose(
+                            ui,
+                            &format!("{id}_lora_{i}"),
+                            &mut loras[i].name,
+                            &app.ai.catalog.loras,
+                            "None",
+                        );
+                        if loras[i].name.is_some() {
+                            app.value_sliders.draw(
+                                ui,
+                                &format!("{id}_lora_strength_{i}"),
+                                &mut loras[i].strength,
+                                super::value_slider::ValueSlider::percent("Strength", 0.0),
+                            );
+                        }
+                    }
+                    ui.label("Positive prompt");
+                    ui.text_area("positive", positive, Vec2::new(0.0, 80.0 * ui.scale()));
+                    ui.label("Negative prompt");
+                    ui.text_area("negative", negative, Vec2::new(0.0, 65.0 * ui.scale()));
+                    ui.label("Seed (0 = random)");
+                    seed_field(ui, seed);
+                    draw_progress(ui, progress.as_ref(), &id);
+                    draw_generation_preview(ui, live_display.as_ref(), previews.get(&id), &id, node.cell);
+                    ui.node_port(NodePortSide::Output, "image", nodes::IMAGE_PORT);
+                }
+                NodeKind::Generate(generation) => {
+                    ui.area("generation_width", Vec2::new(320.0 * ui.scale(), ui.scale()));
+                    if generation.needs_image() {
+                        ui.node_port(NodePortSide::Input, "image", nodes::IMAGE_PORT);
+                    }
+                    if generation.is_video() {
+                        ui.node_port(NodePortSide::Input, "end_image", nodes::IMAGE_PORT);
+                        ui.label("Optional end frame");
+                    }
+                    generation_controls(ui, app, generation);
+                    draw_progress(ui, progress.as_ref(), &id);
+                    draw_generation_preview(ui, live_display.as_ref(), previews.get(&id), &id, node.cell);
+                    if generation.is_video() {
+                        ui.add_enabled(!busy, |ui| {
+                            if ui.button("run", "Run to Video Assets").clicked() {
+                                run = Some(id.clone());
+                            }
+                        });
+                    } else {
+                        ui.node_port(NodePortSide::Output, "image", nodes::IMAGE_PORT);
+                    }
                 }
                 NodeKind::Output(destination) => {
                     ui.node_port(NodePortSide::Input, "image", nodes::IMAGE_PORT);
@@ -336,7 +445,24 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                     add = Some(NodeKind::MinimaxRefs {
                         prompt: String::new(),
                         megapixels: 4.0,
+                        seed: 0,
                     });
+                }
+                if ui.menu_item("sdxl_redraw", "SDXL Redraw").clicked() {
+                    add = Some(NodeKind::sdxl_redraw());
+                }
+                for (key, generation) in [
+                    ("ltx_video", Generation::LtxVideo { settings: Default::default(), scale: 1.0 }),
+                    ("qwen_draw", Generation::QwenDraw { settings: Default::default() }),
+                    ("qwen_redraw", Generation::QwenRedraw { prompt: String::new() }),
+                    ("minimax_redraw", Generation::MinimaxRedraw { prompt: String::new(), megapixels: 4.0 }),
+                    ("sdxl_draw", Generation::SdxlDraw { settings: Default::default() }),
+                    ("control_net", Generation::ControlNet { settings: Default::default(), control: Default::default() }),
+                    ("upscale", Generation::Upscale { settings: Default::default(), upscale: Default::default() }),
+                ] {
+                    if ui.menu_item(key, generation.label()).clicked() {
+                        add = Some(NodeKind::Generate(generation));
+                    }
                 }
             }
             nodes::AddMenu::Utils => {
@@ -346,6 +472,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                 }
                 if ui.menu_item("resize", "Resize").clicked() {
                     add = Some(NodeKind::Resize { scale: 1.0 });
+                }
+                if ui.menu_item("invert", "Invert").clicked() {
+                    add = Some(NodeKind::Invert);
                 }
             }
         }
@@ -374,13 +503,137 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     }
 }
 
+fn draw_generation_preview(
+    ui: &mut Ui,
+    live_display: Option<&nodes::LivePreview>,
+    preview: Option<&nodes::Preview>,
+    id: &str,
+    cell: usize,
+) {
+    if live_display.is_some_and(|preview| preview.node == id) {
+        let area = ui.area(
+            "generation_preview",
+            Vec2::splat(PREVIEW_DISPLAY_SIZE * ui.scale()),
+        );
+        ui.texture_rect(
+            nodes::LIVE_PREVIEW_TEXTURE,
+            area.rect,
+            [0.0, 0.0],
+            [1.0, 1.0],
+        );
+    } else if preview.is_some_and(|preview| preview.ready) {
+        let area = ui.area(
+            "generation_preview",
+            Vec2::splat(PREVIEW_DISPLAY_SIZE * ui.scale()),
+        );
+        let x = (cell % 8) as f32 / 8.0;
+        let y = (cell / 8) as f32 / 8.0;
+        ui.texture_rect(
+            nodes::PREVIEW_TEXTURE,
+            area.rect,
+            [x, y],
+            [x + 0.125, y + 0.125],
+        );
+    }
+}
+
+fn generation_controls(ui: &mut Ui, app: &mut EditorApp, generation: &mut Generation) {
+    match generation {
+        Generation::QwenRedraw { prompt } => edit_prompt(ui, "prompt", "Prompt", prompt),
+        Generation::MinimaxRedraw { prompt, megapixels } => {
+            ui.label("Megapixels");
+            ui.drag_float("megapixels", megapixels, 0.1);
+            edit_prompt(ui, "prompt", "Prompt", prompt);
+        }
+        Generation::LtxVideo { settings, scale } => {
+            ui.label("Output scale");
+            ui.drag_float("scale", scale, 0.05);
+            ui.label("FPS");
+            ui.drag_int("fps", &mut settings.fps, 1);
+            ui.label("Duration (seconds)");
+            ui.drag_int("seconds", &mut settings.seconds, 1);
+            generation_loras(ui, &mut settings.loras, &app.ai.catalog.loras);
+            edit_prompt(ui, "prompt", "Prompt", &mut settings.prompt);
+        }
+        Generation::QwenDraw { settings } => generation_draw(ui, app, settings, false, true),
+        Generation::SdxlDraw { settings } => generation_draw(ui, app, settings, true, true),
+        Generation::ControlNet { settings, control } => {
+            generation_control_net(ui, control);
+            generation_draw(ui, app, settings, true, false);
+        }
+        Generation::Upscale { settings, upscale } => {
+            ui.label("Upscale factor");
+            ui.drag_float("scale_by", &mut upscale.scale_by, 0.05);
+            ui.label("Denoise");
+            ui.slider("denoise", &mut upscale.denoise, 0.0..=1.0);
+            generation_control_net(ui, &mut upscale.control);
+            generation_draw(ui, app, settings, true, false);
+        }
+    }
+}
+
+fn generation_draw(
+    ui: &mut Ui,
+    app: &EditorApp,
+    settings: &mut crate::comfyui::DrawSettings,
+    use_catalog: bool,
+    set_size: bool,
+) {
+    if use_catalog {
+        ui.label("Model");
+        super::ai_dialog::choose(ui, "model", &mut settings.model, &app.ai.catalog.models, "Default (workflow)");
+        generation_loras(ui, &mut settings.loras, &app.ai.catalog.loras);
+    }
+    edit_prompt(ui, "positive", "Positive prompt", &mut settings.positive);
+    edit_prompt(ui, "negative", "Negative prompt", &mut settings.negative);
+    if set_size {
+        ui.label("Width");
+        ui.drag_int("width", &mut settings.width, 8);
+        ui.label("Height");
+        ui.drag_int("height", &mut settings.height, 8);
+    }
+}
+
+fn generation_loras(ui: &mut Ui, loras: &mut [crate::comfyui::LoraSelection], names: &[String]) {
+    let mut show = true;
+    for (i, lora) in loras.iter_mut().enumerate() {
+        if !show {
+            lora.name = None;
+            continue;
+        }
+        ui.label(&format!("LoRA {}", i + 1));
+        super::ai_dialog::choose(ui, &format!("lora_{i}"), &mut lora.name, names, "None");
+        show = lora.name.is_some();
+        if show {
+            ui.slider(&format!("strength_{i}"), &mut lora.strength, 0.0..=1.0);
+        }
+    }
+}
+
+fn generation_control_net(ui: &mut Ui, control: &mut crate::comfyui::ControlNetSettings) {
+    ui.label("ControlNet strength");
+    ui.slider("strength", &mut control.strength, 0.0..=1.0);
+    ui.label("ControlNet start");
+    ui.slider("start", &mut control.start_percent, 0.0..=1.0);
+    ui.label("ControlNet end");
+    ui.slider("end", &mut control.end_percent, 0.0..=1.0);
+}
+
+fn edit_prompt(ui: &mut Ui, id: &str, label: &str, prompt: &mut String) {
+    ui.label(label);
+    ui.text_area(id, prompt, Vec2::new(0.0, 80.0 * ui.scale()));
+}
+
+fn seed_field(ui: &mut Ui, seed: &mut u64) {
+    let mut value = i32::try_from(*seed).unwrap_or(i32::MAX);
+    ui.drag_int("seed", &mut value, 1);
+    *seed = value.max(0) as u64;
+}
+
 fn draw_progress(ui: &mut Ui, progress: Option<&nodes::NodeProgress>, id: &str) {
     if let Some(progress) = progress.filter(|progress| progress.node == id) {
         if !progress.message.is_empty() {
             ui.label(&progress.message);
-        }
-        if let Some(fraction) = progress.fraction {
-            ui.progress_bar(fraction);
         }
     }
 }
@@ -507,7 +760,9 @@ mod tests {
             (Some(0), 2, |k| matches!(k, NodeKind::ImageAsset { .. })),
             (Some(1), 1, |k| matches!(k, NodeKind::Lineart { resolution: 512 })),
             (Some(1), 2, |k| matches!(k, NodeKind::MinimaxRefs { .. })),
+            (Some(1), 3, |k| matches!(k, NodeKind::SdxlRedraw { .. })),
             (Some(2), 1, |k| matches!(k, NodeKind::Resize { scale: 1.0 })),
+            (Some(2), 2, |k| matches!(k, NodeKind::Invert)),
             (None, 3, |k| matches!(k, NodeKind::Output(_))),
         ];
         for &(group, item, matches_kind) in cases {

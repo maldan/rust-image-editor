@@ -2,9 +2,6 @@ use crate::app::EditorApp;
 use mega_ui::Ui;
 
 pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
-    ui.label("Properties");
-    ui.separator();
-    ui.space(8.0);
     let Some(id) = app.session.preview_asset.as_deref() else {
         return;
     };
@@ -33,21 +30,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     let Some(index) = app.workspace.videos.iter().position(|v| v.id == id) else {
         return;
     };
-    let video = &app.workspace.videos[index];
-    ui.label(&video.name);
-    ui.label("MP4 video");
-    ui.label(&format!("File size: {}", format_bytes(video.byte_size)));
-    ui.space(8.0);
-    if ui.button("video_export", "Export MP4…").clicked() {
+    if ui.button("video_export", "Export MP4...").clicked() {
         app.export_video(index, ui);
     }
-    ui.space(8.0);
-    let frame_ready = app.video_playback().is_some_and(|player| player.frame.is_some());
-    ui.add_enabled(frame_ready, |ui| {
-        if ui.button("video_create_document", "Create Document from Frame").clicked() {
-            app.create_document_from_video_frame(ui);
-        }
-    });
     ui.space(8.0);
     let Some(player) = app.video_playback() else {
         return;
@@ -56,9 +41,6 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         ui.label("Loading video information...");
         return;
     };
-    ui.label(&format!("Resolution: {} x {} px", info.width, info.height));
-    ui.label(&format!("Duration: {}", time(info.duration)));
-    ui.space(12.0);
     let mut position = player.position as f32;
     ui.label(&format!(
         "{} / {}",
@@ -73,24 +55,33 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             player.seek(position as f64);
         }
     });
-    ui.add_enabled(!player.failed, |ui| {
-        if ui
-            .button(
-                "video_play_pause",
-                if player.paused { "Play" } else { "Pause" },
-            )
-            .clicked()
-        {
-            player.set_paused(!player.paused);
-        }
-        ui.space(12.0);
-        ui.label(&format!("Volume: {:.0}%", player.volume * 100.0));
-        ui.add_enabled(player.has_audio && player.audio_error.is_none(), |ui| {
-            let mut volume = player.volume;
-            if ui.slider("video_volume", &mut volume, 0.0..=1.0).changed() {
-                player.set_volume(volume);
-            }
+    let mut copy_frame = false;
+    ui.row_with(mega_ui::LayoutOpts { spacing: Some(0.0), ..Default::default() }, |ui| {
+        ui.flex(0.5, |ui| {
+            ui.add_enabled(!player.failed, |ui| {
+                if ui.button("video_play_pause", if player.paused { "Play" } else { "Pause" }).clicked() {
+                    player.set_paused(!player.paused);
+                }
+            });
         });
+        ui.flex(1.0, |ui| {
+            ui.add_enabled(player.frame.is_some(), |ui| {
+                copy_frame = ui.button("video_copy_frame", "Copy Frame").clicked();
+            });
+        });
+    });
+    let mut volume = player.volume;
+    let volume_enabled = !player.failed && player.has_audio && player.audio_error.is_none();
+    ui.space(12.0);
+    ui.add_enabled(volume_enabled, |ui| {
+        app.value_sliders.draw(ui, "video_volume", &mut volume,
+            super::value_slider::ValueSlider::percent("Volume", 0.0));
+    });
+    let player = app.video_playback().unwrap();
+    if volume_enabled && volume != player.volume {
+        player.set_volume(volume);
+    }
+    ui.add_enabled(!player.failed, |ui| {
         ui.space(12.0);
         ui.label("Playback FPS");
         ui.horizontal(|ui| {
@@ -108,6 +99,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         ui.label(&format!("Original: {:.3} FPS", info.fps));
         ui.label("Lower FPS skips frames at original speed.");
     });
+    if copy_frame {
+        app.copy_video_frame(ui);
+    }
     ui.space(12.0);
     ui.separator();
     ui.space(8.0);
