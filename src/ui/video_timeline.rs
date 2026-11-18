@@ -94,7 +94,7 @@ fn draw_preview(ui: &mut Ui, app: &mut EditorApp, preview: Rect) {
         for (slot, (index, _)) in layers.enumerate() {
             let clip = &doc.clips[index];
             opacities.push(clip.effects.frame_at(doc.playhead - clip.range.start).opacity);
-            let Some(frame) = clip_rect(doc, clip, canvas) else { continue };
+            let Some(frame) = preview_clip_rect(doc, clip, canvas) else { continue };
             if let Some(visible) = frame.intersect(visible_canvas) {
                 let size = frame.max - frame.min;
                 let uv_min = (visible.min - frame.min) / size;
@@ -103,7 +103,7 @@ fn draw_preview(ui: &mut Ui, app: &mut EditorApp, preview: Rect) {
             }
         }
         if let Some((_, clip)) = doc.active_clips().find(|(index, _)| Some(*index) == doc.selected)
-            && let Some(frame) = clip_rect(doc, clip, canvas)
+            && let Some(frame) = base_clip_rect(doc, clip, canvas)
         {
             let color = [0.92, 0.95, 1.0, 1.0];
             let corners = [frame.min, Vec2::new(frame.max.x, frame.min.y), frame.max, Vec2::new(frame.min.x, frame.max.y)];
@@ -124,11 +124,18 @@ fn draw_preview(ui: &mut Ui, app: &mut EditorApp, preview: Rect) {
     app.video_editor.preview_opacity = opacities;
 }
 
-fn clip_rect(doc: &crate::video_document::VideoDocument, clip: &Clip, canvas: Rect) -> Option<Rect> {
+fn base_clip_rect(doc: &crate::video_document::VideoDocument, clip: &Clip, canvas: Rect) -> Option<Rect> {
     let canvas_size = canvas.max - canvas.min;
+    let size = clip.size_in_document()? * (canvas.width() / doc.width as f32);
+    let center = canvas.min + clip.position * canvas_size;
+    Some(Rect::from_min_size(center - size * 0.5, size))
+}
+
+fn preview_clip_rect(doc: &crate::video_document::VideoDocument, clip: &Clip, canvas: Rect) -> Option<Rect> {
+    let base = base_clip_rect(doc, clip, canvas)?;
     let effect = clip.effects.frame_at(doc.playhead - clip.range.start);
-    let size = clip.size_in_document()? * (canvas.width() / doc.width as f32) * effect.scale;
-    let center = canvas.min + (clip.position + effect.offset) * canvas_size;
+    let size = (base.max - base.min) * effect.scale;
+    let center = (base.min + base.max) * 0.5 + effect.offset * (canvas.max - canvas.min);
     Some(Rect::from_min_size(center - size * 0.5, size))
 }
 
@@ -161,18 +168,16 @@ fn edit_canvas(ui: &mut Ui, app: &mut EditorApp, canvas: Rect, preview: Rect) {
     if let Some(drag) = editor.canvas_drag.take() {
         if let Some(clip) = editor.current_mut().and_then(|doc| doc.clips.get_mut(drag.index)) {
             if input.key_escape {
-                clip.position = drag.position;
-                clip.scale_percent = drag.scale_percent;
+                clip.set_transform(drag.transform);
             } else if input.mouse_down || input.mouse_released {
                 let delta = mouse - drag.mouse;
                 match drag.kind {
-                    CanvasDragKind::Move => clip.position = drag.position + delta,
-                    CanvasDragKind::Scale { anchor, diagonal } => {
+                    CanvasDragKind::Move => clip.position = drag.transform.position + delta,
+                    CanvasDragKind::Scale { direction } => {
                         // Project in screen pixels so uniform scaling behaves the same at any canvas aspect.
-                        let direction = diagonal * canvas_size;
+                        let direction = direction * canvas_size;
                         let factor = 1.0 + (delta * canvas_size).dot(direction) / direction.length_squared();
-                        clip.scale_percent = (drag.scale_percent * factor).clamp(0.1, 10_000.0);
-                        clip.position = anchor + (drag.position - anchor) * (clip.scale_percent / drag.scale_percent);
+                        clip.scale_percent = (drag.transform.scale_percent * factor).clamp(0.1, 10_000.0);
                     }
                 }
                 if input.mouse_down && !input.mouse_released {
@@ -190,37 +195,34 @@ fn edit_canvas(ui: &mut Ui, app: &mut EditorApp, canvas: Rect, preview: Rect) {
     let selected_handle = doc.active_clips()
         .find(|(index, _)| Some(*index) == doc.selected)
         .and_then(|(index, clip)| {
-            let rect = clip_rect(doc, clip, canvas)?;
+            let rect = base_clip_rect(doc, clip, canvas)?;
             let handles = transform_handles(rect);
             let handle = handles.iter().position(|point| point.distance(input.mouse_pos) <= 6.0 * ui.scale())?;
-            let anchor = handles[(handle + 4) % 8];
-            let diagonal = handles[handle] - anchor;
-            let offset = clip.effects.frame_at(doc.playhead - clip.range.start).offset;
-            (diagonal.length_squared() > 0.0).then_some((index, CanvasDragKind::Scale {
-                anchor: (anchor - canvas.min) / canvas_size - offset,
-                diagonal: diagonal / canvas_size,
+            let direction = handles[handle] - (rect.min + rect.max) * 0.5;
+            (direction.length_squared() > 0.0).then_some((index, CanvasDragKind::Scale {
+                direction: direction / canvas_size,
             }))
         });
     let hit = selected_handle.or_else(|| {
         if !canvas.contains(input.mouse_pos) {
             return None;
         }
-        doc.active_clips().filter(|(_, clip)| clip_rect(doc, clip, canvas).is_some_and(|rect| rect.contains(input.mouse_pos)))
+        doc.active_clips().filter(|(_, clip)| preview_clip_rect(doc, clip, canvas).is_some_and(|rect| rect.contains(input.mouse_pos)))
             .max_by_key(|(_, clip)| clip.range.lane)
             .map(|(index, _)| (index, CanvasDragKind::Move))
     });
     if let Some((_, kind)) = &hit {
         ui.set_mouse_cursor(match kind {
             CanvasDragKind::Move => CursorIcon::Move,
-            CanvasDragKind::Scale { diagonal, .. } if diagonal.x == 0.0 => CursorIcon::ResizeNs,
-            CanvasDragKind::Scale { diagonal, .. } if diagonal.y == 0.0 => CursorIcon::ResizeEw,
+            CanvasDragKind::Scale { direction } if direction.x == 0.0 => CursorIcon::ResizeNs,
+            CanvasDragKind::Scale { direction } if direction.y == 0.0 => CursorIcon::ResizeEw,
             CanvasDragKind::Scale { .. } => CursorIcon::ResizeNwse,
         });
     }
     if input.mouse_pressed && !input.mouse_middle_down {
         if let Some((index, kind)) = hit {
             let clip = &doc.clips[index];
-            let drag = CanvasDrag { index, mouse, position: clip.position, scale_percent: clip.scale_percent, kind };
+            let drag = CanvasDrag { index, mouse, transform: clip.transform(), kind };
             editor.set_playing(false);
             editor.current_mut().unwrap().selected = Some(index);
             editor.canvas_drag = Some(drag);
@@ -505,6 +507,14 @@ fn paint_timeline(ui: &mut Ui, app: &EditorApp, ruler: Rect, layout: TrackLayout
 pub fn properties(ui: &mut Ui, app: &mut EditorApp) {
     let Some(doc) = app.video_editor.current_mut() else { return };
     if let Some(clip) = doc.selected.and_then(|index| doc.clips.get_mut(index)) {
+        ui.label("Clip position (% of canvas)");
+        let mut position = clip.position * 100.0;
+        if ui.vec2("sequence_clip_position", &mut position, 0.5, Vec2::splat(50.0)).changed()
+            && position.is_finite()
+        {
+            clip.position = position / 100.0;
+            ui.request_repaint();
+        }
         ui.label("Clip scale (%)");
         let mut scale = clip.scale_percent;
         if ui.drag_float("sequence_clip_scale", &mut scale, 1.0).changed() && scale.is_finite() {
@@ -514,6 +524,27 @@ pub fn properties(ui: &mut Ui, app: &mut EditorApp) {
         if let Some(size) = clip.size_in_document() {
             ui.label(&format!("{:.0} × {:.0} px", size.x, size.y));
         }
+        let gap = 4.0 * ui.scale();
+        let width = ((ui.available_size().x - gap) * 0.5).max(1.0);
+        ui.row_with(mega_ui::LayoutOpts { spacing: Some(gap), ..Default::default() }, |ui| {
+            ui.flex_width(width, |ui| {
+                if ui.button("copy_video_transform", "Copy Transform").clicked() {
+                    app.video_transform_clipboard = Some(clip.transform());
+                    app.status = "Clip transform copied".into();
+                }
+            });
+            ui.flex_width(width, |ui| {
+                ui.add_enabled(app.video_transform_clipboard.is_some(), |ui| {
+                    if ui.button("paste_video_transform", "Paste Transform").clicked()
+                        && let Some(transform) = app.video_transform_clipboard
+                    {
+                        clip.set_transform(transform);
+                        app.status = "Clip transform pasted".into();
+                        ui.request_repaint();
+                    }
+                });
+            });
+        });
         ui.separator();
     }
     ui.label("Temporary video document");
@@ -563,7 +594,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canvas_drag_selects_top_clip_and_scales_from_opposite_handle() {
+    fn canvas_drag_selects_the_preview_but_scales_using_the_base_frame() {
         let mut app = EditorApp::default();
         app.new_video_document();
         let mut asset = crate::workspace::VideoAsset::from_bytes(
@@ -598,17 +629,21 @@ mod tests {
             edit_canvas(&mut ui, &mut app, canvas, canvas);
             ui.end_frame();
         };
-        step(Vec2::new(120.0, 100.0), true, true, false);
-        step(Vec2::new(130.0, 100.0), false, false, true);
-        step(Vec2::new(162.0, 124.0), true, true, false);
-        step(Vec2::new(226.0, 172.0), false, false, true);
+        step(Vec2::new(145.0, 100.0), true, true, false);
+        step(Vec2::new(155.0, 100.0), false, false, true);
+        step(Vec2::new(142.0, 124.0), true, true, false);
+        step(Vec2::new(174.0, 148.0), false, false, true);
 
         let doc = app.video_editor.current().unwrap();
         assert_eq!(doc.selected, Some(1));
         assert_eq!(doc.clips[0].position, Vec2::splat(0.5));
-        let rect = clip_rect(doc, &doc.clips[1], canvas).unwrap();
-        assert!(rect.min.distance(Vec2::new(98.0, 76.0)) < 0.01);
-        assert!(rect.max.distance(Vec2::new(226.0, 172.0)) < 0.01);
+        let base = base_clip_rect(doc, &doc.clips[1], canvas).unwrap();
+        let rect = preview_clip_rect(doc, &doc.clips[1], canvas).unwrap();
+        assert!(doc.clips[1].position.distance(Vec2::new(0.55, 0.5)) < 0.000_1);
+        assert!(base.min.distance(Vec2::new(46.0, 52.0)) < 0.01);
+        assert!(base.max.distance(Vec2::new(174.0, 148.0)) < 0.01);
+        assert!(rect.min.distance(Vec2::new(66.0, 52.0)) < 0.01);
+        assert!(rect.max.distance(Vec2::new(194.0, 148.0)) < 0.01);
     }
 
     #[test]

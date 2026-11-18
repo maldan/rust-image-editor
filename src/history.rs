@@ -966,6 +966,7 @@ mod tests {
         let mut history = History::default();
         history.push(edit);
         let layers = vec![crate::project::Layer {
+            id: crate::project::new_layer_id(),
             identity: Default::default(),
             ai_metadata: None,
             z: 0.0,
@@ -1009,6 +1010,7 @@ mod tests {
             width: 128,
             height: 64,
             layers: vec![crate::project::Layer {
+                id: crate::project::new_layer_id(),
                 identity: Default::default(),
                 ai_metadata: None,
                 z: 0.0,

@@ -71,33 +71,64 @@ pub fn panel(ui: &mut Ui, app: &mut EditorApp) {
     };
     let clip = &mut doc.clips[index];
     let duration = clip.range.duration();
-    if ui.button("add_clip_effect", "Add Effect…").clicked() {
-        app.effect_dialog = Some(Dialog { document, clip: index, draft: None });
-    }
+    let gap = 4.0 * ui.scale();
+    let width = (ui.available_size().x - gap * 2.0).max(3.0);
+    ui.row_with(mega_ui::LayoutOpts { spacing: Some(gap), ..Default::default() }, |ui| {
+        ui.flex_width(width * 0.43, |ui| {
+            if ui.button("add_clip_effect", "Add Effect…").clicked() {
+                app.effect_dialog = Some(Dialog { document, clip: index, draft: None });
+            }
+        });
+        ui.flex_width(width * 0.25, |ui| {
+            ui.add_enabled(!app.effect_clipboard.is_empty(), |ui| {
+                if ui.button("paste_clip_effects", "Paste").clicked() {
+                    clip.effects.merge(&app.effect_clipboard, duration, doc.fps);
+                    app.status = "Effects pasted".into();
+                    ui.request_repaint();
+                }
+            });
+        });
+        ui.flex_width(width * 0.32, |ui| {
+            ui.add_enabled(!clip.effects.entries().is_empty(), |ui| {
+                if ui.button("copy_all_clip_effects", "Copy All").clicked() {
+                    app.effect_clipboard = clip.effects.entries().to_vec();
+                    app.status = "All clip effects copied".into();
+                }
+            });
+        });
+    });
     // Only the clicked row mutates the stack, after the list has been drawn.
     let mut toggle = None;
     let mut remove = None;
     for effect in clip.effects.entries().iter().copied() {
         let name = effect.kind.label();
         ui.separator();
-        ui.horizontal(|ui| {
-            let icon = if effect.enabled { "visibility" } else { "visibility_off" };
-            if ui.icon_button(&format!("{name}_visible"), icon, effect.enabled) {
-                toggle = Some(ClipEffect { enabled: !effect.enabled, ..effect });
+        let row = ui.selectable(&format!("{name}_row"), false, |ui| {
+            ui.horizontal(|ui| {
+                let icon = if effect.enabled { "visibility" } else { "visibility_off" };
+                if ui.icon_button(&format!("{name}_visible"), icon, effect.enabled) {
+                    toggle = Some(ClipEffect { enabled: !effect.enabled, ..effect });
+                }
+                if ui.icon_button(&format!("{name}_edit"), "edit", false) {
+                    app.effect_dialog = Some(Dialog { document, clip: index, draft: Some(effect) });
+                }
+                if ui.icon_button(&format!("{name}_delete"), "delete", false) {
+                    remove = Some(effect.kind);
+                }
+                ui.label(name);
+            });
+            if effect.kind == EffectKind::Move {
+                ui.label(&format!("Start {} s · {} s · {}", effect.start_seconds, effect.seconds, effect.easing.label()));
+            } else {
+                ui.label(&format!("{} s · {} · {}×", effect.seconds, effect.easing.label(), effect.scale));
             }
-            if ui.icon_button(&format!("{name}_edit"), "edit", false) {
-                app.effect_dialog = Some(Dialog { document, clip: index, draft: Some(effect) });
-            }
-            if ui.icon_button(&format!("{name}_delete"), "delete", false) {
-                remove = Some(effect.kind);
-            }
-            ui.label(name);
         });
-        if effect.kind == EffectKind::Move {
-            ui.label(&format!("{} s · {}", effect.seconds, effect.easing.label()));
-        } else {
-            ui.label(&format!("{} s · {} · {}×", effect.seconds, effect.easing.label(), effect.scale));
-        }
+        ui.context_menu(&format!("{name}_context"), row.hovered, |ui| {
+            if ui.menu_item("copy_effect", "Copy Effect").clicked() {
+                app.effect_clipboard = vec![effect];
+                app.status = format!("{name} copied");
+            }
+        });
     }
     if let Some(effect) = toggle {
         clip.effects.set(effect, duration, doc.fps);
@@ -120,7 +151,7 @@ pub fn modal(ui: &mut Ui, app: &mut EditorApp) {
     let mut apply = None;
     let title = dialog.draft.map_or("Add Effect", |effect| effect.kind.label());
     let height = match dialog.draft.map(|effect| effect.kind) {
-        Some(EffectKind::Move) => 330.0,
+        Some(EffectKind::Move) => 390.0,
         Some(_) => 286.0,
         None => 218.0,
     };
@@ -130,6 +161,10 @@ pub fn modal(ui: &mut Ui, app: &mut EditorApp) {
             .open(&mut open),
         |ui| {
             if let Some(effect) = &mut dialog.draft {
+                if effect.kind == EffectKind::Move {
+                    ui.label("Start (seconds from clip start)");
+                    ui.drag_float("clip_effect_start", &mut effect.start_seconds, 0.1);
+                }
                 ui.label("Duration (seconds)");
                 ui.drag_float("clip_effect_duration", &mut effect.seconds, 0.1);
                 if effect.kind == EffectKind::Move {

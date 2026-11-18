@@ -812,6 +812,7 @@ pub fn evaluate(project: Project, scales: Vec<f32>) -> Result<PreparedOutput, St
 fn prepare_image_output(image: &RgbaImage) -> Result<PreparedOutput, String> {
     let (w, h) = image.dimensions();
     let layer = Layer {
+        id: crate::project::new_layer_id(),
         identity: Default::default(),
         ai_metadata: None,
         z: 0.0,

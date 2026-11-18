@@ -14,8 +14,13 @@ use crate::project::{Layer, Project, encode_webp_rgba};
 const MANIFEST_PATH: &str = "/manifest.json";
 const MANIFEST_KIND: &str = "mega-image-editor/manifest+json";
 const IMAGE_KIND: &str = "image/webp";
-const FORMAT_VERSION: u32 = 10;
-const GRAPH_KIND: &str = "mega-image-editor/graph+json";
+const FORMAT_VERSION: u32 = 11;
+/// Schema version of a document entry in the manifest. Older manifests omit it and mean 1.
+const DOCUMENT_VERSION: u32 = 1;
+
+fn document_version_default() -> u32 {
+    DOCUMENT_VERSION
+}const GRAPH_KIND: &str = "mega-image-editor/graph+json";
 pub const THUMB_SIZE: u32 = 84;
 const THUMB_ATLAS_COLS: u32 = 16;
 /// On-screen library thumb size (logical px before UI scale).
@@ -209,6 +214,9 @@ fn default_opacity() -> f32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct LayerMeta {
+    /// Older manifests omit it; a fresh id is assigned on load.
+    #[serde(default)]
+    id: String,
     #[serde(default, rename = "aiMetadata", skip_serializing_if = "Option::is_none")]
     ai_metadata: Option<crate::project::AiMetadata>,
     #[serde(default)]
@@ -318,15 +326,22 @@ fn save_preview(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DocumentMeta {
+    #[serde(default = "document_version_default")]
+    version: u32,
     #[serde(default, rename = "type")]
     kind: DocumentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     animation: Option<crate::project::Animation>,
+    /// Only for `type = "video"`; such entries have no layers and are always listed after raster documents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    video: Option<crate::video_document_file::VideoData>,
     id: String,
     name: String,
     width: u32,
     height: u32,
+    #[serde(default)]
     active_layer: usize,
+    #[serde(default)]
     layers: Vec<LayerMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     preview: Option<String>,
@@ -338,6 +353,7 @@ enum DocumentKind {
     #[default]
     Image,
     Animation,
+    Video,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -447,6 +463,8 @@ pub struct Workspace {
     pub videos: Vec<VideoAsset>,
     pub documents: Vec<Document>,
     pub graphs: crate::nodes::Graphs,
+    /// Video documents as last handed over by the editor; written on save, filled on open.
+    pub video_documents: Vec<crate::video_document_file::VideoRecord>,
     pub active_document: usize,
     pub path: Option<PathBuf>,
     pub tree_selected: Option<String>,
@@ -486,6 +504,7 @@ impl Default for Workspace {
             videos: Vec::new(),
             documents: Vec::new(),
             graphs: Default::default(),
+            video_documents: Vec::new(),
             active_document: 0,
             path: None,
             tree_selected: None,
@@ -1114,6 +1133,7 @@ impl Workspace {
                     None
                 };
                 layers.push(LayerMeta {
+                    id: layer.id.clone(),
                     ai_metadata: layer.ai_metadata.clone(),
                     z: layer.z,
                     timeline,
@@ -1127,12 +1147,14 @@ impl Workspace {
             let preview = format!("/previews/documents/{}.webp", doc.id);
             save_preview(&preview, &doc.thumb, previous, &mut next, &mut files)?;
             doc_metas.push(DocumentMeta {
+                version: DOCUMENT_VERSION,
                 kind: if doc.project.animation.is_some() {
                     DocumentKind::Animation
                 } else {
                     DocumentKind::Image
                 },
                 animation: doc.project.animation.clone(),
+                video: None,
                 id: doc.id.clone(),
                 name: doc.name.clone(),
                 width: doc.project.width,
@@ -1140,6 +1162,22 @@ impl Workspace {
                 active_layer: doc.project.active_layer,
                 layers,
                 preview: Some(preview),
+            });
+        }
+        // Video documents go after all raster documents so manifest and workspace indexes stay aligned.
+        for record in &self.video_documents {
+            doc_metas.push(DocumentMeta {
+                version: DOCUMENT_VERSION,
+                kind: DocumentKind::Video,
+                animation: None,
+                video: Some(record.video.clone()),
+                id: record.id.clone(),
+                name: record.name.clone(),
+                width: record.width,
+                height: record.height,
+                active_layer: 0,
+                layers: Vec::new(),
+                preview: None,
             });
         }
         let mut graph_metas = Vec::new();
@@ -1417,13 +1455,35 @@ impl Workspace {
             });
         }
         let mut documents = Vec::new();
+        let mut video_documents = Vec::new();
         for meta in &manifest.documents {
+            if meta.version != DOCUMENT_VERSION {
+                return Err(format!(
+                    "Unsupported document version {} in '{}'",
+                    meta.version, meta.name
+                ));
+            }
+            if let Some(video) = &meta.video {
+                video_documents.push(crate::video_document_file::VideoRecord {
+                    id: meta.id.clone(),
+                    name: meta.name.clone(),
+                    width: meta.width,
+                    height: meta.height,
+                    video: video.clone(),
+                });
+                continue;
+            }
             bump_id(&meta.id, &mut next_id);
             let mut layers = Vec::new();
             let width = meta.width;
             let height = meta.height;
             for layer_meta in &meta.layers {
                 layers.push(Layer {
+                    id: if layer_meta.id.is_empty() {
+                        crate::project::new_layer_id()
+                    } else {
+                        layer_meta.id.clone()
+                    },
                     identity: Default::default(),
                     ai_metadata: layer_meta.ai_metadata.clone(),
                     z: layer_meta.z,
@@ -1551,6 +1611,7 @@ impl Workspace {
             active_document,
             documents,
             graphs,
+            video_documents,
             path: Some(path.to_path_buf()),
             tree_selected,
             asset_drag: None,
@@ -1617,13 +1678,19 @@ impl Workspace {
 }
 
 fn check_manifest(manifest: &WorkspaceManifest) -> Result<(), String> {
-    if manifest.format == "mega-image-editor" && matches!(manifest.version, 5 | 6 | 7 | 8 | 9 | 10) {
+    if manifest.format == "mega-image-editor" && matches!(manifest.version, 5 | 6 | 7 | 8 | 9 | 10 | 11) {
         for doc in &manifest.documents {
             if doc.layers.iter().any(|l| !l.z.is_finite() || !(-10.0..=10.0).contains(&l.z)) {
                 return Err("Invalid layer depth".into());
             }
-            if (doc.kind == DocumentKind::Animation) != doc.animation.is_some() {
+            if (doc.kind == DocumentKind::Animation) != doc.animation.is_some()
+                || (doc.kind == DocumentKind::Video) != doc.video.is_some()
+                || doc.video.is_some() && !doc.layers.is_empty()
+            {
                 return Err("Document type does not match its contents".into());
+            }
+            if let Some(video) = &doc.video {
+                video.validate().map_err(|error| format!("{error} in '{}'", doc.name))?;
             }
             if let Some(animation) = &doc.animation {
                 let (play_start, play_end) = animation.playback_range();
@@ -1824,7 +1891,7 @@ mod tests {
         assert_eq!(manifest["prompt_presets"][0]["negative"], "negative");
         assert_eq!(manifest["prompt_presets"][0]["kind"], "image");
         assert_eq!(manifest["prompt_presets"][1]["kind"], "video");
-        assert_eq!(manifest["version"], 10);
+        assert_eq!(manifest["version"], 11);
         drop(archive);
         let unchanged = fs::read(&path).unwrap();
         workspace.save(&path).unwrap();

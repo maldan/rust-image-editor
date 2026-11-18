@@ -104,7 +104,11 @@ pub struct EditorApp {
     video_poster: Option<crate::video::PosterJob>,
     pub(crate) video_trim: video::TrimState,
     pub(crate) video_editor: crate::video_document::VideoEditor,
+    /// Video documents as last saved or opened; a difference means unsaved changes.
+    video_snapshot: Vec<crate::video_document_file::VideoRecord>,
     pub(crate) effect_dialog: Option<ui::clip_effects::Dialog>,
+    pub(crate) effect_clipboard: Vec<crate::video_effects::ClipEffect>,
+    pub(crate) video_transform_clipboard: Option<crate::video_document::ClipTransform>,
 }
 
 impl Default for EditorApp {
@@ -160,7 +164,10 @@ impl EditorApp {
             video_poster: None,
             video_trim: Default::default(),
             video_editor: Default::default(),
+            video_snapshot: Vec::new(),
             effect_dialog: None,
+            effect_clipboard: Vec::new(),
+            video_transform_clipboard: None,
         };
         match crate::editor_settings::EditorSettings::load() {
             Ok(settings) => app.settings = settings,

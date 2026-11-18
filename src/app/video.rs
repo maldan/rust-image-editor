@@ -128,6 +128,12 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn poll_video(&mut self, ui: &mut Ui) {
+        let records = self.video_editor.records();
+        if records != self.video_snapshot {
+            self.video_snapshot = records;
+            self.dirty = true;
+        }
+        self.video_editor.refresh_assets(&self.workspace.videos);
         if let Some(result) = self.video_trim.job.as_ref().and_then(|job| job.poll()) {
             let job = self.video_trim.job.take().unwrap();
             match result.and_then(|bytes| self.workspace.add_video_named(bytes, &job.name)) {
@@ -184,23 +190,94 @@ mod tests {
     use super::*;
 
     #[test]
-    fn video_document_is_available_during_session_and_omitted_from_project() {
+    fn video_document_is_available_during_session_and_marks_project_dirty() {
         let mut app = EditorApp::default();
+        let mut ui = Ui::new();
+        app.poll_video(&mut ui);
+        assert!(!app.dirty);
         app.new_video_document();
         app.video_editor.current_mut().unwrap().fps = 30;
         app.switch_document(0);
         assert!(app.video_editor.current().is_none());
         app.show_video_document(0);
         assert_eq!(app.video_editor.current().unwrap().fps, 30);
+        app.dirty = false;
+        app.poll_video(&mut ui);
+        assert!(app.dirty);
+        app.dirty = false;
+        app.poll_video(&mut ui);
         assert!(!app.dirty);
+        app.video_editor.seek(0.0);
+        app.video_editor.current_mut().unwrap().preview_zoom = 2.0;
+        app.poll_video(&mut ui);
+        assert!(!app.dirty, "view state must not make the project dirty");
+    }
+
+    #[test]
+    fn video_documents_survive_save_and_open_with_clips_and_effects() {
+        use crate::video_effects::{ClipEffect, EffectKind};
+        use std::time::{Duration, Instant};
+
+        let mut app = EditorApp::default();
+        let bytes = include_bytes!("../../tests/fixtures/video-preview.mp4").to_vec();
+        app.workspace.add_video_named(bytes, "Source").unwrap();
+        let video_id = app.workspace.videos[0].id.clone();
+        app.workspace.videos[0].info = Some(crate::video::VideoInfo { width: 64, height: 48, duration: 1.0, fps: 4.0 });
+        app.new_video_document();
+        let asset = app.workspace.videos[0].clone();
+        assert!(app.video_editor.insert(&asset, 0, 1.0, 0.0));
+        {
+            let doc = app.video_editor.current_mut().unwrap();
+            doc.fps = 30;
+            doc.lane_count = 2;
+            let clip = &mut doc.clips[0];
+            clip.scale_percent = 150.0;
+            clip.position = Vec2::new(0.25, 0.75);
+            let duration = clip.range.duration();
+            clip.effects.set(ClipEffect::new(EffectKind::FadeIn), duration, 30);
+            clip.effects.set(ClipEffect::new(EffectKind::Move), duration, 30);
+        }
+        let expected = app.video_editor.records();
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("video-document.mgimg");
-        app.workspace.save(&path).unwrap();
-        assert_eq!(app.video_editor.documents.len(), 1);
+        app.workspace.path = Some(path.clone());
+        let mut ui = Ui::new();
+        assert!(app.try_save_project(&mut ui));
+        assert!(!app.dirty);
+
         app.open_path(&path).unwrap();
-        assert!(app.video_editor.documents.is_empty());
+        assert!(!app.dirty);
         assert_eq!(app.workspace.documents.len(), 1);
+        assert_eq!(app.video_editor.documents.len(), 1);
+        assert_eq!(app.video_editor.records(), expected);
+        let doc = &app.video_editor.documents[0];
+        assert_eq!((doc.id.as_str(), doc.name.as_str(), doc.fps, doc.lane_count), ("vd_1", "Video 1", 30, 2));
+        let clip = &doc.clips[0];
+        assert_eq!(clip.asset.id, video_id);
+        assert_eq!((clip.range.start, clip.range.source_in, clip.range.source_out), (1.0, 0.0, 1.0));
+        assert_eq!((clip.scale_percent, clip.position), (150.0, Vec2::new(0.25, 0.75)));
+        assert_eq!(clip.effects.entries().len(), 2);
+
+        // Clip info arrives once the asset has been inspected in the background.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        app.poll_video(&mut ui);
+        while app.video_poster.is_some() {
+            assert!(Instant::now() < deadline, "video inspection timed out");
+            std::thread::sleep(Duration::from_millis(5));
+            app.poll_video(&mut ui);
+        }
+        app.poll_video(&mut ui);
+        let clip = &app.video_editor.documents[0].clips[0];
+        assert!(clip.asset.info.is_some());
+        assert!((clip.source_duration - 1.0).abs() < 0.001);
+
+        // A new document created after opening must not reuse the loaded id.
+        assert_eq!(app.video_editor.new_document(), 1);
+        assert_eq!(app.video_editor.documents[1].id, "vd_2");
+
+        let (editor, missing) = crate::video_document::VideoEditor::from_records(&expected, &[]);
+        assert_eq!((editor.documents.len(), editor.documents[0].clips.len(), missing), (1, 0, 1));
     }
 
     #[test]

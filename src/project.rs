@@ -12,8 +12,15 @@ pub struct AiMetadata {
     pub model: String,
 }
 
+/// Fresh random layer id. Not tied to a counter, so loading and copying never collide in practice.
+pub fn new_layer_id() -> String {
+    format!("l_{:016x}", rand::random::<u64>())
+}
+
 #[derive(Debug, Clone)]
 pub struct Layer {
+    /// Persistent id stored in the manifest (`LayerMeta.id`). Nothing references it yet.
+    pub id: String,
     /// Session-local identity for references such as node sources.
     pub identity: std::sync::Arc<()>,
     pub ai_metadata: Option<AiMetadata>,
@@ -368,6 +375,7 @@ impl Project {
         self.width = width;
         self.height = height;
         self.layers = vec![Layer {
+            id: new_layer_id(),
             identity: Default::default(),
             ai_metadata: None,
             z: 0.0,
@@ -387,6 +395,7 @@ impl Project {
         }
         let index = self.layers.len() + 1;
         self.layers.push(Layer {
+            id: new_layer_id(),
             identity: Default::default(),
             ai_metadata: None,
             z: 0.0,
@@ -496,6 +505,7 @@ impl Project {
             self.width = width;
             self.height = height;
             self.layers.push(Layer {
+                id: new_layer_id(),
                 identity: Default::default(),
                 ai_metadata: None,
                 z: 0.0,

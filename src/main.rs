@@ -20,6 +20,7 @@ mod tiles;
 mod ui;
 mod video;
 mod video_document;
+mod video_document_file;
 mod video_effects;
 mod view;
 mod win_assoc;

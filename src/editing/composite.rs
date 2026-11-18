@@ -98,6 +98,7 @@ pub fn merge_layers(
     }
     pixels.prune();
     crate::project::Layer {
+        id: crate::project::new_layer_id(),
         identity: Default::default(),
         ai_metadata: None,
         z: lower.z,
@@ -139,6 +140,7 @@ pub fn merge_layer_tracks(
         .map(|(_, pixels)| pixels.clone())
         .unwrap_or_default();
     crate::project::Layer {
+        id: crate::project::new_layer_id(),
         identity: Default::default(),
         ai_metadata: None,
         z: lower.z,
@@ -158,6 +160,7 @@ fn track_frame(layer: &crate::project::Layer, frame: u32) -> crate::project::Lay
         .map(|(_, pixels)| pixels.clone())
         .unwrap_or_default();
     crate::project::Layer {
+        id: crate::project::new_layer_id(),
         identity: Default::default(),
         ai_metadata: layer.ai_metadata.clone(),
         z: layer.z,
@@ -178,6 +181,7 @@ mod merge_tests {
     #[test]
     fn composite_pixel_matches_the_full_image_composite() {
         let mut lower = Layer {
+            id: crate::project::new_layer_id(),
             identity: Default::default(),
             ai_metadata: None,
             z: 0.0,
@@ -189,6 +193,7 @@ mod merge_tests {
         };
         lower.pixels.offset = (1, 2);
         let mut upper = Layer {
+            id: crate::project::new_layer_id(),
             identity: Default::default(),
             ai_metadata: None,
             z: 0.0,
@@ -214,6 +219,7 @@ mod merge_tests {
         for lower_visible in [false, true] {
             for upper_visible in [false, true] {
                 let mut lower = Layer {
+                    id: crate::project::new_layer_id(),
                     identity: Default::default(),
                     ai_metadata: None,
                     z: 0.0,
@@ -225,6 +231,7 @@ mod merge_tests {
                 };
                 lower.pixels.offset = (1, 1);
                 let mut upper = Layer {
+                    id: crate::project::new_layer_id(),
                     identity: Default::default(),
                     ai_metadata: None,
                     z: 0.0,
@@ -247,6 +254,7 @@ mod merge_tests {
     #[test]
     fn merge_down_preserves_distant_offcanvas_pixels_without_filling_the_gap() {
         let mut lower = Layer {
+            id: crate::project::new_layer_id(),
             identity: Default::default(),
             ai_metadata: None,
             z: 0.0,

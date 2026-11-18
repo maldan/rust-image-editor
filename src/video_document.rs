@@ -1,5 +1,6 @@
 use crate::{video::Playback, workspace::VideoAsset};
 use crate::video_effects::ClipEffects;
+use crate::video_document_file::{ClipData, VIDEO_VERSION, VideoData, VideoRecord};
 use glam::Vec2;
 use mega_ui::Rect;
 use image::RgbaImage;
@@ -36,7 +37,22 @@ pub struct Clip {
     pub effects: ClipEffects,
 }
 
+#[derive(Clone, Copy)]
+pub struct ClipTransform {
+    pub position: Vec2,
+    pub scale_percent: f32,
+}
+
 impl Clip {
+    pub fn transform(&self) -> ClipTransform {
+        ClipTransform { position: self.position, scale_percent: self.scale_percent }
+    }
+
+    pub fn set_transform(&mut self, transform: ClipTransform) {
+        self.position = transform.position;
+        self.scale_percent = transform.scale_percent;
+    }
+
     pub fn size_in_document(&self) -> Option<Vec2> {
         let info = self.asset.info?;
         Some(Vec2::new(info.width as f32, info.height as f32) * (self.scale_percent / 100.0))
@@ -59,18 +75,19 @@ pub struct ClipDrag {
 
 pub enum CanvasDragKind {
     Move,
-    Scale { anchor: Vec2, diagonal: Vec2 },
+    Scale { direction: Vec2 },
 }
 
 pub struct CanvasDrag {
     pub index: usize,
     pub mouse: Vec2,
-    pub position: Vec2,
-    pub scale_percent: f32,
+    pub transform: ClipTransform,
     pub kind: CanvasDragKind,
 }
 
 pub struct VideoDocument {
+    /// Stable id stored in the manifest (`vd_<n>`).
+    pub id: String,
     pub name: String,
     pub width: i32,
     pub height: i32,
@@ -89,8 +106,9 @@ pub struct VideoDocument {
 }
 
 impl VideoDocument {
-    fn new(name: String) -> Self {
+    fn new(id: String, name: String) -> Self {
         Self {
+            id,
             name,
             width: 1920,
             height: 1080,
@@ -107,6 +125,66 @@ impl VideoDocument {
             hidden_lanes: Default::default(),
             selected: None,
         }
+    }
+
+    /// Persistent state only; playhead, zoom, scroll, selection and hidden lanes are view state.
+    pub fn to_record(&self) -> VideoRecord {
+        VideoRecord {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            width: self.width.max(1) as u32,
+            height: self.height.max(1) as u32,
+            video: VideoData {
+                version: VIDEO_VERSION,
+                fps: self.fps,
+                duration: self.duration,
+                lane_count: self.lane_count,
+                clips: self.clips.iter().map(|clip| ClipData {
+                    asset: clip.asset.id.clone(),
+                    lane: clip.range.lane,
+                    start: clip.range.start,
+                    source_in: clip.range.source_in,
+                    source_out: clip.range.source_out,
+                    scale_percent: clip.scale_percent,
+                    position: clip.position.into(),
+                    effects: clip.effects.to_data(),
+                }).collect(),
+            },
+        }
+    }
+
+    /// Clips whose asset no longer exists are skipped; the second value counts them.
+    pub fn from_record(record: &VideoRecord, videos: &[VideoAsset]) -> (Self, usize) {
+        let mut doc = Self::new(record.id.clone(), record.name.clone());
+        let data = &record.video;
+        doc.width = record.width.min(i32::MAX as u32) as i32;
+        doc.height = record.height.min(i32::MAX as u32) as i32;
+        doc.fps = data.fps;
+        doc.duration = data.duration;
+        doc.lane_count = data.lane_count;
+        let mut missing = 0;
+        for clip in &data.clips {
+            let Some(asset) = videos.iter().find(|video| video.id == clip.asset) else {
+                missing += 1;
+                continue;
+            };
+            let range = ClipRange {
+                lane: clip.lane,
+                start: clip.start,
+                source_in: clip.source_in,
+                source_out: clip.source_out,
+            };
+            doc.clips.push(Clip {
+                asset: Arc::new(asset.clone()),
+                // Refined by `VideoEditor::refresh_assets` once the asset has been inspected.
+                source_duration: asset.info.map_or(range.source_out, |info| info.duration.max(range.source_out)),
+                range,
+                scale_percent: clip.scale_percent,
+                position: clip.position.into(),
+                effects: ClipEffects::from_data(&clip.effects, range.duration(), data.fps),
+            });
+        }
+        (doc, missing)
     }
 
     pub fn content_end(&self) -> f64 {
@@ -312,9 +390,46 @@ pub struct VideoEditor {
     pub previews: Vec<TrackPreview>,
     pub preview_opacity: Vec<f32>,
     next_name: usize,
+    next_id: usize,
 }
 
 impl VideoEditor {
+    /// Rebuilds the editor from saved records. Returns the number of clips dropped because
+    /// their video asset is missing.
+    pub fn from_records(records: &[VideoRecord], videos: &[VideoAsset]) -> (Self, usize) {
+        let mut editor = Self::default();
+        let mut missing = 0;
+        for record in records {
+            let (doc, dropped) = VideoDocument::from_record(record, videos);
+            missing += dropped;
+            if let Some(number) = doc.id.strip_prefix("vd_").and_then(|n| n.parse::<usize>().ok()) {
+                editor.next_id = editor.next_id.max(number);
+            }
+            editor.documents.push(doc);
+        }
+        editor.next_name = editor.documents.len();
+        (editor, missing)
+    }
+
+    pub fn records(&self) -> Vec<VideoRecord> {
+        self.documents.iter().map(VideoDocument::to_record).collect()
+    }
+
+    /// Copies freshly inspected asset info into clips that were created before it was known.
+    pub fn refresh_assets(&mut self, videos: &[VideoAsset]) {
+        for clip in self.documents.iter_mut().flat_map(|doc| doc.clips.iter_mut()) {
+            if clip.asset.info.is_some() {
+                continue;
+            }
+            if let Some(video) = videos.iter().find(|video| video.id == clip.asset.id)
+                && let Some(info) = video.info
+            {
+                clip.asset = Arc::new(video.clone());
+                clip.source_duration = info.duration.max(clip.range.source_out);
+            }
+        }
+    }
+
     pub fn current(&self) -> Option<&VideoDocument> {
         self.active.and_then(|index| self.documents.get(index))
     }
@@ -325,7 +440,8 @@ impl VideoEditor {
 
     pub fn new_document(&mut self) -> usize {
         self.next_name += 1;
-        self.documents.push(VideoDocument::new(format!("Video {}", self.next_name)));
+        self.next_id += 1;
+        self.documents.push(VideoDocument::new(format!("vd_{}", self.next_id), format!("Video {}", self.next_name)));
         self.documents.len() - 1
     }
 

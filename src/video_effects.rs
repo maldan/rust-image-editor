@@ -19,7 +19,8 @@ impl EffectKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Easing {
     #[default]
     Linear,
@@ -60,6 +61,7 @@ pub struct ClipEffect {
     pub seconds: f32,
     pub easing: Easing,
     pub scale: f32,
+    pub start_seconds: f32,
     pub from: Vec2,
     pub to: Vec2,
 }
@@ -72,6 +74,7 @@ impl ClipEffect {
             seconds: 1.0,
             easing: Easing::Linear,
             scale: 1.0,
+            start_seconds: 0.0,
             from: Vec2::new(-15.0, 0.0),
             to: Vec2::ZERO,
         }
@@ -80,7 +83,8 @@ impl ClipEffect {
     pub fn settings_valid(self) -> bool {
         self.seconds.is_finite() && self.seconds >= 0.0
             && match self.kind {
-                EffectKind::Move => self.from.is_finite() && self.to.is_finite(),
+                EffectKind::Move => self.from.is_finite() && self.to.is_finite()
+                    && self.start_seconds.is_finite() && self.start_seconds >= 0.0,
                 _ => (0.01..=100.0).contains(&self.scale),
             }
     }
@@ -90,7 +94,12 @@ impl ClipEffect {
             return;
         }
         if self.kind == EffectKind::Move {
-            let progress = if self.seconds == 0.0 { 1.0 } else { (time / f64::from(self.seconds)).clamp(0.0, 1.0) as f32 };
+            let elapsed = time - f64::from(self.start_seconds);
+            let progress = if self.seconds == 0.0 {
+                if time as f32 >= self.start_seconds { 1.0 } else { 0.0 }
+            } else {
+                (elapsed / f64::from(self.seconds)).clamp(0.0, 1.0) as f32
+            };
             let eased = self.easing.sample(progress);
             frame.offset += (self.from / 100.0) * (1.0 - eased) + (self.to / 100.0) * eased;
             return;
@@ -128,6 +137,8 @@ impl Default for EffectFrame {
 #[derive(Default)]
 pub struct ClipEffects {
     entries: Vec<ClipEffect>,
+    /// Effects of types this version does not know; kept verbatim so they survive a resave.
+    pub(crate) unknown: Vec<crate::video_document_file::EffectData>,
     frames: Vec<EffectFrame>,
     last_sample: f64,
     fps: f64,
@@ -135,7 +146,7 @@ pub struct ClipEffects {
 
 impl ClipEffects {
     pub fn duplicate_settings(&self) -> Self {
-        Self { entries: self.entries.clone(), ..Self::default() }
+        Self { entries: self.entries.clone(), unknown: self.unknown.clone(), ..Self::default() }
     }
 
     pub fn entries(&self) -> &[ClipEffect] {
@@ -143,13 +154,16 @@ impl ClipEffects {
     }
 
     pub fn set(&mut self, effect: ClipEffect, duration: f64, fps: i32) {
-        if !effect.settings_valid() {
-            return;
-        }
-        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.kind == effect.kind) {
-            *entry = effect;
-        } else {
-            self.entries.push(effect);
+        self.merge(&[effect], duration, fps);
+    }
+
+    pub fn merge(&mut self, effects: &[ClipEffect], duration: f64, fps: i32) {
+        for effect in effects.iter().copied().filter(|effect| effect.settings_valid()) {
+            if let Some(entry) = self.entries.iter_mut().find(|entry| entry.kind == effect.kind) {
+                *entry = effect;
+            } else {
+                self.entries.push(effect);
+            }
         }
         self.bake(duration, fps);
     }
@@ -205,6 +219,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pasted_effects_replace_matching_types_and_bake_for_the_destination() {
+        let mut source = ClipEffects::default();
+        let mut fade = ClipEffect::new(EffectKind::FadeIn);
+        fade.seconds = 2.0;
+        fade.scale = 1.1;
+        source.set(fade, 10.0, 20);
+        let mut motion = ClipEffect::new(EffectKind::Move);
+        motion.enabled = false;
+        motion.start_seconds = 0.75;
+        source.set(motion, 10.0, 20);
+        let copied = source.entries().to_vec();
+        source.remove(EffectKind::Move, 10.0, 20);
+
+        let mut destination = ClipEffects::default();
+        destination.set(ClipEffect::new(EffectKind::FadeOut), 5.0, 30);
+        destination.set(ClipEffect::new(EffectKind::FadeIn), 5.0, 30);
+        destination.merge(&copied, 5.0, 30);
+        assert_eq!(destination.entries().len(), 3);
+        assert_eq!(destination.entries()[0].kind, EffectKind::FadeOut);
+        assert_eq!(destination.entries()[1].seconds, 2.0);
+        assert_eq!(destination.entries()[1].scale, 1.1);
+        assert!(!destination.entries()[2].enabled);
+        assert_eq!(destination.entries()[2].start_seconds, 0.75);
+        assert_eq!(destination.frames.len(), 150);
+        assert_eq!(destination.frame_at(1.0).opacity, 0.5);
+        assert_eq!(destination.frame_at(4.99).opacity, 0.0);
+    }
+
+    #[test]
     fn move_uses_easing_and_holds_the_destination_without_changing_fade() {
         let mut effects = ClipEffects::default();
         let mut motion = ClipEffect::new(EffectKind::Move);
@@ -218,9 +261,16 @@ mod tests {
         assert!(halfway.offset.distance(Vec2::new(-0.1, 0.1)) < 0.000_01);
         assert_eq!(halfway.opacity, 0.5);
         assert_eq!(effects.frame_at(2.0).offset, Vec2::new(0.2, 0.4));
+        motion.start_seconds = 0.5;
+        effects.set(motion, 3.0, 20);
+        assert_eq!(effects.frame_at(0.25).offset, Vec2::new(-0.2, 0.0));
+        assert_eq!(effects.frame_at(0.5).offset, Vec2::new(-0.2, 0.0));
+        assert!(effects.frame_at(1.0).offset.distance(Vec2::new(-0.1, 0.1)) < 0.000_01);
+        assert_eq!(effects.frame_at(1.5).offset, Vec2::new(0.2, 0.4));
         motion.seconds = 0.0;
         effects.set(motion, 3.0, 20);
-        assert_eq!(effects.frame_at(0.0).offset, Vec2::new(0.2, 0.4));
+        assert_eq!(effects.frame_at(0.25).offset, Vec2::new(-0.2, 0.0));
+        assert_eq!(effects.frame_at(0.5).offset, Vec2::new(0.2, 0.4));
         motion.enabled = false;
         effects.set(motion, 3.0, 20);
         assert_eq!(effects.frame_at(0.0).offset, Vec2::ZERO);

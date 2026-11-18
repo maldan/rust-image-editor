@@ -12,6 +12,7 @@ impl EditorApp {
     pub fn new_project(&mut self, ui: &mut Ui) {
         self.effect_dialog = None;
         self.video_editor = Default::default();
+        self.video_snapshot.clear();
         self.animation_clock = None;
         self.close_asset_preview();
         self.close_graph_view();
@@ -284,6 +285,7 @@ impl EditorApp {
             return Err("Selection has no pixels".into());
         }
         Ok(crate::project::Layer {
+            id: crate::project::new_layer_id(),
             identity: Default::default(),
             ai_metadata: source.ai_metadata.clone(),
             z: source.z,
@@ -405,6 +407,8 @@ impl EditorApp {
         };
         self.commit_transform();
         self.stash_active_graph();
+        self.video_snapshot = self.video_editor.records();
+        self.workspace.video_documents = self.video_snapshot.clone();
         let result = self.workspace.save(&path);
         self.unstash_active_graph();
         match result {
@@ -439,18 +443,24 @@ impl EditorApp {
         let mut workspace = Workspace::open(path)?;
         workspace.ensure_document_loaded(workspace.active_document)?;
         self.effect_dialog = None;
-        self.video_editor = Default::default();
         self.close_asset_preview();
         self.close_graph_view();
         self.video_poster = None;
         self.cancel_transform();
         self.workspace = workspace;
+        let (video_editor, missing) =
+            crate::video_document::VideoEditor::from_records(&self.workspace.video_documents, &self.workspace.videos);
+        self.video_editor = video_editor;
+        self.video_snapshot = self.video_editor.records();
         self.install_active_graph();
         self.video_trim = Default::default();
         self.ai.presets = Default::default();
         self.refresh_image()?;
         self.dirty = false;
         self.status = format!("Opened {}", file_name(path));
+        if missing > 0 {
+            self.status.push_str(&format!(" · {missing} video clip(s) skipped: source video missing"));
+        }
         Ok(())
     }
 
