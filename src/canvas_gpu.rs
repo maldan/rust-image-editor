@@ -111,6 +111,7 @@ pub struct LayerDraw {
 
 #[derive(Clone, Default)]
 pub struct CanvasOverlay {
+    pub layer_grid: Option<Vec<(usize, Vec2)>>,
     pub camera: Option<(crate::camera::CameraKey, Vec<f32>)>,
     pub deformation: Option<usize>,
     pub hsv: Option<(usize, crate::hsv::HsvAdjustment)>,

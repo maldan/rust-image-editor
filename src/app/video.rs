@@ -230,6 +230,7 @@ mod tests {
             let doc = app.video_editor.current_mut().unwrap();
             doc.fps = 30;
             doc.lane_count = 2;
+            doc.background = [0.2, 0.3, 0.4, 1.0];
             let clip = &mut doc.clips[0];
             clip.scale_percent = 150.0;
             clip.position = Vec2::new(0.25, 0.75);

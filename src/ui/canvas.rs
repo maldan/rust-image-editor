@@ -29,7 +29,20 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         }
     }
 
-    if app.ai.open || app.hsv.open || app.rename.is_some() {
+    let modal_open = app.ai.open || app.hsv.open || app.rename.is_some();
+    if app.layer_grid_active() {
+        if app.layer_grid.zoom.is_none() {
+            let bounds = app.layer_grid.layout(app.project()).bounds();
+            let available = (size - Vec2::splat(32.0)).max(Vec2::ONE);
+            app.layer_grid.zoom = Some((available / bounds).min_element().clamp(0.05, 1.0));
+        }
+        if !modal_open {
+            app.update_view();
+        }
+        super::layer_grid::draw_labels(ui, app);
+        return;
+    }
+    if modal_open {
         return;
     }
 

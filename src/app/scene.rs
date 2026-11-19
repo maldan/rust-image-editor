@@ -163,7 +163,7 @@ impl Scene for EditorApp {
             || self.video_poster.is_some()
             || self.video_trim.job.is_some()
             || self.video_editor.needs_repaint()
-            || (self.session.preview_asset.is_none() && self.session.selection.is_some())
+            || (!self.layer_grid_active() && self.session.preview_asset.is_none() && self.session.selection.is_some())
             || thumb_waiting
             || !self.dirty_tiles.is_empty()
     }
@@ -207,6 +207,7 @@ impl Scene for EditorApp {
             self.nodes.atlas_dirty = false;
         }
         self.workspace.prepare_thumb_atlas();
+        self.ai.reference_picker.sync_textures(device, queue, renderer);
         if self.workspace.thumb_needs_upload() {
             let (width, height) = self.workspace.thumb_atlas_size;
             renderer.set_texture_rgba_nearest(
@@ -402,7 +403,6 @@ impl Scene for EditorApp {
             overlay.camera = Some((animation.camera.sample(animation.frame), self.project().layers.iter().map(|l| l.z).collect()));
             return Some((self.session.canvas_rect, view, overlay));
         }
-        overlay.deformation = self.deformation.as_ref().map(|d| d.layer);
         if self.hsv.open
             && self.hsv.preview
             && self.hsv.document_id == self.workspace.active_doc().id
@@ -413,6 +413,12 @@ impl Scene for EditorApp {
                 overlay.hsv = Some((self.hsv.layer, self.hsv.adjustment));
             }
         }
+        if self.layer_grid_active() {
+            let layout = self.layer_grid.layout(self.project());
+            overlay.layer_grid = Some(layout.centers(view).collect());
+            return Some((self.session.canvas_rect, view, overlay));
+        }
+        overlay.deformation = self.deformation.as_ref().map(|d| d.layer);
         if matches!(self.session.tool, Tool::Brush | Tool::SelectionBrush)
             && !self.eyedropper_armed()
         {

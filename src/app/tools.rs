@@ -91,7 +91,7 @@ impl EditorApp {
     }
 
     pub fn handle_canvas_edit(&mut self, view: CanvasView) {
-        if self.camera_visible() || self.session.preview_asset.is_some() {
+        if self.layer_grid_active() || self.camera_visible() || self.session.preview_asset.is_some() {
             return;
         }
         let (width, height) = (view.width, view.height);

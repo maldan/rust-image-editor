@@ -10,7 +10,9 @@ impl EditorApp {
     }
 
     pub fn new_project(&mut self, ui: &mut Ui) {
+        self.layer_grid = Default::default();
         self.effect_dialog = None;
+        self.effect_key_drag = None;
         self.video_editor = Default::default();
         self.video_snapshot.clear();
         self.animation_clock = None;
@@ -442,7 +444,9 @@ impl EditorApp {
     pub fn open_path(&mut self, path: &Path) -> Result<(), String> {
         let mut workspace = Workspace::open(path)?;
         workspace.ensure_document_loaded(workspace.active_document)?;
+        self.layer_grid = Default::default();
         self.effect_dialog = None;
+        self.effect_key_drag = None;
         self.close_asset_preview();
         self.close_graph_view();
         self.video_poster = None;

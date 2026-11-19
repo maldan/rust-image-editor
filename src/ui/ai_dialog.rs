@@ -165,6 +165,7 @@ impl PreviewView {
 
 pub struct AiDialog {
     pub presets: super::prompt_presets::PromptPresets,
+    pub(crate) reference_picker: super::reference_picker::ReferencePicker,
     pub open: bool,
     pub mode: AiMode,
     pub video_settings: crate::comfyui::VideoSettings,
@@ -241,6 +242,7 @@ impl Default for AiDialog {
     fn default() -> Self {
         Self {
             presets: Default::default(),
+            reference_picker: Default::default(),
             open: false,
             mode: AiMode::Edit,
             video_settings: Default::default(),
@@ -384,9 +386,10 @@ impl AiDialog {
 pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     if !app.ai.open {
         app.ai.presets.close();
+        app.ai.reference_picker = Default::default();
         return;
     }
-    if app.ai.presets.open && app.input.key_escape {
+    if (app.ai.presets.open || app.ai.reference_picker.open.is_some()) && app.input.key_escape {
         app.input.key_escape = false;
     }
     app.poll_catalog(ui);
@@ -427,7 +430,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                         } else if app.ai.mode == AiMode::MinimaxRefs {
                             if let Some(index) = super::video_dialog::draw_document_refs(
                                 ui,
-                                &app.workspace.documents,
+                                &mut app.workspace,
+                                &mut app.ai.reference_picker,
                                 &mut app.ai.minimax_refs,
                                 "refs",
                                 &[

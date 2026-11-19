@@ -7,6 +7,15 @@ use serde::{Deserialize, Serialize};
 
 /// Schema version of the `video` object, independent of `DocumentMeta.version`.
 pub const VIDEO_VERSION: u32 = 1;
+pub const DEFAULT_BACKGROUND: [f32; 4] = [0.015, 0.017, 0.023, 1.0];
+
+fn default_background() -> [f32; 4] {
+    DEFAULT_BACKGROUND
+}
+
+fn is_default_background(color: &[f32; 4]) -> bool {
+    *color == DEFAULT_BACKGROUND
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Point {
@@ -33,6 +42,8 @@ pub struct VideoData {
     pub fps: i32,
     pub duration: f64,
     pub lane_count: usize,
+    #[serde(default = "default_background", skip_serializing_if = "is_default_background")]
+    pub background: [f32; 4],
     #[serde(default)]
     pub clips: Vec<ClipData>,
 }
@@ -104,6 +115,7 @@ impl VideoData {
             || !self.duration.is_finite()
             || self.duration < 0.0
             || !(1..=1024).contains(&self.lane_count)
+            || self.background.iter().any(|channel| !(0.0..=1.0).contains(channel))
         {
             return Err("Invalid video document settings".into());
         }
@@ -161,6 +173,15 @@ fn parse_effect(item: &EffectData) -> Parsed {
             }),
             Err(_) => Parsed::Invalid,
         },
+        "transformAnimation" => match serde_json::from_value::<TransformAnimationData>(item.data.clone()) {
+            Ok(data) => Parsed::Effect(ClipEffect {
+                enabled: item.enabled,
+                easing: data.easing,
+                keys: data.keys,
+                ..ClipEffect::new(EffectKind::TransformAnimation)
+            }),
+            Err(_) => Parsed::Invalid,
+        },
         _ => Parsed::Unknown,
     }
 }
@@ -181,8 +202,18 @@ fn effect_data(effect: &ClipEffect) -> EffectData {
                 to: effect.to.into(),
             }),
         ),
+        EffectKind::TransformAnimation => (
+            "transformAnimation",
+            serde_json::to_value(TransformAnimationData { easing: effect.easing, keys: effect.keys.clone() }),
+        ),
     };
     EffectData { kind: kind.into(), enabled: effect.enabled, data: data.unwrap_or_default() }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TransformAnimationData {
+    easing: Easing,
+    keys: Vec<crate::video_effects::TransformKey>,
 }
 
 impl ClipEffects {
@@ -224,9 +255,9 @@ mod tests {
         ])).unwrap();
         let effects = ClipEffects::from_data(&list, 4.0, 24);
         assert_eq!(effects.entries().len(), 2);
-        let fade = effects.entries()[0];
+        let fade = &effects.entries()[0];
         assert_eq!((fade.kind, fade.easing, fade.scale), (EffectKind::FadeIn, Easing::Smoothstep, 0.5));
-        let motion = effects.entries()[1];
+        let motion = &effects.entries()[1];
         assert!(!motion.enabled);
         assert_eq!((motion.start_seconds, motion.to), (0.5, Vec2::new(0.0, 3.0)));
 
@@ -252,7 +283,10 @@ mod tests {
             position: Point { x: 0.5, y: 0.5 },
             effects: Vec::new(),
         };
-        let data = VideoData { version: VIDEO_VERSION, fps: 24, duration: 5.0, lane_count: 1, clips: vec![clip] };
+        let data = VideoData { version: VIDEO_VERSION, fps: 24, duration: 5.0, lane_count: 1, background: DEFAULT_BACKGROUND, clips: vec![clip] };
+        let legacy = serde_json::to_value(&data).unwrap();
+        assert!(legacy.get("background").is_none());
+        assert_eq!(serde_json::from_value::<VideoData>(legacy).unwrap().background, DEFAULT_BACKGROUND);
         assert!(data.validate().is_ok());
         assert!(VideoData { version: 2, ..data.clone() }.validate().is_err());
         assert!(VideoData { fps: 0, ..data.clone() }.validate().is_err());

@@ -15,10 +15,42 @@ struct LayerCommand {
     merge_down: Option<usize>,
     reorder: Option<(usize, usize)>,
     opacity: Option<f32>,
-    new_layer: bool,
 }
 
 pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
+    let mut grid = app.layer_grid_active();
+    let row_input = !ui.context_menu_open() && !ui.pointer_over_popup_at(app.input.mouse_pos);
+    ui.space(8.0);
+    let new_layer = ui.button("layer_new", "New Layer").clicked() && row_input;
+    if app.project().animation.is_none() {
+        let can_toggle = ui.enabled() && row_input && (grid || app.session.floating.is_none());
+        if ui.checkbox("toggle_layer_grid", "Layer Grid", &mut grid).changed() && can_toggle {
+            if grid {
+                app.open_layer_grid();
+            } else {
+                app.layer_grid.document = None;
+            }
+            ui.request_repaint();
+        }
+    }
+    if app.layer_grid_active() {
+        ui.label("Max per row (0 = unlimited)");
+        let mut limit = app.layer_grid.max_per_row;
+        ui.drag_int("layer_grid_max_per_row", &mut limit, 1);
+        let limit = limit.max(0);
+        if limit != app.layer_grid.max_per_row {
+            app.layer_grid.max_per_row = limit;
+            ui.request_repaint();
+        }
+    }
+    draw_layers(ui, app);
+    if new_layer {
+        app.add_layer();
+        ui.request_repaint();
+    }
+}
+
+fn draw_layers(ui: &mut Ui, app: &mut EditorApp) {
     let rows: Vec<(String, bool, f32)> = app
         .project()
         .layers
@@ -51,6 +83,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     }
     if let Some((index, visible)) = command.visibility {
         app.set_layer_visible(index, visible);
+        ui.request_repaint();
     }
     if let Some(index) = command.rename {
         app.open_layer_rename(index);
@@ -70,12 +103,10 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     } else if let Some((from, to)) = command.reorder {
         app.move_layer_to(from, to);
         app.layer_drag = Some(to);
+        ui.request_repaint();
     }
     if let Some(opacity) = command.opacity {
         app.set_active_layer_opacity(opacity);
-    }
-    if command.new_layer {
-        app.add_layer();
     }
 }
 
@@ -99,15 +130,10 @@ fn controls(
         merge_down: None,
         reorder: None,
         opacity: None,
-        new_layer: false,
     };
-    ui.space(8.0);
-    let row_input = !ui.context_menu_open() && !ui.pointer_over_popup_at(input.mouse_pos);
+    let row_input = ui.enabled() && !ui.context_menu_open() && !ui.pointer_over_popup_at(input.mouse_pos);
     if !row_input {
         *drag = None;
-    }
-    if ui.button("layer_new", "New Layer").clicked() && row_input {
-        command.new_layer = true;
     }
     ui.space(12.0);
 
@@ -183,12 +209,7 @@ fn controls(
         if let Some((_, _, opacity)) = rows.get(active) {
             let mut opacity = *opacity;
             if sliders
-                .draw(
-                    ui,
-                    opacity_id,
-                    &mut opacity,
-                    ValueSlider::percent("Opacity", 0.0),
-                )
+                .draw(ui, opacity_id, &mut opacity, ValueSlider::percent("Opacity", 0.0))
                 .changed()
             {
                 command.opacity = Some(opacity);
@@ -215,7 +236,7 @@ mod tests {
     ) -> mega_ui::UiOutput {
         app.input.mouse_pos = position;
         app.input.mouse_pressed = pressed && !right;
-        app.input.mouse_down = pressed && !right;
+        app.input.mouse_down = !right && !released && (pressed || app.input.mouse_down);
         app.input.mouse_released = released && !right;
         app.input.mouse_right_pressed = pressed && right;
         app.input.mouse_right_down = pressed && right;
@@ -224,7 +245,7 @@ mod tests {
             viewport: Vec2::new(400.0, 900.0),
             mouse_pos: position,
             mouse_pressed: pressed && !right,
-            mouse_down: pressed && !right,
+            mouse_down: app.input.mouse_down,
             mouse_released: released && !right,
             mouse_right_pressed: pressed && right,
             mouse_right_down: pressed && right,
@@ -256,13 +277,21 @@ mod tests {
         (ui, app, output)
     }
 
-    fn first_eye(output: &mega_ui::UiOutput) -> mega_ui::Rect {
+    fn eyes(output: &mega_ui::UiOutput) -> impl Iterator<Item = mega_ui::Rect> + '_ {
         output
             .draw_list
             .iter()
-            .find(|c| (c.rect.width() - 16.0).abs() < 0.1 && (c.rect.height() - 16.0).abs() < 0.1)
-            .unwrap()
-            .rect
+            .filter(|c| {
+                c.kind == 0.0
+                    && c.uv_min != c.uv_max
+                    && (c.rect.width() - 16.0).abs() < 0.1
+                    && (c.rect.height() - 16.0).abs() < 0.1
+            })
+            .map(|c| c.rect)
+    }
+
+    fn first_eye(output: &mega_ui::UiOutput) -> mega_ui::Rect {
+        eyes(output).next().unwrap()
     }
 
     #[test]
@@ -353,6 +382,7 @@ mod tests {
             .filter(|c| {
                 c.kind == eye.kind
                     && c.tex == eye.tex
+                    && c.uv_min != c.uv_max
                     && (c.rect.width() - 16.0).abs() < 0.1
                     && (c.rect.height() - 16.0).abs() < 0.1
             })
@@ -365,6 +395,53 @@ mod tests {
         panel_frame(&mut ui, &mut app, position, true, false, false);
         panel_frame(&mut ui, &mut app, position, false, true, false);
         assert_eq!(app.project().layers.len(), 3);
+    }
+
+    #[test]
+    fn layer_grid_allows_layer_panel_edits() {
+        let (mut ui, mut app, output) = setup();
+        let checkbox = output
+            .draw_list
+            .iter()
+            .find(|c| {
+                c.kind != 0.0
+                    && (c.rect.width() - 16.0).abs() < 0.1
+                    && (c.rect.height() - 16.0).abs() < 0.1
+            })
+            .unwrap()
+            .rect;
+        let toggle = (checkbox.min + checkbox.max) * 0.5;
+        panel_frame(&mut ui, &mut app, toggle, true, false, false);
+        let output = panel_frame(&mut ui, &mut app, toggle, false, true, false);
+        assert!(app.layer_grid_active());
+
+        let mut eyes = eyes(&output);
+        let top_eye = eyes.next().unwrap();
+        let bottom_eye = eyes.next().unwrap();
+        let eye = (top_eye.min + top_eye.max) * 0.5;
+        panel_frame(&mut ui, &mut app, eye, true, false, false);
+        panel_frame(&mut ui, &mut app, eye, false, true, false);
+        assert!(!app.project().layers[1].visible);
+        panel_frame(&mut ui, &mut app, eye, true, false, false);
+        panel_frame(&mut ui, &mut app, eye, false, true, false);
+        assert!(app.project().layers[1].visible);
+
+        let top_layer = app.project().layers[1].id.clone();
+        let from = Vec2::new(90.0, eye.y);
+        let to = Vec2::new(90.0, (bottom_eye.min.y + bottom_eye.max.y) * 0.5);
+        panel_frame(&mut ui, &mut app, from, true, false, false);
+        panel_frame(&mut ui, &mut app, to, false, false, false);
+        panel_frame(&mut ui, &mut app, to, false, true, false);
+        assert_eq!(app.project().layers[0].id, top_layer);
+
+        let new_layer = Vec2::new(100.0, 22.0);
+        panel_frame(&mut ui, &mut app, new_layer, true, false, false);
+        panel_frame(&mut ui, &mut app, new_layer, false, true, false);
+        assert_eq!(app.project().layers.len(), 3);
+
+        panel_frame(&mut ui, &mut app, toggle, true, false, false);
+        panel_frame(&mut ui, &mut app, toggle, false, true, false);
+        assert!(!app.layer_grid_active());
     }
 
     #[test]

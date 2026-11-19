@@ -281,6 +281,7 @@ pub fn prepare_minimax_r2v(
             graph[&id]["inputs"]["image"] = filename.clone().into();
         } else {
             graph.as_object_mut().unwrap().remove(&id);
+            remove_scalers_of(&mut graph, &id);
             graph[&r2v]["inputs"]
                 .as_object_mut()
                 .ok_or("MiniMax H3 Reference to Video has no inputs")?
@@ -564,8 +565,8 @@ mod tests {
         assert!(node_id(&graph, "LoadImage4").is_err());
         assert_eq!(graph[node_id(&graph, "RefImageSize").unwrap()]["inputs"]["image"], "size.webp");
         assert!(graph[&r2v]["inputs"].get("ref_images.ref_image_0").is_none());
-        assert_eq!(graph[&r2v]["inputs"]["ref_images.ref_image_1"], serde_json::json!(["139", 0]));
-        assert_eq!(graph[&r2v]["inputs"]["ref_images.ref_image_2"], serde_json::json!(["149", 0]));
+        assert_eq!(graph[&r2v]["inputs"]["ref_images.ref_image_1"], serde_json::json!(["161", 0]));
+        assert_eq!(graph[&r2v]["inputs"]["ref_images.ref_image_2"], serde_json::json!(["160", 0]));
         assert!(graph[&r2v]["inputs"].get("ref_images.ref_image_3").is_none());
         assert!(node_id(&graph, "LoadVideo1").is_err());
         assert!(node_id(&graph, "LoadVideo2").is_err());
@@ -575,8 +576,9 @@ mod tests {
         assert!(graph[&r2v]["inputs"].get("ref_video_audios.ref_video_audio_1").is_none());
         assert_eq!(graph[node_id(&graph, "Boolean (Enable Lightning LoRA)").unwrap()]["inputs"]["value"], true);
         let scalers = node_ids(&graph, "Megapixels").unwrap();
-        assert_eq!(scalers.len(), 1, "scalers of removed videos are dropped");
-        assert_eq!(graph[&scalers[0]]["inputs"]["megapixels"], Value::from(0.4_f32));
+        // Size reference plus the two kept images; scalers of removed images and videos are dropped.
+        assert_eq!(scalers.len(), 3);
+        assert!(scalers.iter().all(|id| graph[id]["inputs"]["megapixels"] == Value::from(0.4_f32)));
         for node in graph.as_object().unwrap().values() {
             for input in node["inputs"].as_object().unwrap().values() {
                 if let Some(link) = input.as_array() {
@@ -604,6 +606,7 @@ mod tests {
         );
         assert!(node_id(&graph, "LoadVideo2").is_err());
         let scalers = node_ids(&graph, "Megapixels").unwrap();
+        // Size reference plus the one kept video.
         assert_eq!(scalers.len(), 2);
         assert!(scalers.iter().all(|id| graph[id]["inputs"]["megapixels"] == Value::from(0.9_f32)));
         assert_eq!(

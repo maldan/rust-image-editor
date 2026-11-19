@@ -107,8 +107,10 @@ pub struct EditorApp {
     /// Video documents as last saved or opened; a difference means unsaved changes.
     video_snapshot: Vec<crate::video_document_file::VideoRecord>,
     pub(crate) effect_dialog: Option<ui::clip_effects::Dialog>,
+    pub(crate) effect_key_drag: Option<ui::clip_effects::KeyStripDrag>,
     pub(crate) effect_clipboard: Vec<crate::video_effects::ClipEffect>,
     pub(crate) video_transform_clipboard: Option<crate::video_document::ClipTransform>,
+    pub(crate) layer_grid: ui::layer_grid::LayerGrid,
 }
 
 impl Default for EditorApp {
@@ -118,6 +120,22 @@ impl Default for EditorApp {
 }
 
 impl EditorApp {
+    pub(crate) fn layer_grid_active(&self) -> bool {
+        self.layer_grid.document.as_deref() == Some(self.workspace.active_doc().id.as_str())
+            && self.project().animation.is_none()
+            && self.session.preview_asset.is_none()
+            && !self.session.preview_graph
+            && self.video_editor.active.is_none()
+    }
+
+    pub(crate) fn open_layer_grid(&mut self) {
+        self.layer_grid = ui::layer_grid::LayerGrid {
+            document: Some(self.workspace.active_doc().id.clone()),
+            max_per_row: self.layer_grid.max_per_row,
+            ..Default::default()
+        };
+    }
+
     pub fn new(initial: Option<PathBuf>) -> Self {
         let mut app = Self {
             nodes: Default::default(),
@@ -166,8 +184,10 @@ impl EditorApp {
             video_editor: Default::default(),
             video_snapshot: Vec::new(),
             effect_dialog: None,
+            effect_key_drag: None,
             effect_clipboard: Vec::new(),
             video_transform_clipboard: None,
+            layer_grid: Default::default(),
         };
         match crate::editor_settings::EditorSettings::load() {
             Ok(settings) => app.settings = settings,
@@ -335,12 +355,17 @@ impl EditorApp {
 
     pub fn canvas_view(&self) -> Option<CanvasView> {
         let (width, height) = self.display_size()?;
+        let (pan, zoom, rotation) = if self.layer_grid_active() {
+            (self.layer_grid.pan, self.layer_grid.zoom?, self.layer_grid.rotation.to_radians())
+        } else {
+            (self.session.pan, self.session.zoom, self.session.rotation.to_radians())
+        };
         Some(CanvasView {
             center: self.session.canvas_rect.min
                 + rect_size(self.session.canvas_rect) * 0.5
-                + self.session.pan,
-            zoom: self.session.zoom,
-            rotation: self.session.rotation.to_radians(),
+                + pan,
+            zoom,
+            rotation,
             width,
             height,
         })
@@ -350,16 +375,22 @@ impl EditorApp {
         if !self.session.canvas_rect.contains(self.input.mouse_pos) {
             return;
         }
+        let (pan, zoom) = if self.layer_grid_active() {
+            let Some(zoom) = self.layer_grid.zoom.as_mut() else { return };
+            (&mut self.layer_grid.pan, zoom)
+        } else {
+            (&mut self.session.pan, &mut self.session.zoom)
+        };
         if self.input.mouse_middle_down {
-            self.session.pan += self.input.mouse_delta;
+            *pan += self.input.mouse_delta;
         }
         if self.input.scroll_delta.y.abs() > 0.01 {
-            let old_zoom = self.session.zoom;
+            let old_zoom = *zoom;
             let factor = (self.input.scroll_delta.y * 0.002).exp();
-            self.session.zoom = (self.session.zoom * factor).clamp(0.05, 32.0);
+            *zoom = (*zoom * factor).clamp(0.05, 32.0);
             let center = self.session.canvas_rect.min + rect_size(self.session.canvas_rect) * 0.5;
-            let cursor_from_image_center = self.input.mouse_pos - center - self.session.pan;
-            self.session.pan -= cursor_from_image_center * (self.session.zoom / old_zoom - 1.0);
+            let cursor_from_image_center = self.input.mouse_pos - center - *pan;
+            *pan -= cursor_from_image_center * (*zoom / old_zoom - 1.0);
         }
     }
 

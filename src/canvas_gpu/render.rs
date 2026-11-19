@@ -126,6 +126,32 @@ impl CanvasRenderer {
             contrast: 0.0,
             _bc_pad: [0.0; 2],
         };
+        if let Some(cells) = &overlay.layer_grid {
+            let half_size = Vec2::from(view_u.image_size) * (0.5 * view.zoom);
+            let (sin, cos) = view.rotation.sin_cos();
+            let half_bounds = half_size * cos.abs()
+                + Vec2::new(half_size.y, half_size.x) * sin.abs();
+            for &(index, center) in cells {
+                let Some(Some(gpu)) = self.layers.get(index) else {
+                    continue;
+                };
+                let bounds = Rect { min: center - half_bounds, max: center + half_bounds };
+                if bounds.intersect(canvas_rect).is_none() {
+                    continue;
+                }
+                let mut uniforms = view_u;
+                uniforms.center = center.into();
+                uniforms.opacity = overlay.layers[index].opacity.clamp(0.0, 1.0);
+                apply_layer_adjustments(&mut uniforms, &overlay, index);
+                queue.write_buffer(&gpu.uniform, 0, bytemuck::bytes_of(&uniforms));
+                pass.set_pipeline(&self.checker_pipeline);
+                pass.set_bind_group(0, &gpu.bind_group, &[]);
+                pass.draw(0..6, 0..1);
+                pass.set_pipeline(&self.layer_pipeline);
+                pass.draw(0..6, 0..1);
+            }
+            return;
+        }
         queue.write_buffer(&self.view_uniform_buf, 0, bytemuck::bytes_of(&view_u));
 
         pass.set_pipeline(&self.checker_pipeline);
@@ -272,16 +298,7 @@ impl CanvasRenderer {
                 u.zoom *= scale;
             }
             u.opacity = layer.opacity.clamp(0.0, 1.0);
-            if let Some((index, adjustment)) = overlay.hsv {
-                if index == i {
-                    u.hue = adjustment.hue;
-                    u.saturation = adjustment.saturation;
-                    u.value = adjustment.value;
-                }
-            }
-            if let Some((index, adjustment)) = overlay.brightness_contrast {
-                if index == i { u.brightness = adjustment.brightness; u.contrast = adjustment.contrast; }
-            }
+            apply_layer_adjustments(&mut u, &overlay, i);
             queue.write_buffer(&gpu.uniform, 0, bytemuck::bytes_of(&u));
             pass.set_bind_group(0, &gpu.bind_group, &[]);
             pass.draw(0..6, 0..1);
@@ -402,5 +419,21 @@ impl CanvasRenderer {
         pass.set_bind_group(0, &self.solid_bind_group, &[]);
         pass.set_vertex_buffer(0, self.solid_vertex_buf.slice(..));
         pass.draw(0..verts.len() as u32, 0..1);
+    }
+}
+
+fn apply_layer_adjustments(u: &mut ViewUniforms, overlay: &CanvasOverlay, layer: usize) {
+    if let Some((index, adjustment)) = overlay.hsv
+        && index == layer
+    {
+        u.hue = adjustment.hue;
+        u.saturation = adjustment.saturation;
+        u.value = adjustment.value;
+    }
+    if let Some((index, adjustment)) = overlay.brightness_contrast
+        && index == layer
+    {
+        u.brightness = adjustment.brightness;
+        u.contrast = adjustment.contrast;
     }
 }

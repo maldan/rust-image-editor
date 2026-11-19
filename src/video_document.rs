@@ -80,6 +80,7 @@ pub enum CanvasDragKind {
 
 pub struct CanvasDrag {
     pub index: usize,
+    pub key: Option<usize>,
     pub mouse: Vec2,
     pub transform: ClipTransform,
     pub kind: CanvasDragKind,
@@ -93,6 +94,7 @@ pub struct VideoDocument {
     pub height: i32,
     pub fps: i32,
     pub duration: f64,
+    pub background: [f32; 4],
     pub playhead: f64,
     pub preview_zoom: f32,
     pub preview_pan: Vec2,
@@ -114,6 +116,7 @@ impl VideoDocument {
             height: 1080,
             fps: 24,
             duration: 30.0,
+            background: crate::video_document_file::DEFAULT_BACKGROUND,
             playhead: 0.0,
             preview_zoom: 1.0,
             preview_pan: Vec2::ZERO,
@@ -139,6 +142,7 @@ impl VideoDocument {
                 fps: self.fps,
                 duration: self.duration,
                 lane_count: self.lane_count,
+                background: self.background,
                 clips: self.clips.iter().map(|clip| ClipData {
                     asset: clip.asset.id.clone(),
                     lane: clip.range.lane,
@@ -162,6 +166,7 @@ impl VideoDocument {
         doc.fps = data.fps;
         doc.duration = data.duration;
         doc.lane_count = data.lane_count;
+        doc.background = data.background;
         let mut missing = 0;
         for clip in &data.clips {
             let Some(asset) = videos.iter().find(|video| video.id == clip.asset) else {

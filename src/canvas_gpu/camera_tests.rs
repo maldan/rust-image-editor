@@ -46,7 +46,7 @@ fn camera_gpu_matches_export_for_pan_zoom_depth_fade_and_hidden_preview() {
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-    for camera in [
+    let cameras = [
         Some(CameraKey::default()),
         Some(CameraKey {
             pan: [16.0, -8.0],
@@ -67,7 +67,10 @@ fn camera_gpu_matches_export_for_pan_zoom_depth_fade_and_hidden_preview() {
             ..Default::default()
         }),
         None,
-    ] {
+    ];
+    for (camera, grid) in cameras.into_iter().map(|camera| (camera, false))
+        .chain([(None, true)])
+    {
         let mut encoder = device.create_command_encoder(&Default::default());
         let target_view = target.create_view(&Default::default());
         {
@@ -94,12 +97,15 @@ fn camera_gpu_matches_export_for_pan_zoom_depth_fade_and_hidden_preview() {
                 Rect::from_min_size(Vec2::ZERO, Vec2::splat(64.0)),
                 CanvasView {
                     center: Vec2::splat(32.0),
-                    zoom: 1.0,
+                    zoom: if grid { 0.375 } else { 1.0 },
                     rotation: 0.0,
                     width: 64,
                     height: 64,
                 },
                 CanvasOverlay {
+                    layer_grid: grid.then(|| {
+                        vec![(0, Vec2::new(16.0, 32.0)), (1, Vec2::new(48.0, 32.0))]
+                    }),
                     camera: camera.map(|k| (k, project.layers.iter().map(|l| l.z).collect())),
                     layers: project
                         .layers
@@ -143,12 +149,21 @@ fn camera_gpu_matches_export_for_pan_zoom_depth_fade_and_hidden_preview() {
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         rx.recv().unwrap().unwrap();
         let data = buffer.slice(..).get_mapped_range().unwrap();
-        let expected = crate::camera::render_frame(&project, camera.unwrap_or_default());
-        for (i, (a, b)) in data.iter().zip(&expected).enumerate() {
-            assert!(
-                a.abs_diff(*b) <= 2,
-                "camera {camera:?}, byte {i}: GPU {a}, export {b}"
-            );
+        if grid {
+            let pixel = |x: usize| &data[(32 * 256 + x * 4)..][..4];
+            assert!(pixel(16).iter().zip([240, 60, 20, 255]).all(|(a, b)| a.abs_diff(b) <= 1));
+            assert_eq!(pixel(32), [0, 0, 0, 0]);
+            let right = pixel(48);
+            assert!(right[2] > right[0]);
+            assert_eq!(right[3], 255);
+        } else {
+            let expected = crate::camera::render_frame(&project, camera.unwrap_or_default());
+            for (i, (a, b)) in data.iter().zip(&expected).enumerate() {
+                assert!(
+                    a.abs_diff(*b) <= 2,
+                    "camera {camera:?}, byte {i}: GPU {a}, export {b}"
+                );
+            }
         }
         drop(data);
         buffer.unmap();

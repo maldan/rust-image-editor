@@ -1,6 +1,8 @@
 use super::ai_dialog::choose;
+use super::{preview_select, reference_picker::{self, LayerPreviews, ReferencePicker}};
 use crate::app::EditorApp;
 use crate::prompt_preset::PromptKind;
+use crate::workspace::Workspace;
 use glam::Vec2;
 use mega_ui::{ScrollAxes, Ui, Window};
 
@@ -317,7 +319,8 @@ fn draw_refs(ui: &mut Ui, app: &mut EditorApp, i2v: bool) {
     if i2v {
         let _ = draw_document_refs(
             ui,
-            &app.workspace.documents,
+            &mut app.workspace,
+            &mut app.ai.reference_picker,
             &mut app.ai.i2v_refs,
             "i2v",
             &["First", "Last"],
@@ -326,7 +329,8 @@ fn draw_refs(ui: &mut Ui, app: &mut EditorApp, i2v: bool) {
     } else {
         if let Some(index) = draw_document_refs(
             ui,
-            &app.workspace.documents,
+            &mut app.workspace,
+            &mut app.ai.reference_picker,
             &mut app.ai.r2v_refs,
             "r2v",
             &[
@@ -351,13 +355,18 @@ pub(super) fn append_reference_tag(prompt: &mut String, kind: &str, index: usize
 
 pub(crate) fn draw_document_refs(
     ui: &mut Ui,
-    documents: &[crate::workspace::Document],
+    workspace: &mut Workspace,
+    picker: &mut ReferencePicker,
     refs: &mut [super::ai_dialog::VideoRef],
     prefix: &str,
     labels: &[&str],
     required_first: bool,
 ) -> Option<usize> {
     let mut insert_reference = None;
+    workspace.prepare_thumb_atlas();
+    let tag_button = matches!(prefix, "r2v" | "refs");
+    let field_width = ((ui.available_size().x - ui.scale() * if tag_button { 164.0 } else { 96.0 })
+        * 0.5).clamp(56.0 * ui.scale(), 198.0 * ui.scale());
     if required_first {
         refs[0].enabled = true;
     }
@@ -375,39 +384,154 @@ pub(crate) fn draw_document_refs(
                     &mut refs[i].enabled,
                 );
             }
-            let names: Vec<_> = documents.iter().map(|d| d.name.as_str()).collect();
-            let mut doc_index = documents
+            let mut doc_index = workspace.documents
                 .iter()
                 .position(|d| d.id == refs[i].document_id)
                 .unwrap_or(0);
-            if ui
-                .select(&format!("{prefix}_document_{i}"), &mut doc_index, &names)
-                .changed()
-            {
-                refs[i].document_id = documents[doc_index].id.clone();
-                refs[i].layer = None;
-            }
-            if let Some(doc) = documents.get(doc_index) {
-                let mut sources = vec!["Whole document".to_string()];
-                sources.extend(doc.project.layers.iter().map(|l| format!("Layer: {}", l.name)));
-                let options: Vec<_> = sources.iter().map(String::as_str).collect();
-                let mut source = refs[i]
-                    .layer
-                    .map_or(0, |layer| layer + 1)
-                    .min(options.len() - 1);
-                if ui
-                    .select(&format!("{prefix}_layer_{i}"), &mut source, &options)
-                    .changed()
-                {
-                    refs[i].layer = source.checked_sub(1);
+            ui.flex_width(field_width, |ui| {
+                let Some(doc) = workspace.documents.get(doc_index) else {
+                    ui.label("No documents");
+                    return;
+                };
+                if let Some(index) = preview_select::show(
+                    ui, &mut picker.open, &format!("{prefix}_document_{i}"), &doc.name, |ui, _| {
+                        workspace.documents.iter().enumerate().find_map(|(index, doc)| {
+                            preview_select::row(
+                                ui, &doc.id, &doc.name, index == doc_index,
+                                reference_picker::document_preview(workspace, index), false,
+                            ).then_some(index)
+                        })
+                    },
+                ) {
+                    doc_index = index;
+                    if refs[i].document_id != workspace.documents[index].id {
+                        refs[i].document_id = workspace.documents[index].id.clone();
+                        refs[i].layer = None;
+                    }
                 }
+            });
+            if let Some(doc) = workspace.documents.get(doc_index) {
+                let selected = refs[i].layer.filter(|&index| index < doc.project.layers.len());
+                let title = selected.map_or_else(
+                    || "Whole document".into(),
+                    |index| format!("Layer: {}", doc.project.layers[index].name),
+                );
+                ui.flex_width(field_width, |ui| {
+                    if let Some(source) = preview_select::show(
+                        ui, &mut picker.open, &format!("{prefix}_layer_{i}"), &title,
+                        |ui, opening| {
+                            if opening || picker.layers.is_none() {
+                                picker.layers = Some(LayerPreviews::load(workspace, doc_index));
+                            }
+                            if preview_select::row(
+                                ui, "whole", "Whole document", selected.is_none(),
+                                reference_picker::document_preview(workspace, doc_index), false,
+                            ) {
+                                return Some(0);
+                            }
+                            let previews = match picker.layers.as_ref()? {
+                                Ok(previews) => previews,
+                                Err(error) => {
+                                    ui.label(error);
+                                    return None;
+                                }
+                            };
+                            workspace.documents[doc_index].project.layers.iter().enumerate().rev()
+                                .find_map(|(index, layer)| {
+                                    preview_select::row(
+                                        ui, &layer.id, &layer.name, selected == Some(index),
+                                        previews.preview(index), !layer.visible,
+                                    ).then_some(index + 1)
+                                })
+                        },
+                    ) {
+                        refs[i].layer = source.checked_sub(1);
+                    }
+                });
             }
-            if matches!(prefix, "r2v" | "refs")
-                && ui.button(&format!("{prefix}_ref_tag_{i}"), "R").clicked()
+            if tag_button && ui.button(&format!("{prefix}_ref_tag_{i}"), "R").clicked()
             {
                 insert_reference = Some(i);
             }
         });
     }
     insert_reference
+}
+
+#[cfg(test)]
+mod reference_picker_tests {
+    use super::*;
+    use crate::ui::ai_dialog::VideoRef;
+    use mega_ui::{UiInput, UiOutput};
+
+    #[test]
+    fn selects_document_and_topmost_hidden_layer_from_preview_rows() {
+        let mut workspace = Workspace::default();
+        let target = workspace.add_document("Reference document");
+        workspace.documents[target].project.import_rgba(&[200, 50, 40, 255], 1, 1).unwrap();
+        workspace.documents[target].project.add_layer();
+        workspace.documents[target].project.layers[1].visible = false;
+        let mut refs = [VideoRef {
+            enabled: true,
+            document_id: workspace.documents[0].id.clone(),
+            layer: Some(0),
+        }];
+        let mut picker = ReferencePicker::default();
+        let mut ui = Ui::new();
+        ui.load_builtin_icons();
+
+        let mut frame = |pointer: Vec2, pressed: bool, released: bool, escape: bool| -> UiOutput {
+            ui.begin_frame(UiInput {
+                viewport: Vec2::new(1200.0, 900.0),
+                mouse_pos: pointer,
+                mouse_pressed: pressed,
+                mouse_down: pressed,
+                mouse_released: released,
+                key_escape: escape,
+                ..Default::default()
+            });
+            ui.horizontal(|ui| ui.flex_width(650.0, |ui| {
+                draw_document_refs(ui, &mut workspace, &mut picker, &mut refs, "r2v", &["Reference 1"], false);
+            }));
+            ui.end_frame()
+        };
+
+        let document_field = Vec2::new(145.0, 14.0);
+        frame(document_field, true, false, false);
+        let output = frame(document_field, false, true, false);
+        let document_thumb = output.draw_list.iter()
+            .filter(|command| command.tex == crate::host::THUMB_ATLAS)
+            .nth(target).expect("each visible row draws its thumbnail").rect;
+        assert!(document_thumb.min.y < 140.0, "thumbnail is outside its row");
+        assert_eq!(document_thumb.width(), 54.0);
+        assert_eq!(document_thumb.height(), 54.0);
+        assert!(output.draw_list.iter().any(|command| {
+            command.kind == 0.0
+                && command.uv_min != command.uv_max
+                && command.rect.min.x > document_thumb.max.x
+                && command.rect.min.y >= document_thumb.min.y
+                && command.rect.max.y <= document_thumb.max.y
+        }), "document name is outside its row");
+        let document_thumb = (document_thumb.min + document_thumb.max) * 0.5;
+        frame(document_thumb, true, false, false);
+        frame(document_thumb, false, true, false);
+
+        let layer_field = Vec2::new(345.0, 14.0);
+        frame(layer_field, true, false, false);
+        let output = frame(layer_field, false, true, false);
+        let layer_thumb = output.draw_list.iter()
+            .find(|command| command.kind == 1.0 && command.tex != crate::host::THUMB_ATLAS)
+            .unwrap().rect;
+        let layer_thumb = (layer_thumb.min + layer_thumb.max) * 0.5;
+        frame(layer_thumb, true, false, false);
+        frame(layer_thumb, false, true, false);
+
+        frame(layer_field, true, false, false);
+        frame(layer_field, false, true, false);
+        let output = frame(Vec2::ZERO, false, false, true);
+        assert!(output.draw_list.iter().all(|command| command.kind != 1.0));
+        assert!(picker.open.is_none());
+        assert_eq!(refs[0].document_id, workspace.documents[target].id);
+        assert_eq!(refs[0].layer, Some(1));
+    }
 }

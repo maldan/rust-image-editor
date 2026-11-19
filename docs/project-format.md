@@ -125,6 +125,7 @@ Kind: `mega-image-editor/manifest+json`
 | `fps`       | частота кадров документа                                                                                                                                                          |
 | `duration`  | длительность, секунды                                                                                                                                                             |
 | `laneCount` | число дорожек (lane)                                                                                                                                                              |
+| `background` | цвет фона холста как массив RGBA в диапазоне 0–1. Поле необязательно, по умолчанию используется тёмный фон |
 | `clips`     | список клипов                                                                                                                                                                     |
 
 Клип: `asset` (`VideoMeta.id`), `lane`, `start`, `sourceIn`, `sourceOut`

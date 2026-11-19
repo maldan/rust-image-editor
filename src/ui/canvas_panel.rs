@@ -4,10 +4,15 @@ use mega_ui::Ui;
 pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     let mut resize = false;
     let mut trim = false;
+    let grid = app.layer_grid_active();
+    let (zoom, rotation) = if grid {
+        (app.layer_grid.zoom.unwrap_or(1.0), &mut app.layer_grid.rotation)
+    } else {
+        (app.session.zoom, &mut app.session.rotation)
+    };
     ui.space(8.0);
-    ui.label(&format!("Zoom: {:.0}%", app.session.zoom * 100.0));
+    ui.label(&format!("Zoom: {:.0}%", zoom * 100.0));
     ui.space(8.0);
-    let rotation = &mut app.session.rotation;
     ui.label("Rotation");
     ui.drag_float("canvas_rotation", rotation, 1.0);
     if rotation.abs() > 3600.0 {

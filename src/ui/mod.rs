@@ -2,12 +2,15 @@
 
 pub mod ai_dialog;
 mod prompt_presets;
+mod preview_select;
+mod reference_picker;
 pub mod ai_settings;
 pub mod editor_settings;
 mod animation_dialog;
 mod asset_properties;
 mod assets_panel;
 mod canvas;
+pub(crate) mod layer_grid;
 mod nodes;
 mod canvas_panel;
 mod camera_panel;
@@ -184,7 +187,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                     }
                 }
                 "Tool Options" => {
-                    let image_ready = app.image_size.is_some();
+                    let image_ready = app.image_size.is_some() && !app.layer_grid_active();
                     if let Some(horizontal) = tool_options::draw(ui, &mut app.session, image_ready, &mut app.value_sliders) {
                         app.flip_transform(horizontal);
                     }
@@ -227,6 +230,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
             ui.spacer();
             if app.video_editor.active.is_some() {
                 ui.label("Wheel: zoom · Shift+wheel: tracks · Middle drag: pan");
+            } else if app.layer_grid_active() {
+                ui.label("Middle drag: pan · Wheel: zoom");
             } else {
                 ui.label("Middle drag: pan · Wheel: zoom · Ctrl+S: save · Ctrl+Z/Y: undo/redo · Ctrl+X/C/V: cut/copy/paste · Delete: erase selection");
             }
@@ -369,7 +374,7 @@ fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
     if let Some(index) = action.clone_doc {
         app.duplicate_document(index);
     }
-    if let Some(index) = action.place_asset {
+    if let Some(index) = action.place_asset && !app.layer_grid_active() {
         app.place_asset(index, ui);
     }
     if let Some(index) = action.delete_asset {
