@@ -1,4 +1,4 @@
-use super::workflow::{LoraSelection, node_id};
+use super::workflow::{LoraSelection, node_id, node_ids};
 use serde_json::Value;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -239,6 +239,22 @@ fn validate_r2v_custom_size(width: i32, height: i32) -> Result<(), String> {
     Ok(())
 }
 
+/// Drops pixel scalers fed by a removed node so no dangling link is left behind.
+fn remove_scalers_of(graph: &mut Value, source: &str) {
+    let orphans: Vec<String> = graph
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, node)| {
+            node["class_type"] == "ImageScaleToTotalPixels" && node["inputs"]["image"][0] == source
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in orphans {
+        graph.as_object_mut().unwrap().remove(&id);
+    }
+}
+
 pub fn prepare_minimax_r2v(
     images: [Option<String>; 4],
     videos: [Option<(String, bool)>; 2],
@@ -283,6 +299,7 @@ pub fn prepare_minimax_r2v(
             }
         } else {
             graph.as_object_mut().unwrap().remove(&id);
+            remove_scalers_of(&mut graph, &id);
             let inputs = graph[&r2v]["inputs"]
                 .as_object_mut()
                 .ok_or("MiniMax H3 Reference to Video has no inputs")?;
@@ -292,8 +309,12 @@ pub fn prepare_minimax_r2v(
     }
     let size_id = node_id(&graph, "RefImageSize")?;
     graph[&size_id]["inputs"]["image"] = size_filename.into();
+    // The workflow scales the size reference and each reference video with its own
+    // "Megapixels" node; all of them share the one requested value.
+    for id in node_ids(&graph, "Megapixels")? {
+        graph[&id]["inputs"]["megapixels"] = megapixels.into();
+    }
     for (title, key, value) in [
-        ("Megapixels", "megapixels", megapixels.into()),
         ("Prompt", "value", prompt.into()),
         ("Duration", "value", seconds.into()),
         ("RandomNoise", "noise_seed", seed.into()),
@@ -553,6 +574,9 @@ mod tests {
         assert!(graph[&r2v]["inputs"].get("ref_video_audios.ref_video_audio_0").is_none());
         assert!(graph[&r2v]["inputs"].get("ref_video_audios.ref_video_audio_1").is_none());
         assert_eq!(graph[node_id(&graph, "Boolean (Enable Lightning LoRA)").unwrap()]["inputs"]["value"], true);
+        let scalers = node_ids(&graph, "Megapixels").unwrap();
+        assert_eq!(scalers.len(), 1, "scalers of removed videos are dropped");
+        assert_eq!(graph[&scalers[0]]["inputs"]["megapixels"], Value::from(0.4_f32));
         for node in graph.as_object().unwrap().values() {
             for input in node["inputs"].as_object().unwrap().values() {
                 if let Some(link) = input.as_array() {
@@ -579,6 +603,9 @@ mod tests {
             "clip.mp4"
         );
         assert!(node_id(&graph, "LoadVideo2").is_err());
+        let scalers = node_ids(&graph, "Megapixels").unwrap();
+        assert_eq!(scalers.len(), 2);
+        assert!(scalers.iter().all(|id| graph[id]["inputs"]["megapixels"] == Value::from(0.9_f32)));
         assert_eq!(
             graph[node_id(&graph, "RefImageSize").unwrap()]["inputs"]["image"],
             "size.webp"
@@ -586,7 +613,7 @@ mod tests {
         assert_eq!(
             graph[node_id(&graph, "MiniMax H3 Reference to Video").unwrap()]["inputs"]
                 ["ref_videos.ref_video_0"],
-            serde_json::json!(["151", 0])
+            serde_json::json!(["157", 0])
         );
         assert!(
             graph[node_id(&graph, "MiniMax H3 Reference to Video").unwrap()]["inputs"]
@@ -609,6 +636,10 @@ mod tests {
             1,
         )
         .unwrap();
+        for id in node_ids(&full, "Megapixels").unwrap() {
+            assert_eq!(full[&id]["inputs"]["megapixels"], Value::from(0.9_f32));
+            full[&id]["inputs"]["megapixels"] = original[&id]["inputs"]["megapixels"].clone();
+        }
         for (title, key) in [
             ("LoadImage1", "image"),
             ("LoadImage2", "image"),
@@ -618,7 +649,6 @@ mod tests {
             ("LoadVideo1", "video"),
             ("LoadVideo2", "video"),
             ("Prompt", "value"),
-            ("Megapixels", "megapixels"),
             ("Duration", "value"),
             ("RandomNoise", "noise_seed"),
             ("Boolean (Enable Lightning LoRA)", "value"),

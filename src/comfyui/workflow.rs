@@ -366,6 +366,24 @@ fn prepare_sd(
     Ok((graph, output))
 }
 
+/// Ids of every node with this title, for controls a workflow intentionally repeats
+/// (for example several "Megapixels" scalers that must share one value). At least one is required.
+pub fn node_ids(graph: &Value, title: &str) -> Result<Vec<String>, String> {
+    let graph = graph
+        .as_object()
+        .ok_or("Workflow must be an API prompt object")?;
+    let mut ids: Vec<_> = graph
+        .iter()
+        .filter(|(_, node)| node["_meta"]["title"] == title)
+        .map(|(id, _)| id.clone())
+        .collect();
+    if ids.is_empty() {
+        return Err(format!("Workflow requires a node titled {title}"));
+    }
+    ids.sort();
+    Ok(ids)
+}
+
 pub fn node_id(graph: &Value, title: &str) -> Result<String, String> {
     let graph = graph
         .as_object()
