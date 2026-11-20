@@ -81,6 +81,7 @@ Kind: `mega-image-editor/manifest+json`
 | `id`, `name` | идентификатор и имя       |
 | `path`       | обычно `/videos/{id}.mp4` |
 | `preview`    | постер WebP, если есть    |
+| `aiMetadata` | необязательные метаданные генерации видео (`prompt` и `model`) |
 
 ### DocumentMeta
 

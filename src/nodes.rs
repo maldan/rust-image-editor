@@ -163,14 +163,14 @@ pub struct PreparedOutput {
 
 pub enum GraphOutput {
     Image(PreparedOutput),
-    Video(Vec<u8>),
+    Video(Vec<u8>, crate::project::AiMetadata),
 }
 
 impl GraphOutput {
     fn into_image(self) -> Result<PreparedOutput, String> {
         match self {
             Self::Image(image) => Ok(image),
-            Self::Video(_) => Err("Expected an image output".into()),
+            Self::Video(..) => Err("Expected an image output".into()),
         }
     }
 }
@@ -595,8 +595,8 @@ pub fn evaluate_graph(
                 )?;
                 match wait_graph_job(job, cancel, &node.id, live_preview, node_progress)? {
                     crate::comfyui::JobResult::Done(image) if !generation.is_video() => image,
-                    crate::comfyui::JobResult::Video(bytes) if generation.is_video() => {
-                        return Ok(GraphOutput::Video(bytes));
+                    crate::comfyui::JobResult::Video(bytes, metadata) if generation.is_video() => {
+                        return Ok(GraphOutput::Video(bytes, metadata));
                     }
                     _ => return Err("Unexpected generation result".into()),
                 }
@@ -662,7 +662,7 @@ fn wait_graph_job(
             }
             Some(crate::comfyui::JobResult::Failed(error)) => return Err(error),
             Some(crate::comfyui::JobResult::Cancelled) => return Err("Cancelled".into()),
-            Some(result @ crate::comfyui::JobResult::Video(_)) => return Ok(result),
+            Some(result @ crate::comfyui::JobResult::Video(..)) => return Ok(result),
             None => std::thread::sleep(std::time::Duration::from_millis(50)),
         }
     }

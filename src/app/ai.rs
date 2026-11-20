@@ -1142,7 +1142,7 @@ impl EditorApp {
                 self.ai.fraction = None;
                 self.ai.result = Some(image);
             }
-            crate::comfyui::JobResult::Video(bytes) => {
+            crate::comfyui::JobResult::Video(bytes, metadata) => {
                 self.ai.fraction = None;
                 if self.ai.mode == AiMode::Animation {
                     let (width, height) = self
@@ -1161,7 +1161,7 @@ impl EditorApp {
                     AiMode::MinimaxR2V => "Minimax H3 R2V",
                     _ => "Ltx 2.3 I2V",
                 };
-                match self.workspace.add_video_named(bytes, stem) {
+                match self.workspace.add_video_with_metadata(bytes, stem, Some(metadata)) {
                     Ok(index) => {
                         self.dirty = true;
                         self.status =

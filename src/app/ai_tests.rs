@@ -1550,7 +1550,7 @@ fn minimax_i2v_opens_from_menu_and_names_the_video_asset() {
     assert!(app.ai.catalog_load.is_none());
     let bytes = b"\0\0\0\x18ftypisomtest video bytes".to_vec();
     app.ai.job = Some(crate::comfyui::Job::with_result(
-        crate::comfyui::JobResult::Video(bytes.clone()),
+        crate::comfyui::JobResult::Video(bytes.clone(), Default::default()),
     ));
     app.poll_ai(&mut Ui::new());
     assert_eq!(app.workspace.videos.len(), 1);
@@ -1621,7 +1621,7 @@ fn minimax_r2v_opens_with_required_first_ref_and_names_the_video_asset() {
     assert!(!app.ai.r2v_custom_size);
     let bytes = b"\0\0\0\x18ftypisomtest video bytes".to_vec();
     app.ai.job = Some(crate::comfyui::Job::with_result(
-        crate::comfyui::JobResult::Video(bytes.clone()),
+        crate::comfyui::JobResult::Video(bytes.clone(), Default::default()),
     ));
     app.poll_ai(&mut Ui::new());
     assert_eq!(app.workspace.videos[0].name, "Minimax H3 R2V 1.mp4");
@@ -1662,13 +1662,19 @@ fn video_completion_adds_asset_without_inserting_an_image_layer() {
     app.ai.mode = AiMode::Video;
     app.ai.document_id = "other-document".into();
     let bytes = b"\0\0\0\x18ftypisomtest video bytes".to_vec();
+    let metadata = crate::project::AiMetadata {
+        prompt: "Original video prompt".into(),
+        model: "ltx-2.3-22b-dev-fp8.safetensors".into(),
+    };
+    app.ai.video_settings.prompt = "A later prompt".into();
     app.ai.job = Some(crate::comfyui::Job::with_result(
-        crate::comfyui::JobResult::Video(bytes.clone()),
+        crate::comfyui::JobResult::Video(bytes.clone(), metadata.clone()),
     ));
     let layers = app.project().layers.len();
     app.poll_ai(&mut Ui::new());
     assert_eq!(app.workspace.videos.len(), 1);
     assert_eq!(app.workspace.videos[0].read().unwrap(), bytes);
+    assert_eq!(app.workspace.videos[0].ai_metadata.as_ref(), Some(&metadata));
     assert_eq!(app.project().layers.len(), layers);
     assert!(app.ai.result.is_none());
     assert!(app.ai.job.is_none());
@@ -1793,6 +1799,7 @@ fn animation_completion_decodes_into_layer_frames_instead_of_a_video() {
     app.ai.job = Some(crate::comfyui::Job::with_result(
         crate::comfyui::JobResult::Video(
             include_bytes!("../../tests/fixtures/video-preview.mp4").to_vec(),
+            Default::default(),
         ),
     ));
     let mut ui = Ui::new();

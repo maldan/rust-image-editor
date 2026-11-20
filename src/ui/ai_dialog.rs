@@ -329,10 +329,7 @@ impl AiDialog {
         let model = if self.mode.uses_sd() { self.draw_settings.model.clone() } else { None }
             .or_else(|| {
                 let graph: serde_json::Value = serde_json::from_str(template).ok()?;
-                graph.as_object()?.values().find_map(|node| {
-                    ["ckpt_name", "unet_name"].iter()
-                        .find_map(|key| node["inputs"][key].as_str().map(str::to_owned))
-                })
+                workflow::workflow_model(&graph)
             }).unwrap_or_default();
         let prompt = if self.mode.uses_video() {
             self.video_settings.prompt.clone()

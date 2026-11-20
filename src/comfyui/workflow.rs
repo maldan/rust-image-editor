@@ -368,6 +368,14 @@ fn prepare_sd(
 
 /// Ids of every node with this title, for controls a workflow intentionally repeats
 /// (for example several "Megapixels" scalers that must share one value). At least one is required.
+pub(crate) fn workflow_model(graph: &Value) -> Option<String> {
+    graph.as_object()?.values().find_map(|node| {
+        ["ckpt_name", "unet_name"]
+            .iter()
+            .find_map(|key| node["inputs"][key].as_str().map(str::to_owned))
+    })
+}
+
 pub fn node_ids(graph: &Value, title: &str) -> Result<Vec<String>, String> {
     let graph = graph
         .as_object()

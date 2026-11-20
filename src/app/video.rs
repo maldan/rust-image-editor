@@ -136,7 +136,9 @@ impl EditorApp {
         self.video_editor.refresh_assets(&self.workspace.videos);
         if let Some(result) = self.video_trim.job.as_ref().and_then(|job| job.poll()) {
             let job = self.video_trim.job.take().unwrap();
-            match result.and_then(|bytes| self.workspace.add_video_named(bytes, &job.name)) {
+            match result.and_then(|bytes| {
+                self.workspace.add_video_with_metadata(bytes, &job.name, job.ai_metadata.clone())
+            }) {
                 Ok(_) => {
                     self.dirty = true;
                     self.status = "Trimmed video added to assets".into();

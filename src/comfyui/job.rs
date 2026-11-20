@@ -6,6 +6,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use super::{HostConfig, client::Client};
+use crate::project::AiMetadata;
 use image::RgbaImage;
 
 #[derive(Default)]
@@ -17,7 +18,7 @@ pub struct Progress {
 
 pub enum JobResult {
     Done(RgbaImage),
-    Video(Vec<u8>),
+    Video(Vec<u8>, AiMetadata),
     Failed(String),
     Cancelled,
 }
@@ -682,13 +683,14 @@ fn run(
         } => comfy_seed(*seed),
         _ => comfy_seed(0),
     };
-    let video = matches!(
-        &request,
-        Request::Input {
-            workflow: InputWorkflow::Video { .. } | InputWorkflow::MinimaxI2V { .. },
-            ..
-        } | Request::MinimaxR2V { .. }
-    );
+    let video_prompt = match &request {
+        Request::Input { workflow: InputWorkflow::Video { settings, .. }, .. } => {
+            Some(settings.prompt.clone())
+        }
+        Request::Input { workflow: InputWorkflow::MinimaxI2V { prompt, .. }, .. }
+        | Request::MinimaxR2V { prompt, .. } => Some(prompt.clone()),
+        _ => None,
+    };
     let (graph, save_node) = match request {
         Request::QwenDraw(settings) => super::workflow::prepare_qwen_draw(&settings, seed)?,
         Request::AnimeDraw(settings) => super::workflow::prepare_anime(None, &settings, 1.0, seed)?,
@@ -892,6 +894,11 @@ fn run(
             }
         }
     };
+    let video_metadata = video_prompt.map(|prompt| AiMetadata {
+        prompt,
+        model: super::workflow::workflow_model(&graph).unwrap_or_default(),
+    });
+    let video = video_metadata.is_some();
     super::ws::listen(
         config,
         client_id.clone(),
@@ -922,8 +929,8 @@ fn run(
                 client.download(&output)?
             };
             check_cancel(cancel)?;
-            return if video {
-                Ok(JobResult::Video(bytes))
+            return if let Some(metadata) = video_metadata {
+                Ok(JobResult::Video(bytes, metadata))
             } else {
                 super::decode_image(&bytes).map(JobResult::Done)
             };
@@ -1084,7 +1091,10 @@ mod tests {
         loop {
             if let Some(result) = job.poll() {
                 match result {
-                    JobResult::Video(bytes) => assert_eq!(bytes, expected),
+                    JobResult::Video(bytes, metadata) => {
+                        assert_eq!(bytes, expected);
+                        assert!(!metadata.model.is_empty());
+                    }
                     JobResult::Failed(error) => panic!("{error}"),
                     _ => panic!("Expected video"),
                 }
@@ -1178,7 +1188,7 @@ mod tests {
                         assert!(image.width() > 0 && image.height() > 0);
                         return;
                     }
-                    JobResult::Video(_) => panic!("Unexpected video"),
+                    JobResult::Video(..) => panic!("Unexpected video"),
                     JobResult::Failed(e) => panic!("{e}"),
                     JobResult::Cancelled => panic!("Unexpected cancellation"),
                 }
@@ -1216,7 +1226,7 @@ mod tests {
                         assert!(requested);
                         return;
                     }
-                    JobResult::Video(_) => panic!("Unexpected video"),
+                    JobResult::Video(..) => panic!("Unexpected video"),
                     JobResult::Failed(e) => panic!("{e}"),
                     JobResult::Done(_) => panic!("Cancelled result must not be delivered"),
                 }

@@ -43,6 +43,8 @@ struct VideoMeta {
     id: String,
     name: String,
     path: String,
+    #[serde(default, rename = "aiMetadata", skip_serializing_if = "Option::is_none")]
+    ai_metadata: Option<crate::project::AiMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     preview: Option<String>,
 }
@@ -51,6 +53,7 @@ struct VideoMeta {
 pub struct VideoAsset {
     pub id: String,
     pub name: String,
+    pub ai_metadata: Option<crate::project::AiMetadata>,
     pub byte_size: u64,
     pub thumb: Vec<u8>,
     pub info: Option<crate::video::VideoInfo>,
@@ -64,6 +67,7 @@ impl VideoAsset {
         Self {
             id: String::new(),
             name: String::new(),
+            ai_metadata: None,
             byte_size: bytes.len() as u64,
             thumb: Vec::new(),
             info: None,
@@ -556,6 +560,15 @@ impl Workspace {
     }
 
     pub fn add_video_named(&mut self, bytes: Vec<u8>, stem: &str) -> Result<usize, String> {
+        self.add_video_with_metadata(bytes, stem, None)
+    }
+
+    pub fn add_video_with_metadata(
+        &mut self,
+        bytes: Vec<u8>,
+        stem: &str,
+        ai_metadata: Option<crate::project::AiMetadata>,
+    ) -> Result<usize, String> {
         if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
             return Err("Invalid MP4 data".into());
         }
@@ -563,6 +576,7 @@ impl Workspace {
         let index = self.videos.len();
         self.videos.push(VideoAsset {
             name: format!("{stem} {}.mp4", index + 1),
+            ai_metadata,
             id,
             byte_size: bytes.len() as u64,
             thumb: Vec::new(),
@@ -1068,6 +1082,7 @@ impl Workspace {
             video_metas.push(VideoMeta {
                 id: video.id.clone(),
                 name: video.name.clone(),
+                ai_metadata: video.ai_metadata.clone(),
                 path: video_path,
                 preview,
             });
@@ -1556,6 +1571,7 @@ impl Workspace {
                 Ok(VideoAsset {
                     id: meta.id.clone(),
                     name: meta.name.clone(),
+                    ai_metadata: meta.ai_metadata.clone(),
                     byte_size,
                     thumb,
                     info: None,
@@ -2074,6 +2090,11 @@ mod tests {
         let bytes = b"\0\0\0\x18ftypisomtest video bytes".to_vec();
         let mut workspace = Workspace::default();
         assert!(workspace.add_video(vec![0; 20]).is_err());
+        let metadata = crate::project::AiMetadata {
+            prompt: "A slow camera pan\nacross the scene".into(),
+            model: "ltx-2.3-22b-dev-fp8.safetensors".into(),
+        };
+        workspace.add_video_with_metadata(bytes.clone(), "Generated", Some(metadata.clone())).unwrap();
         workspace.add_video(bytes.clone()).unwrap();
         let poster = vec![127; (THUMB_SIZE * THUMB_SIZE * 4) as usize];
         let id = workspace.videos[0].id.clone();
@@ -2083,6 +2104,8 @@ mod tests {
         assert_eq!(archive.read_all("/videos/video_2.mp4").unwrap(), bytes);
         let mut loaded = Workspace::open(&path).unwrap();
         assert!(loaded.videos[0].bytes.is_none());
+        assert_eq!(loaded.videos[0].ai_metadata.as_ref(), Some(&metadata));
+        assert!(loaded.videos[1].ai_metadata.is_none());
         assert_eq!(loaded.videos[0].thumb, poster);
         assert!(!loaded.videos[0].inspection_attempted);
         let before = fs::read(&path).unwrap();
@@ -2094,6 +2117,7 @@ mod tests {
         let mut copied = Workspace::open(&copy).unwrap();
         assert_eq!(copied.videos[0].read().unwrap(), bytes);
         assert_eq!(copied.videos[0].thumb, poster);
+        assert_eq!(copied.videos[0].ai_metadata.as_ref(), Some(&metadata));
         copied.videos.clear();
         copied.save(&copy).unwrap();
         copied.optimize().unwrap();

@@ -1,4 +1,5 @@
 use crate::app::EditorApp;
+use glam::Vec2;
 use mega_ui::Ui;
 
 pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
@@ -32,6 +33,22 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     };
     if ui.button("video_export", "Export MP4...").clicked() {
         app.export_video(index, ui);
+    }
+    let video = &app.workspace.videos[index];
+    if let Some(metadata) = &video.ai_metadata {
+        ui.collapsing_header(&format!("video_ai_metadata_{}", video.id), "AI Metadata", |ui| {
+            if !metadata.model.is_empty() {
+                ui.label("Model");
+                let mut model = metadata.model.clone();
+                ui.text_input("model", &mut model);
+            }
+            if !metadata.prompt.is_empty() {
+                ui.label("Prompt");
+                // Preserve text selection and clipboard support without storing edits.
+                let mut prompt = metadata.prompt.clone();
+                ui.text_area("prompt", &mut prompt, Vec2::new(0.0, 110.0 * ui.scale()));
+            }
+        });
     }
     ui.space(8.0);
     let Some(player) = app.video_playback() else {

@@ -16,6 +16,7 @@ pub fn validate_range(start: f64, end: f64, duration: f64) -> Result<(), String>
 
 pub struct TrimJob {
     pub name: String,
+    pub ai_metadata: Option<crate::project::AiMetadata>,
     control: Arc<DecoderControl>,
     receiver: mpsc::Receiver<Result<Vec<u8>, String>>,
 }
@@ -27,6 +28,7 @@ impl TrimJob {
             asset.name.trim_end_matches(".mp4")
         );
         let control = Arc::new(DecoderControl::default());
+        let ai_metadata = asset.ai_metadata.clone();
         let worker = control.clone();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
@@ -34,6 +36,7 @@ impl TrimJob {
         });
         Self {
             name,
+            ai_metadata,
             control,
             receiver,
         }

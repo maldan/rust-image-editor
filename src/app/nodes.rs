@@ -241,8 +241,10 @@ impl EditorApp {
                     result.and_then(|result| {
                         let result = match result {
                             GraphOutput::Image(image) => image,
-                            GraphOutput::Video(bytes) => {
-                                let index = self.workspace.add_video_named(bytes, "Ltx 2.3 I2V")?;
+                            GraphOutput::Video(bytes, metadata) => {
+                                let index = self.workspace.add_video_with_metadata(
+                                    bytes, "Ltx 2.3 I2V", Some(metadata),
+                                )?;
                                 self.dirty = true;
                                 return Ok(format!("Video saved: {}", self.workspace.videos[index].name));
                             }
@@ -673,7 +675,11 @@ mod tests {
         });
         let bytes = include_bytes!("../../tests/fixtures/video-preview.mp4");
         let (sender, receiver) = mpsc::channel();
-        sender.send(Ok(GraphOutput::Video(bytes.to_vec()))).unwrap();
+        let metadata = crate::project::AiMetadata {
+            prompt: "Graph video prompt".into(),
+            model: "ltx-2.3-22b-dev-fp8.safetensors".into(),
+        };
+        sender.send(Ok(GraphOutput::Video(bytes.to_vec(), metadata.clone()))).unwrap();
         app.nodes.run = Some(Run {
             node: "node_3".into(),
             destination: None,
@@ -687,6 +693,7 @@ mod tests {
         });
         app.poll_nodes(&mut Ui::new());
         assert_eq!(app.workspace.videos[0].read().unwrap(), bytes);
+        assert_eq!(app.workspace.videos[0].ai_metadata.as_ref(), Some(&metadata));
         assert_eq!(app.workspace.documents.len(), 1);
         assert!(app.dirty);
     }
