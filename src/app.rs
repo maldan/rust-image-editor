@@ -28,6 +28,7 @@ mod layers;
 mod graphs;
 mod nodes;
 mod rename;
+mod screen_capture;
 mod video;
 pub(crate) use rename::RenameTarget;
 mod scene;
@@ -103,6 +104,7 @@ pub struct EditorApp {
     video_preview: Option<crate::video::Playback>,
     video_poster: Option<crate::video::PosterJob>,
     pub(crate) video_trim: video::TrimState,
+    screen_capture: screen_capture::State,
     pub(crate) video_editor: crate::video_document::VideoEditor,
     /// Video documents as last saved or opened; a difference means unsaved changes.
     video_snapshot: Vec<crate::video_document_file::VideoRecord>,
@@ -181,6 +183,7 @@ impl EditorApp {
             video_preview: None,
             video_poster: None,
             video_trim: Default::default(),
+            screen_capture: Default::default(),
             video_editor: Default::default(),
             video_snapshot: Vec::new(),
             effect_dialog: None,

@@ -295,6 +295,7 @@ pub trait Scene {
         Self::title().into()
     }
     fn init(ui: &mut Ui);
+    fn attach_window(&mut self, _window: &Arc<Window>) {}
     fn ui_scale(&self) -> f32 { 1.0 }
     /// Raw input for editor-owned UI components, before scene shortcuts are filtered.
     fn prepare_ui_input(&mut self, _input: &FrameInput) {}
@@ -498,6 +499,7 @@ impl<S: Scene> Host<S> {
             canvas_target,
             canvas_target_view,
         });
+        self.scene.attach_window(&window);
         self.window = Some(window);
     }
 

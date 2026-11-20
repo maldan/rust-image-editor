@@ -16,6 +16,8 @@ mod project;
 mod nodes;
 mod prompt_preset;
 mod safe_save;
+#[cfg(windows)]
+mod screen_capture;
 mod tiles;
 mod ui;
 mod video;

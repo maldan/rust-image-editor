@@ -3,6 +3,10 @@ use crate::raster::Raster;
 
 impl EditorApp {
     pub fn request_new_project(&mut self, ui: &mut Ui) {
+        if self.screen_recording_active() {
+            self.show_error(ui, "Finish screen recording before switching projects".into());
+            return;
+        }
         if self.prompt_if_unsaved(UnsavedAction::NewProject) {
             return;
         }
@@ -469,6 +473,10 @@ impl EditorApp {
     }
 
     pub fn request_open_project(&mut self, ui: &mut Ui) {
+        if self.screen_recording_active() {
+            self.show_error(ui, "Finish screen recording before switching projects".into());
+            return;
+        }
         if self.prompt_if_unsaved(UnsavedAction::OpenProject) {
             return;
         }

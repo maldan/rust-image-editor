@@ -3,6 +3,10 @@ use super::*;
 impl Scene for EditorApp {
     fn request_close(&mut self) -> crate::host::ClosePoll {
         use crate::host::ClosePoll;
+        if self.screen_recording_active() {
+            self.status = "Finish screen recording before closing the editor".into();
+            return ClosePoll::Abort;
+        }
         if self.close_aborted {
             self.close_aborted = false;
             return ClosePoll::Abort;
@@ -47,6 +51,11 @@ impl Scene for EditorApp {
         ui.set_theme(Theme::dark());
         ui.load_builtin_icons();
         crate::ui::load_tool_icons(ui);
+    }
+
+    #[cfg(windows)]
+    fn attach_window(&mut self, window: &std::sync::Arc<winit::window::Window>) {
+        self.screen_capture.window = std::sync::Arc::downgrade(window);
     }
 
     fn ui_scale(&self) -> f32 {
@@ -98,6 +107,8 @@ impl Scene for EditorApp {
         self.poll_all_graphs(ui);
         self.poll_ai(ui);
         self.poll_video(ui);
+        #[cfg(windows)]
+        self.poll_screen_capture(ui);
         if let Some(error) = self.video_editor.tick(self.input.dt) {
             self.status = error;
         }

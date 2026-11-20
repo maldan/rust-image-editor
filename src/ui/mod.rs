@@ -193,6 +193,17 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                     }
                 }
                 "Library" => {
+                    #[cfg(windows)]
+                    {
+                        let label = if app.screen_recording_active() {
+                            "Show Recorder"
+                        } else {
+                            "Record Screen…"
+                        };
+                        if ui.button("record_screen", label).clicked() {
+                            app.record_screen(ui);
+                        }
+                    }
                     let action = assets_panel::draw(
                         ui,
                         &mut app.workspace,
