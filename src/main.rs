@@ -16,6 +16,7 @@ mod project;
 mod nodes;
 mod prompt_preset;
 mod safe_save;
+mod scene_3d;
 #[cfg(windows)]
 mod screen_capture;
 mod tiles;

@@ -814,6 +814,7 @@ fn prepare_image_output(image: &RgbaImage) -> Result<PreparedOutput, String> {
     let layer = Layer {
         id: crate::project::new_layer_id(),
         identity: Default::default(),
+        kind: Default::default(),
         ai_metadata: None,
         z: 0.0,
         drawings: Default::default(),

@@ -4,6 +4,7 @@ use mega_ui::{Rect, TextStyle, Ui};
 use crate::app::RenameTarget;
 use crate::host::{FrameInput, THUMB_ATLAS};
 use crate::nodes::{NodeEditor, NodeKind};
+use crate::scene_3d::{SceneEditor, THUMB_TEXTURE, ThumbnailLayout};
 use crate::video_document::VideoEditor;
 use crate::workspace::{LibraryKind, THUMB_VIEW, ThumbDrag, VideoAsset, Workspace};
 
@@ -34,16 +35,16 @@ pub struct LibraryDrag {
 
 #[derive(Default)]
 pub struct LibraryAction {
-    pub new_video_document: bool,
+    pub open_new_document: bool,
     pub open_video_document: Option<usize>,
     pub delete_video_document: Option<usize>,
-    pub drop_video: Option<usize>,
+    pub open_scene_document: Option<usize>,
+    pub delete_scene_document: Option<usize>,
+    pub place_scene: Option<usize>,
+    pub drop_timeline_asset: Option<ThumbDrag>,
     pub reorder: Option<(LibraryKind, String, usize)>,
     pub import: bool,
     pub import_clipboard: bool,
-    pub new_document: bool,
-    pub new_animation: bool,
-    pub new_graph: bool,
     pub switch_graph: Option<usize>,
     pub clone_graph: Option<usize>,
     pub delete_graph: Option<usize>,
@@ -65,6 +66,7 @@ pub fn draw(
     workspace: &mut Workspace,
     active_graph: Option<&NodeEditor>,
     video_editor: &VideoEditor,
+    scene_editor: &SceneEditor,
     input: &FrameInput,
     drop_target: Rect,
     graph_mode: bool,
@@ -104,26 +106,7 @@ pub fn draw(
             }
         });
     });
-    ui.horizontal(|ui| {
-        ui.flex(0.5, |ui| {
-            if ui.button("doc_new", "New Image").clicked() {
-                action.new_document = true;
-            }
-        });
-        ui.flex(1.0, |ui| {
-            if ui.button("animation_new", "New Animation").clicked() {
-                action.new_animation = true;
-            }
-        });
-    });
-    ui.horizontal(|ui| {
-        ui.flex(0.5, |ui| {
-            action.new_video_document = ui.button("video_doc_new", "New Video").clicked();
-        });
-        ui.flex(1.0, |ui| {
-            action.new_graph = ui.button("graph_new", "New Graph").clicked();
-        });
-    });
+    action.open_new_document = ui.button("doc_new", "New Document…").clicked();
     ui.space(8.0);
 
     let mut switch_doc: Option<usize> = None;
@@ -326,7 +309,7 @@ pub fn draw(
         ui.tree_node_icon_open(
             "documents_root",
             "folder",
-            &format!("Documents ({document_count})"),
+            &format!("Documents ({})", document_count + video_editor.documents.len() + scene_editor.documents.len()),
             true,
             |ui| {
                 for (group_id, label, group) in [
@@ -474,6 +457,38 @@ pub fn draw(
                         }
                     },
                 );
+                ui.tree_node_icon_open(
+                    "document_scenes_root",
+                    "folder",
+                    &format!("3D Scenes ({})", scene_editor.documents.len()),
+                    true,
+                    |ui| {
+                        let layout = ThumbnailLayout::new(scene_editor.documents.len());
+                        for (index, doc) in scene_editor.documents.iter().enumerate() {
+                            let id = format!("scene_document_{index}");
+                            let selected = scene_editor.active == Some(index);
+                            let mut thumbnail_pressed = false;
+                            let response = item_row(ui, &id, selected, &doc.name, "", meta_style, |ui| {
+                                let thumb = ui.area("scene_document_thumb", Vec2::splat(thumb_size));
+                                let (uv_min, uv_max) = layout.uv(index);
+                                ui.texture_rect(THUMB_TEXTURE, thumb.rect, uv_min, uv_max);
+                                thumbnail_pressed = row_input && thumb.hovered && input.mouse_pressed;
+                                thumb.rect
+                            }).response;
+                            ui.context_menu(&id, response.hovered, |ui| {
+                                if ui.menu_item("delete", "Delete").clicked() {
+                                    action.delete_scene_document = Some(index);
+                                }
+                            });
+                            if thumbnail_pressed || (row_input && response.hovered && input.mouse_pressed) {
+                                workspace.begin_thumb_drag(ThumbDrag::Scene(index), input.mouse_pos);
+                            }
+                            if row_input && response.clicked() && !dragging && workspace.asset_drag.is_none() {
+                                action.open_scene_document = Some(index);
+                            }
+                        }
+                    },
+                );
             },
         );
         ui.tree_node_icon_open(
@@ -534,13 +549,19 @@ pub fn draw(
                         .documents
                         .get(index)
                         .map(|_| asset_count + index),
+                    ThumbDrag::Scene(_) => None,
                 };
+                let ghost = mega_ui::Rect::from_min_size(
+                    input.mouse_pos - Vec2::splat(thumb_size * 0.5),
+                    Vec2::splat(thumb_size),
+                );
                 if let Some(cell) = cell {
-                    let ghost = mega_ui::Rect::from_min_size(
-                        input.mouse_pos - Vec2::splat(thumb_size * 0.5),
-                        Vec2::splat(thumb_size),
-                    );
                     draw_thumb(ui, workspace, cell, ghost);
+                } else if let ThumbDrag::Scene(index) = kind
+                    && index < scene_editor.documents.len()
+                {
+                    let (min, max) = ThumbnailLayout::new(scene_editor.documents.len()).uv(index);
+                    ui.texture_rect(THUMB_TEXTURE, ghost, min, max);
                 }
                 ui.request_repaint();
             }
@@ -553,14 +574,15 @@ pub fn draw(
                 && workspace
                     .asset_drag_origin
                     .is_some_and(|origin| input.mouse_pos.distance(origin) < 6.0 * ui.scale());
-            let dropped = workspace.asset_dragging && drop_target.contains(input.mouse_pos);
+            let dropped = workspace.asset_dragging && scene_editor.active.is_none()
+                && drop_target.contains(input.mouse_pos);
             let dropped_on_track = workspace.asset_dragging
                 && video_editor.track.is_some_and(|track| track.lane_at(input.mouse_pos).is_some());
             workspace.clear_asset_drag();
-            if let ThumbDrag::Video(index) = kind {
-                if dropped_on_track {
-                    action.drop_video = Some(index);
-                } else if clicked {
+            if dropped_on_track && matches!(kind, ThumbDrag::Image(_) | ThumbDrag::Video(_)) {
+                action.drop_timeline_asset = Some(kind);
+            } else if let ThumbDrag::Video(index) = kind {
+                if clicked {
                     action.open_video = Some(index);
                 }
             } else if dropped && video_editor.active.is_none() {
@@ -578,12 +600,15 @@ pub fn draw(
                         }
                     }
                     ThumbDrag::Document(_) => {}
+                    ThumbDrag::Scene(index) if !graph_mode => action.place_scene = Some(index),
+                    ThumbDrag::Scene(_) => {}
                 }
             } else if clicked {
                 match kind {
                     ThumbDrag::Video(_) => unreachable!(),
                     ThumbDrag::Image(index) => preview_asset = Some(index),
                     ThumbDrag::Document(index) => switch_doc = Some(index),
+                    ThumbDrag::Scene(index) => action.open_scene_document = Some(index),
                 }
             }
         }
@@ -823,6 +848,50 @@ mod tests {
         assert_eq!(video_metadata(&video), "1.0 KB\n00:02:23 · 29.97 FPS · 1920×1080");
     }
 
+    #[test]
+    fn scene_thumbnail_can_be_dragged_onto_the_image_canvas() {
+        let mut ui = Ui::new();
+        let mut workspace = Workspace::default();
+        let mut scenes = SceneEditor::default();
+        scenes.create();
+        let mut drag = None;
+        let target = Rect::from_min_size(Vec2::new(500.0, 0.0), Vec2::new(300.0, 1000.0));
+        let mut frame = |input: &FrameInput| {
+            ui.begin_frame(mega_ui::UiInput {
+                viewport: Vec2::new(800.0, 1000.0),
+                mouse_pos: input.mouse_pos,
+                mouse_pressed: input.mouse_pressed,
+                mouse_down: input.mouse_down,
+                mouse_released: input.mouse_released,
+                ..Default::default()
+            });
+            let mut action = LibraryAction::default();
+            ui.horizontal(|ui| {
+                ui.flex_width(420.0, |ui| {
+                    action = draw(ui, &mut workspace, None, &VideoEditor::default(),
+                        &scenes, input, target, false, &mut drag);
+                });
+            });
+            (action, ui.end_frame())
+        };
+        let mut input = FrameInput::default();
+        frame(&input);
+        let (_, output) = frame(&input);
+        let rect = output.draw_list.iter().find(|command| command.tex == THUMB_TEXTURE).unwrap().rect;
+        input.mouse_pos = (rect.min + rect.max) * 0.5;
+        input.mouse_pressed = true;
+        input.mouse_down = true;
+        assert!(frame(&input).0.open_scene_document.is_none());
+        input.mouse_pressed = false;
+        input.mouse_pos = Vec2::new(650.0, 350.0);
+        frame(&input);
+        input.mouse_down = false;
+        input.mouse_released = true;
+        let (action, _) = frame(&input);
+        assert_eq!(action.place_scene, Some(0));
+        assert!(action.open_scene_document.is_none());
+    }
+
     fn library_frame(
         ui: &mut Ui,
         workspace: &mut Workspace,
@@ -835,6 +904,17 @@ mod tests {
     fn library_frame_on(
         ui: &mut Ui,
         workspace: &mut Workspace,
+        input: &FrameInput,
+        drag: &mut Option<LibraryDrag>,
+        graph_mode: bool,
+    ) -> (LibraryAction, mega_ui::UiOutput) {
+        library_frame_in(ui, workspace, &VideoEditor::default(), input, drag, graph_mode)
+    }
+
+    fn library_frame_in(
+        ui: &mut Ui,
+        workspace: &mut Workspace,
+        video_editor: &VideoEditor,
         input: &FrameInput,
         drag: &mut Option<LibraryDrag>,
         graph_mode: bool,
@@ -857,7 +937,8 @@ mod tests {
                     ui,
                     workspace,
                     None,
-                    &VideoEditor::default(),
+                    video_editor,
+                    &SceneEditor::default(),
                     input,
                     Rect::from_min_size(Vec2::new(500.0, 0.0), Vec2::new(300.0, 1600.0)),
                     graph_mode,
@@ -866,6 +947,85 @@ mod tests {
             })
         });
         (action, ui.end_frame())
+    }
+
+    #[test]
+    fn dropping_an_image_on_a_video_track_previews_and_saves_it() {
+        use crate::app::EditorApp;
+        use crate::video_document::{ClipDrag, ClipEdit, TrackLayout};
+        use crate::video_document_file::{AssetType, IMAGE_CLIP_VERSION};
+
+        let mut app = EditorApp::default();
+        let pixels = [32, 64, 96, 128];
+        app.workspace.import_asset_rgba("Overlay".into(), &pixels, 1, 1).unwrap();
+        let source = app.workspace.add_video_named(
+            include_bytes!("../../tests/fixtures/video-preview.mp4").to_vec(), "Source",
+        ).unwrap();
+        let mut video = app.workspace.videos[source].clone();
+        video.info = Some(crate::video::VideoInfo { width: 64, height: 48, fps: 4.0, duration: 1.0 });
+        app.new_video_document();
+        assert!(app.video_editor.insert(&video, 0, 0.0, 0.0));
+        assert!(!app.video_editor.insert_image(&app.workspace.assets[0], 0, 0.5, 0.0));
+        let mut ui = Ui::new();
+        ui.load_builtin_icons();
+        let track = Rect::from_min_size(Vec2::new(500.0, 25.0), Vec2::new(300.0, 48.0));
+        app.video_editor.track = Some(TrackLayout { rect: track, top_lane: 0, visible_lanes: 1, row_height: 48.0 });
+
+        let mut drag = None;
+        let mut frame = |ui: &mut Ui, app: &mut EditorApp| {
+            library_frame_in(ui, &mut app.workspace, &app.video_editor, &app.input, &mut drag, false)
+        };
+        let mut output = mega_ui::UiOutput::default();
+        for _ in 0..4 {
+            output = frame(&mut ui, &mut app).1;
+        }
+        let thumb = output.draw_list.iter().find(|c| c.kind == 1.0 && c.tex == THUMB_ATLAS).unwrap().rect;
+        app.input.mouse_pos = (thumb.min + thumb.max) * 0.5;
+        app.input.mouse_pressed = true;
+        app.input.mouse_down = true;
+        frame(&mut ui, &mut app);
+        app.input.mouse_pressed = false;
+        app.input.mouse_pos = track.min + Vec2::new(128.0 * ui.scale(), 24.0);
+        frame(&mut ui, &mut app);
+        app.input.mouse_down = false;
+        app.input.mouse_released = true;
+        let action = frame(&mut ui, &mut app).0;
+        assert!(matches!(action.drop_timeline_asset, Some(ThumbDrag::Image(0))));
+        super::super::apply_library(&mut ui, &mut app, action);
+
+        let doc = app.video_editor.current().unwrap();
+        assert_eq!(doc.clips.len(), 2);
+        let image = &doc.clips[1];
+        assert_eq!((image.range.lane, image.range.start, image.range.end()), (0, 2.0, 5.0));
+        let (index, preview) = app.video_editor.previews[0].frame().unwrap();
+        assert_eq!(index, 1);
+        assert_eq!(preview.as_raw(), &pixels);
+        let trim = ClipDrag { index: 1, edit: ClipEdit::TrimStart, anchor: 2.0, candidate: None };
+        let extended = doc.edit_range(&trim, 0, 1.0, 0.0).unwrap();
+        assert_eq!((extended.start, extended.source_in, extended.end()), (1.0, 0.0, 5.0));
+        app.video_editor.apply_edit(1, extended);
+        let trim = ClipDrag { index: 1, edit: ClipEdit::TrimEnd, anchor: 5.0, candidate: None };
+        let longer = app.video_editor.current().unwrap().edit_range(&trim, 0, 7.0, 0.0).unwrap();
+        assert_eq!((longer.start, longer.source_in, longer.end()), (1.0, 0.0, 7.0));
+        app.video_editor.seek(3.0);
+        app.video_editor.split();
+        let expected = app.video_editor.records();
+        assert_eq!(expected[0].video.version, IMAGE_CLIP_VERSION);
+        for clip in &expected[0].video.clips[1..] {
+            assert_eq!((clip.asset_type, clip.source_in, clip.source_out), (AssetType::Image, 0.0, 2.0));
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.mgimg");
+        app.workspace.path = Some(path.clone());
+        assert!(app.try_save_project(&mut ui));
+        app.open_path(&path).unwrap();
+        assert_eq!(app.video_editor.records(), expected);
+        app.video_editor.open(0);
+        app.video_editor.seek(3.5);
+        let (index, preview) = app.video_editor.previews[0].frame().unwrap();
+        assert_eq!(index, 2);
+        assert_eq!(preview.as_raw(), &pixels);
     }
 
     #[test]
@@ -1352,6 +1512,7 @@ mod tests {
                     &mut workspace,
                     None,
                     &VideoEditor::default(),
+                    &SceneEditor::default(),
                     &FrameInput::default(),
                     Rect::from_min_size(Vec2::ZERO, Vec2::splat(200.0)),
                     false,

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 mega-file = { path = "../../../rust_lib/mega/file" }
+mega-render = { path = "../../../rust_lib/mega/render" }
 mega-ui = { path = "../../../rust_lib/mega/ui", features = ["wgpu"] }
 wgpu = "30"
 winit = "0.30"

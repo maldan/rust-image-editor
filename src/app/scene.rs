@@ -86,6 +86,7 @@ impl Scene for EditorApp {
             || self.unsaved.is_some()
             || self.delete_prompt.is_some()
             || self.effect_dialog.is_some()
+            || self.new_document_open
         {
             let mut blocked = FrameInput::default();
             blocked.key_escape = input.key_escape;
@@ -102,6 +103,7 @@ impl Scene for EditorApp {
 
     fn build(&mut self, ui: &mut Ui, viewport: Vec2, _stats: DrawStats) -> bool {
         self.session.viewport_size = viewport;
+        self.scene_editor.viewport = None;
         self.note_frame(self.input.dt);
         if self.input.key_escape { self.finish_deformation(true); }
         self.poll_all_graphs(ui);
@@ -112,7 +114,14 @@ impl Scene for EditorApp {
         if let Some(error) = self.video_editor.tick(self.input.dt) {
             self.status = error;
         }
-        if !self.nodes.visible && self.video_editor.active.is_none() {
+        if let Some(scene) = self.scene_editor.current_mut() {
+            if self.input.key_undo { scene.undo(); }
+            if self.input.key_redo { scene.redo(); }
+            if self.input.key_delete { scene.delete(); }
+        } else if !self.new_document_open && !self.nodes.visible && self.video_editor.active.is_none() {
+            if self.active_scene_layer() && !self.session.tool.is_select() {
+                self.set_tool(self.session.select_tool);
+            }
             self.handle_tool_hotkeys();
             self.handle_animation_keys();
             self.tick_animation();
@@ -141,10 +150,12 @@ impl Scene for EditorApp {
         }
         self.session.deform_cancel = false;
         self.session.deform_apply = false;
-        if self.video_editor.active.is_none() {
+        if self.video_editor.active.is_none() && self.scene_editor.active.is_none() {
             self.tick_animation_preview();
         }
-        if !self.nodes.visible && self.video_editor.active.is_none() {
+        if !self.new_document_open && !self.nodes.visible && self.video_editor.active.is_none()
+            && self.scene_editor.active.is_none()
+        {
             if cut {
                 self.cut_selection(ui);
             } else if copy {
@@ -160,7 +171,7 @@ impl Scene for EditorApp {
         self.ai.open
             || self.ai_settings.is_some()
             || self.settings_dialog.is_some()
-            || self.animation_playing()
+            || (self.scene_editor.active.is_none() && self.animation_playing())
             || self.hsv.open
             || self.rename.is_some()
             || self.unsaved.is_some()
@@ -174,7 +185,8 @@ impl Scene for EditorApp {
             || self.video_poster.is_some()
             || self.video_trim.job.is_some()
             || self.video_editor.needs_repaint()
-            || (!self.layer_grid_active() && self.session.preview_asset.is_none() && self.session.selection.is_some())
+            || (self.scene_editor.active.is_none() && !self.layer_grid_active()
+                && self.session.preview_asset.is_none() && self.session.selection.is_some())
             || thumb_waiting
             || !self.dirty_tiles.is_empty()
     }
@@ -377,7 +389,7 @@ impl Scene for EditorApp {
     }
 
     fn canvas_present(&self) -> Option<(Rect, CanvasView, CanvasOverlay)> {
-        if self.video_editor.active.is_some() {
+        if self.video_editor.active.is_some() || self.scene_editor.active.is_some() {
             return None;
         }
         let view = self.canvas_view()?;
@@ -473,6 +485,21 @@ impl Scene for EditorApp {
 
     fn canvas_cursor(&self) -> Option<TransformCursor> {
         self.session.canvas_cursor
+    }
+
+    fn scene_present(&self) -> Option<(Rect, &crate::scene_3d::SceneDocument)> {
+        Some((self.scene_editor.viewport?, self.scene_editor.current()?))
+    }
+
+    fn scene_documents(&self) -> &[crate::scene_3d::SceneDocument] {
+        &self.scene_editor.documents
+    }
+
+    fn sync_scene_layers(
+        &mut self,
+        render: &mut dyn FnMut(&crate::scene_3d::SceneDocument, (u32, u32)) -> Result<crate::raster::SparsePixels, String>,
+    ) {
+        self.refresh_scene_layers(render);
     }
 }
 

@@ -32,6 +32,7 @@ mod screen_capture;
 mod video;
 pub(crate) use rename::RenameTarget;
 mod scene;
+mod scene_3d;
 mod session;
 mod tools;
 mod deform;
@@ -75,6 +76,7 @@ pub struct EditorApp {
     /// Smoothed redraw rate. Idle gaps between frames are not included.
     pub fps: f32,
     pub dock: DockState,
+    pub(crate) scene_dock: DockState,
     brush_last: Option<(f32, f32)>,
     /// Shift+drag brush resize: (press origin in screen space, size at press).
     brush_size_drag: Option<(Vec2, f32)>,
@@ -106,6 +108,8 @@ pub struct EditorApp {
     pub(crate) video_trim: video::TrimState,
     screen_capture: screen_capture::State,
     pub(crate) video_editor: crate::video_document::VideoEditor,
+    pub(crate) scene_editor: crate::scene_3d::SceneEditor,
+    pub(crate) new_document_open: bool,
     /// Video documents as last saved or opened; a difference means unsaved changes.
     video_snapshot: Vec<crate::video_document_file::VideoRecord>,
     pub(crate) effect_dialog: Option<ui::clip_effects::Dialog>,
@@ -155,6 +159,7 @@ impl EditorApp {
             status: "Import assets, place them on a document, or resize canvas".into(),
             fps: 0.0,
             dock: ui::default_dock(),
+            scene_dock: ui::default_scene_dock(),
             brush_last: None,
             brush_size_drag: None,
             brush_dirty: false,
@@ -185,6 +190,8 @@ impl EditorApp {
             video_trim: Default::default(),
             screen_capture: Default::default(),
             video_editor: Default::default(),
+            scene_editor: Default::default(),
+            new_document_open: false,
             video_snapshot: Vec::new(),
             effect_dialog: None,
             effect_key_drag: None,
@@ -228,7 +235,7 @@ impl EditorApp {
     }
 
     fn open_color_adjustment(&mut self, brightness_contrast: Option<crate::brightness_contrast::BrightnessContrast>) {
-        if self.camera_visible() { return; }
+        if self.camera_visible() || self.active_scene_layer() { return; }
         if self.ai.open || self.hsv.open || self.project().layers.is_empty() {
             return;
         }
@@ -253,7 +260,7 @@ impl EditorApp {
         }
         let index = self.hsv.layer;
         let adjustment = self.hsv.adjustment;
-        let Some(layer) = self.workspace.active_mut().layers.get_mut(index) else {
+        let Some(layer) = self.workspace.active_mut().layers.get_mut(index).filter(|layer| layer.is_raster()) else {
             return;
         };
         let before = layer.pixels.clone();
@@ -280,6 +287,11 @@ impl EditorApp {
 
     pub fn project_mut(&mut self) -> &mut Project {
         self.workspace.active_mut()
+    }
+
+    pub(crate) fn active_scene_layer(&self) -> bool {
+        let project = self.project();
+        project.layers.get(project.active_layer).is_some_and(|layer| !layer.is_raster())
     }
 
     pub fn brush_last_active(&self) -> bool {
@@ -323,6 +335,7 @@ impl EditorApp {
             return;
         }
         self.video_editor.close_view();
+        self.close_scene_document();
         self.video_preview = None;
         self.commit_transform();
         self.brush_last = None;
@@ -439,6 +452,9 @@ impl EditorApp {
     }
 
     pub fn set_tool(&mut self, tool: Tool) {
+        if self.active_scene_layer() && !tool.is_select() {
+            return;
+        }
         if self.session.tool == tool {
             return;
         }

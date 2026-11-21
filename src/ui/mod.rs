@@ -16,7 +16,9 @@ mod canvas_panel;
 mod camera_panel;
 pub mod hsv_dialog;
 mod menu_bar;
+mod new_document;
 mod project_panel;
+mod scene_3d;
 pub mod rename_dialog;
 pub mod delete_dialog;
 mod unsaved_dialog;
@@ -56,12 +58,25 @@ pub fn default_dock() -> DockState {
     ))
 }
 
+pub(crate) fn default_scene_dock() -> DockState {
+    DockState::new(DockNode::split_h(
+        0.18,
+        DockNode::split_v(0.28, DockNode::leaf(&["Scene Tools"]), DockNode::leaf(&["Library"])),
+        DockNode::split_h(0.70, DockNode::leaf(&["Workspace"]), DockNode::leaf(&["Objects", "Camera"])),
+    ))
+}
+
 fn context_panel(node: &mut DockNode, preview: bool) {
     match node {
         DockNode::Leaf { tabs, .. } => {
             for tab in tabs {
-                if tab == "Layers" || tab == "Properties" {
-                    *tab = if preview { "Properties" } else { "Layers" }.into();
+                let label = match tab.as_str() {
+                    "Layers" | "Properties" if preview => "Properties",
+                    "Layers" | "Properties" => "Layers",
+                    _ => continue,
+                };
+                if *tab != label {
+                    *tab = label.into();
                 }
             }
         }
@@ -148,28 +163,36 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
     let status_h = 24.0 * scale;
 
     let modal_open =
-        app.ai.open || app.ai_settings.is_some() || app.settings_dialog.is_some() || app.hsv.open || app.rename.is_some() || app.unsaved.is_some() || app.delete_prompt.is_some() || app.effect_dialog.is_some();
+        app.ai.open || app.ai_settings.is_some() || app.settings_dialog.is_some() || app.hsv.open || app.rename.is_some() || app.unsaved.is_some() || app.delete_prompt.is_some() || app.effect_dialog.is_some() || app.new_document_open;
     ui.add_enabled(!modal_open, |ui| {
         ui.menu_bar(|ui| {
             menu_bar::draw(ui, app);
         });
 
         let dock_size = Vec2::new(viewport.x, (viewport.y - menu_h - status_h).max(1.0));
-        let mut dock = std::mem::replace(&mut app.dock, DockState::new(DockNode::leaf(&["tmp"])));
         let graph_mode = app.session.preview_graph;
         let preview = app.session.preview_asset.is_some();
         let video_document = app.video_editor.active.is_some();
-        context_panel(&mut dock.root, preview || graph_mode || video_document);
-        clip_effects::dock(&mut dock.root, video_document);
-        camera_dock(&mut dock.root, !preview && !graph_mode && !video_document && app.project().animation.is_some());
-        let hidden_canvas = if preview || graph_mode || video_document { hide_canvas_tabs(&mut dock.root) } else { Vec::new() };
+        let scene_document = app.scene_editor.active;
+        let scene_mode = scene_document.is_some();
+        let active_dock = if scene_mode { &mut app.scene_dock } else { &mut app.dock };
+        let mut dock = std::mem::replace(active_dock, DockState::new(DockNode::leaf(&["tmp"])));
+        let preview_mode = preview || graph_mode || video_document;
+        if !scene_mode {
+            context_panel(&mut dock.root, preview_mode);
+            clip_effects::dock(&mut dock.root, video_document);
+            camera_dock(&mut dock.root, !preview_mode && app.project().animation.is_some());
+        }
+        let hidden_canvas = if !scene_mode && preview_mode { hide_canvas_tabs(&mut dock.root) } else { Vec::new() };
         app.nodes.visible = false;
         app.session.canvas_rect = mega_ui::Rect { min: Vec2::ZERO, max: Vec2::ZERO };
-        ui.dock_space("main", dock_size, &mut dock, |ui, tab| {
+        ui.dock_space(if scene_mode { "scene" } else { "main" }, dock_size, &mut dock, |ui, tab| {
             if tab == "Workspace" {
                 if graph_mode {
                     app.nodes.visible = true;
                     nodes::draw(ui, app);
+                } else if app.scene_editor.active.is_some() {
+                    scene_3d::viewport(ui, app);
                 } else if app.video_editor.active.is_some() {
                     video_timeline::draw(ui, app);
                 } else {
@@ -182,7 +205,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
             let axes = if tab == "Library" || tab == "Effects" { mega_ui::ScrollAxes::Vertical } else { mega_ui::ScrollAxes::Both };
             ui.scroll_area(&format!("dock_scroll_{tab}"), size, axes, |ui| match tab {
                 "Tools" => {
-                    if let Some(tool) = tools_panel::draw(ui, &mut app.session) {
+                    let selection_only = app.active_scene_layer();
+                    if let Some(tool) = tools_panel::draw(ui, &mut app.session, selection_only) {
                         app.set_tool(tool);
                     }
                 }
@@ -192,6 +216,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                         app.flip_transform(horizontal);
                     }
                 }
+                "Scene Tools" => scene_3d::tools(ui, app),
+                "Objects" => scene_3d::objects(ui, app),
                 "Library" => {
                     #[cfg(windows)]
                     {
@@ -209,6 +235,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                         &mut app.workspace,
                         Some(&app.nodes),
                         &app.video_editor,
+                        &app.scene_editor,
                         &app.input,
                         app.session.workspace_rect,
                         graph_mode,
@@ -216,6 +243,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
                     );
                     apply_library(ui, app, action);
                 }
+                "Camera" if scene_mode => scene_3d::camera(ui, app),
                 "Camera" => camera_panel::draw(ui, app),
                 "Canvas" => canvas_panel::draw(ui, app),
                 "Effects" => clip_effects::panel(ui, app),
@@ -228,10 +256,11 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
             });
         });
         restore_canvas_tabs(&mut dock.root, hidden_canvas);
-        app.dock = dock;
+        if scene_mode { app.scene_dock = dock; } else { app.dock = dock; }
         if preview != app.session.preview_asset.is_some()
             || graph_mode != app.session.preview_graph
             || video_document != app.video_editor.active.is_some()
+            || scene_document != app.scene_editor.active
         {
             ui.request_repaint();
         }
@@ -239,7 +268,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
         ui.status_bar(|ui| {
             ui.label(&app.status.clone());
             ui.spacer();
-            if app.video_editor.active.is_some() {
+            if app.scene_editor.active.is_some() {
+                ui.label("Session only · Right drag: orbit · Middle drag: pan · Wheel: zoom · F: frame");
+            } else if app.video_editor.active.is_some() {
                 ui.label("Wheel: zoom · Shift+wheel: tracks · Middle drag: pan");
             } else if app.layer_grid_active() {
                 ui.label("Middle drag: pan · Wheel: zoom");
@@ -250,6 +281,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp, viewport: Vec2) {
             ui.label(&fps);
         });
     });
+    new_document::draw(ui, app);
     ai_dialog::draw(ui, app);
     ai_settings::draw(ui, app);
     editor_settings::draw(ui, app);
@@ -277,26 +309,41 @@ fn add_to_graph(ui: &mut Ui, app: &mut EditorApp, kind: crate::nodes::NodeKind, 
 }
 
 fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
-    if let Some(index) = action.drop_video {
-        if let (Some(track), Some(doc), Some(asset)) = (
-            app.video_editor.track,
-            app.video_editor.current(),
-            app.workspace.videos.get(index),
-        ) && let Some(lane) = track.lane_at(app.input.mouse_pos) {
-            let density = f64::from(doc.pixels_per_second * ui.scale());
-            let seconds = doc.view_start + f64::from(app.input.mouse_pos.x - track.rect.min.x) / density;
-            let radius = f64::from(7.0 * ui.scale()) / density;
-            if asset.info.is_none() {
-                ui.notify_error("Video information is unavailable");
-            } else if !app.video_editor.insert(asset, lane, seconds, radius) {
-                ui.notify_error("Drop the clip on free space");
-            }
+    if let Some(asset) = action.drop_timeline_asset {
+        if let (Some(track), Some(doc)) = (app.video_editor.track, app.video_editor.current())
+            && let Some((lane, seconds, radius)) = track.drop_position(doc, app.input.mouse_pos, ui.scale())
+        {
+            use crate::workspace::ThumbDrag;
+            let inserted = match asset {
+                ThumbDrag::Video(index) => match app.workspace.videos.get(index) {
+                    Some(asset) if asset.info.is_some() => Ok(app.video_editor.insert(asset, lane, seconds, radius)),
+                    _ => Err("Video information is unavailable".into()),
+                },
+                ThumbDrag::Image(index) => app.workspace.ensure_asset_loaded(index).map(|()| {
+                    app.video_editor.insert_image(&app.workspace.assets[index], lane, seconds, radius)
+                }),
+                ThumbDrag::Document(_) | ThumbDrag::Scene(_) => return,
+            };
+            match inserted {
+                Ok(true) => {}
+                Ok(false) => ui.notify_error("Drop the clip on free space"),
+                Err(error) => ui.notify_error(error),
+            };
         }
         ui.request_repaint();
         return;
     }
-    if action.new_video_document {
-        app.new_video_document();
+    if action.open_new_document {
+        app.new_document_open = true;
+        ui.request_repaint();
+    }
+    if let Some(index) = action.open_scene_document {
+        app.show_scene_document(index);
+        ui.request_repaint();
+    }
+    if let Some(index) = action.delete_scene_document {
+        app.delete_scene_document(index);
+        ui.request_repaint();
     }
     if let Some(index) = action.open_video_document {
         app.show_video_document(index);
@@ -349,15 +396,6 @@ fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
     if action.import_clipboard {
         app.import_clipboard_image(ui);
     }
-    if action.new_document {
-        app.new_document();
-    }
-    if action.new_animation {
-        app.new_animation();
-    }
-    if action.new_graph {
-        app.new_graph();
-    }
     if let Some(index) = action.switch_graph {
         app.show_graph(index);
     }
@@ -387,6 +425,10 @@ fn apply_library(ui: &mut Ui, app: &mut EditorApp, action: LibraryAction) {
     }
     if let Some(index) = action.place_asset && !app.layer_grid_active() {
         app.place_asset(index, ui);
+    }
+    if let Some(index) = action.place_scene {
+        app.place_scene_layer(index);
+        ui.request_repaint();
     }
     if let Some(index) = action.delete_asset {
         app.prompt_library_delete(crate::workspace::LibraryKind::Image, index);

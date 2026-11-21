@@ -287,6 +287,9 @@ impl History {
     }
 
     pub fn trim_canvas(&mut self, project: &mut Project) -> bool {
+        if project.layers.iter().any(|layer| !layer.is_raster()) {
+            return false;
+        }
         let Some(bounds) = project.visible_content_bounds() else {
             return false;
         };
@@ -479,6 +482,9 @@ impl History {
     pub fn merge_down(&mut self, project: &mut Project) -> bool {
         let index = project.active_layer;
         if index == 0 || index >= project.layers.len() {
+            return false;
+        }
+        if !project.layers[index - 1..=index].iter().all(|layer| layer.is_raster()) {
             return false;
         }
         let frame = project.animation.as_ref().map(|animation| animation.frame);
@@ -968,6 +974,7 @@ mod tests {
         let layers = vec![crate::project::Layer {
             id: crate::project::new_layer_id(),
             identity: Default::default(),
+            kind: Default::default(),
             ai_metadata: None,
             z: 0.0,
             drawings: Default::default(),
@@ -1012,6 +1019,7 @@ mod tests {
             layers: vec![crate::project::Layer {
                 id: crate::project::new_layer_id(),
                 identity: Default::default(),
+                kind: Default::default(),
                 ai_metadata: None,
                 z: 0.0,
                 drawings: Default::default(),

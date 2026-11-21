@@ -459,6 +459,7 @@ pub enum ThumbDrag {
     Video(usize),
     Image(usize),
     Document(usize),
+    Scene(usize),
 }
 
 pub struct Workspace {
@@ -1090,7 +1091,8 @@ impl Workspace {
         let mut doc_metas = Vec::new();
         for doc in &self.documents {
             let mut layers = Vec::new();
-            for (i, layer) in doc.project.layers.iter().enumerate() {
+            let saved_layers = doc.project.layers.iter().filter(|layer| layer.is_raster());
+            for (i, layer) in saved_layers.clone().enumerate() {
                 let layer_path = format!("/documents/{}/layers/{i}.tiles", doc.id);
                 let fingerprint = doc.deferred.is_none().then(|| layer.pixels.fingerprint());
                 let saved_layer = previous.and_then(|saved| saved.layers.get(&layer_path));
@@ -1160,7 +1162,24 @@ impl Workspace {
                 });
             }
             let preview = format!("/previews/documents/{}.webp", doc.id);
-            save_preview(&preview, &doc.thumb, previous, &mut next, &mut files)?;
+            if layers.len() == doc.project.layers.len() {
+                save_preview(&preview, &doc.thumb, previous, &mut next, &mut files)?;
+            } else {
+                let persistent: Vec<_> = saved_layers.cloned().collect();
+                let (width, height) = (doc.project.width, doc.project.height);
+                let thumb = if persistent.is_empty() {
+                    empty_thumb()
+                } else {
+                    let pixels = crate::editing::composite_layers(&persistent, width, height);
+                    make_thumb(&pixels, width, height)
+                };
+                save_preview(&preview, &thumb, previous, &mut next, &mut files)?;
+            }
+            let active_layer = doc.project.layers.iter()
+                .take(doc.project.active_layer.saturating_add(1))
+                .filter(|layer| layer.is_raster())
+                .count()
+                .saturating_sub(1);
             doc_metas.push(DocumentMeta {
                 version: DOCUMENT_VERSION,
                 kind: if doc.project.animation.is_some() {
@@ -1174,7 +1193,7 @@ impl Workspace {
                 name: doc.name.clone(),
                 width: doc.project.width,
                 height: doc.project.height,
-                active_layer: doc.project.active_layer,
+                active_layer,
                 layers,
                 preview: Some(preview),
             });
@@ -1500,6 +1519,7 @@ impl Workspace {
                         layer_meta.id.clone()
                     },
                     identity: Default::default(),
+                    kind: Default::default(),
                     ai_metadata: layer_meta.ai_metadata.clone(),
                     z: layer_meta.z,
                     drawings: Default::default(),

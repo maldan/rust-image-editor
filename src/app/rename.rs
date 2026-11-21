@@ -3,6 +3,7 @@ use super::*;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RenameTarget {
     Layer { document_id: String, index: usize },
+    SceneObject { scene_id: usize, object_id: usize },
     Image(String),
     Video(String),
     Document(String),
@@ -12,6 +13,7 @@ impl RenameTarget {
     pub fn title(&self) -> &'static str {
         match self {
             Self::Layer { .. } => "Edit Layer",
+            Self::SceneObject { .. } => "Rename Object",
             Self::Image(_) => "Rename Image",
             Self::Video(_) => "Rename Video",
             Self::Document(_) => "Rename Document",
@@ -42,6 +44,10 @@ impl EditorApp {
                 .find(|d| &d.id == document_id)
                 .and_then(|d| d.project.layers.get(*index))
                 .map(|l| &l.name),
+            RenameTarget::SceneObject { scene_id, object_id } => self.scene_editor.documents.iter()
+                .find(|scene| scene.id == *scene_id)
+                .and_then(|scene| scene.objects.items.iter().find(|object| object.id == *object_id))
+                .map(|object| &object.name),
             RenameTarget::Image(id) => self
                 .workspace
                 .assets
@@ -98,6 +104,14 @@ impl EditorApp {
             return;
         }
         let dialog = self.rename.take().unwrap();
+        if let RenameTarget::SceneObject { scene_id, object_id } = &dialog.target {
+            if let Some(scene) = self.scene_editor.documents.iter_mut().find(|scene| scene.id == *scene_id)
+                && scene.rename_object(*object_id, &dialog.original_name, name)
+            {
+                self.status = "Object renamed".into();
+            }
+            return;
+        }
         if let RenameTarget::Layer { document_id, index } = &dialog.target {
             let Some(layer) = self.workspace.documents.iter_mut()
                 .find(|d| &d.id == document_id)
@@ -120,6 +134,7 @@ impl EditorApp {
             return;
         }
         let current = match &dialog.target {
+            RenameTarget::SceneObject { .. } => unreachable!(),
             RenameTarget::Layer { document_id, index } => self
                 .workspace
                 .documents

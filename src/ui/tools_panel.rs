@@ -44,7 +44,7 @@ fn icon(tool: Tool) -> &'static str {
 }
 
 /// Picks a tool. The editor applies it so committing a transform stays outside the panel.
-pub fn draw(ui: &mut Ui, session: &mut DocumentSession) -> Option<Tool> {
+pub fn draw(ui: &mut Ui, session: &mut DocumentSession, selection_only: bool) -> Option<Tool> {
     let mut chosen = None;
     ui.grid(3, |ui| {
         for tool in Tool::toolbar() {
@@ -54,20 +54,22 @@ pub fn draw(ui: &mut Ui, session: &mut DocumentSession) -> Option<Tool> {
                 } else {
                     session.tool == tool
                 };
-                if ui
-                    .selectable(&format!("tool_{}", tool.label()), selected, |ui| {
-                        ui.icon(icon(tool), 24.0);
-                    })
-                    .clicked()
-                {
-                    chosen = Some(if tool.is_select() && session.tool.is_select() {
-                        session.tool
-                    } else if tool.is_select() {
-                        session.select_tool
-                    } else {
-                        tool
-                    });
-                }
+                ui.add_enabled(!selection_only || tool.is_select(), |ui| {
+                    if ui
+                        .selectable(&format!("tool_{}", tool.label()), selected, |ui| {
+                            ui.icon(icon(tool), 24.0);
+                        })
+                        .clicked()
+                    {
+                        chosen = Some(if tool.is_select() && session.tool.is_select() {
+                            session.tool
+                        } else if tool.is_select() {
+                            session.select_tool
+                        } else {
+                            tool
+                        });
+                    }
+                });
             });
         }
     });
@@ -81,13 +83,16 @@ mod tests {
 
     #[test]
     fn toolbar_keeps_one_select_tool_and_restores_last_mode() {
-        assert_eq!(Tool::toolbar(), [
-            Tool::Brush,
-            Tool::RectangleSelect,
-            Tool::Fill,
-            Tool::Transform,
-            Tool::Deform,
-        ]);
+        assert_eq!(
+            Tool::toolbar(),
+            [
+                Tool::Brush,
+                Tool::RectangleSelect,
+                Tool::Fill,
+                Tool::Transform,
+                Tool::Deform,
+            ]
+        );
         let mut app = EditorApp::default();
         app.set_tool(Tool::Lasso);
         app.set_tool(Tool::Fill);

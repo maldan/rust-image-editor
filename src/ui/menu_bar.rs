@@ -3,6 +3,7 @@ use mega_ui::Ui;
 use crate::app::EditorApp;
 
 pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
+    let raster = app.video_editor.active.is_none() && app.scene_editor.active.is_none();
     ui.menu("file", "File", |ui| {
         if ui.menu_item("new", "New Project").clicked() {
             app.request_new_project(ui);
@@ -23,15 +24,21 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         if ui.menu_item("import", "Import Asset…").clicked() {
             app.import_image(ui);
         }
-        if ui.menu_item_enabled("export", "Export PNG…", app.video_editor.active.is_none()).clicked() {
+        if ui.menu_item_enabled("export", "Export PNG…", raster).clicked() {
             app.export_image(ui, false);
         }
-        if ui.menu_item_enabled("export_webp", "Export WebP…", app.video_editor.active.is_none()).clicked() {
+        if ui.menu_item_enabled("export_webp", "Export WebP…", raster).clicked() {
             app.export_image(ui, true);
         }
     });
 
-    if app.video_editor.active.is_some() {
+    if let Some(scene) = app.scene_editor.current_mut() {
+        ui.menu("edit", "Edit", |ui| {
+            if ui.menu_item("undo", "Undo").clicked() { scene.undo(); }
+            if ui.menu_item("redo", "Redo").clicked() { scene.redo(); }
+        });
+    }
+    if !raster {
         return;
     }
 
@@ -45,7 +52,8 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
         ui.separator();
         ui.menu("layer", "Layer", |ui| {
             let index = app.project().active_layer;
-            let can_merge = index > 0 && index < app.project().layers.len();
+            let can_merge = index > 0 && index < app.project().layers.len()
+                && app.project().layers[index - 1..=index].iter().all(|layer| layer.is_raster());
             if ui
                 .menu_item_enabled("merge_down", "Merge Down", can_merge)
                 .clicked()
@@ -68,8 +76,9 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
     });
 
     ui.menu("filter", "Filter", |ui| {
+        let editable = !app.project().layers.is_empty() && !app.active_scene_layer();
         if ui
-            .menu_item_enabled("invert_colors", "Invert", !app.project().layers.is_empty())
+            .menu_item_enabled("invert_colors", "Invert", editable)
             .clicked()
         {
             app.invert_layer();
@@ -78,13 +87,13 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             .menu_item_enabled(
                 "hsv_adjustment",
                 "HSV Adjustment…",
-                !app.project().layers.is_empty(),
+                editable,
             )
             .clicked()
         {
             app.open_hsv();
         }
-        if ui.menu_item_enabled("brightness_contrast", "Brightness / Contrast...", !app.project().layers.is_empty()).clicked() {
+        if ui.menu_item_enabled("brightness_contrast", "Brightness / Contrast...", editable).clicked() {
             app.open_brightness_contrast();
         }
     });
@@ -169,7 +178,7 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
             }
         });
         if ui
-            .menu_item_enabled("fix_alpha", "Fix Alpha", app.image_size.is_some())
+            .menu_item_enabled("fix_alpha", "Fix Alpha", app.image_size.is_some() && !app.active_scene_layer())
             .clicked()
         {
             app.fix_alpha();

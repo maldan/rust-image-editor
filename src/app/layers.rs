@@ -2,7 +2,7 @@ use super::*;
 
 impl EditorApp {
     pub fn invert_layer(&mut self) {
-        if self.camera_visible() { return; }
+        if self.camera_visible() || self.active_scene_layer() { return; }
         if self.ai.open || self.hsv.open || self.project().layers.is_empty() {
             return;
         }
@@ -27,7 +27,7 @@ impl EditorApp {
     }
 
     pub fn fix_alpha(&mut self) {
-        if self.camera_visible() { return; }
+        if self.camera_visible() || self.active_scene_layer() { return; }
         self.commit_transform();
         let layer = self.project().active_layer;
         let Some(pixels) = self
@@ -76,6 +76,10 @@ impl EditorApp {
 
     pub fn merge_layer_down_at(&mut self, index: usize) {
         if index == 0 || index >= self.project().layers.len() {
+            return;
+        }
+        if !self.project().layers[index - 1..=index].iter().all(|layer| layer.is_raster()) {
+            self.status = "Scene layers cannot be merged".into();
             return;
         }
         self.commit_transform();
@@ -207,6 +211,10 @@ impl EditorApp {
     pub fn trim_canvas(&mut self, ui: &mut Ui) {
         if self.project().animation.is_some() {
             self.status = "Use canvas size to resize an animation".into();
+            return;
+        }
+        if self.project().layers.iter().any(|layer| !layer.is_raster()) {
+            self.status = "Use Canvas Size when the document has a 3D scene layer".into();
             return;
         }
         self.close_asset_preview();

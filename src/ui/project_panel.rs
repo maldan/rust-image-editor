@@ -51,11 +51,15 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
 }
 
 fn draw_layers(ui: &mut Ui, app: &mut EditorApp) {
-    let rows: Vec<(String, bool, f32)> = app
+    let rows: Vec<(String, bool, f32, bool)> = app
         .project()
         .layers
         .iter()
-        .map(|layer| (layer.name.clone(), layer.visible, layer.opacity))
+        .map(|layer| {
+            let raster = layer.is_raster();
+            let name = if raster { layer.name.clone() } else { format!("{} · 3D", layer.name) };
+            (name, layer.visible, layer.opacity, raster)
+        })
         .collect();
     let active = app.project().active_layer;
     let opacity_id = format!("layer_opacity:{}:{active}", app.workspace.active_doc().id);
@@ -80,6 +84,9 @@ fn draw_layers(ui: &mut Ui, app: &mut EditorApp) {
     if let Some(index) = command.select {
         app.session.camera_selected = false;
         app.project_mut().active_layer = index;
+        if app.active_scene_layer() {
+            app.set_tool(app.session.select_tool);
+        }
     }
     if let Some((index, visible)) = command.visibility {
         app.set_layer_visible(index, visible);
@@ -112,7 +119,7 @@ fn draw_layers(ui: &mut Ui, app: &mut EditorApp) {
 
 fn controls(
     ui: &mut Ui,
-    rows: &[(String, bool, f32)],
+    rows: &[(String, bool, f32, bool)],
     active: usize,
     input: &FrameInput,
     drag: &mut Option<usize>,
@@ -141,7 +148,7 @@ fn controls(
         ui.label("No layers");
     } else {
         for index in (0..rows.len()).rev() {
-            let (name, visible0, _) = &rows[index];
+            let (name, visible0, _, raster) = &rows[index];
             let mut visible = *visible0;
             let row_id = format!("layer_row_{index}");
             let response = ui.selectable(&row_id, active == index, |ui| {
@@ -183,7 +190,7 @@ fn controls(
                     command.delete = Some(index);
                 }
                 if ui
-                    .menu_item_enabled("merge_down", "Merge Down", index > 0)
+                    .menu_item_enabled("merge_down", "Merge Down", *raster && index > 0 && rows[index - 1].3)
                     .clicked()
                 {
                     command.merge_down = Some(index);
@@ -206,7 +213,7 @@ fn controls(
         }
 
         ui.space(12.0);
-        if let Some((_, _, opacity)) = rows.get(active) {
+        if let Some((_, _, opacity, _)) = rows.get(active) {
             let mut opacity = *opacity;
             if sliders
                 .draw(ui, opacity_id, &mut opacity, ValueSlider::percent("Opacity", 0.0))

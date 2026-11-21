@@ -96,6 +96,9 @@ struct Gpu {
     config: wgpu::SurfaceConfiguration,
     renderer: UiRenderer,
     canvas: CanvasRenderer,
+    scene_renderer: Option<crate::scene_3d::SceneRenderer>,
+    scene_thumbnails: Option<crate::scene_3d::SceneThumbnails>,
+    scene_layer_renderer: Option<crate::scene_3d::SceneRenderer>,
     canvas_target: wgpu::Texture,
     canvas_target_view: wgpu::TextureView,
 }
@@ -310,6 +313,16 @@ pub trait Scene {
         canvas: &mut CanvasRenderer,
     );
     fn canvas_present(&self) -> Option<(Rect, CanvasView, CanvasOverlay)>;
+    fn scene_present(&self) -> Option<(Rect, &crate::scene_3d::SceneDocument)> {
+        None
+    }
+    fn scene_documents(&self) -> &[crate::scene_3d::SceneDocument] {
+        &[]
+    }
+    fn sync_scene_layers(
+        &mut self,
+        _render: &mut dyn FnMut(&crate::scene_3d::SceneDocument, (u32, u32)) -> Result<crate::raster::SparsePixels, String>,
+    ) {}
     fn canvas_cursor(&self) -> Option<TransformCursor> {
         None
     }
@@ -496,6 +509,9 @@ impl<S: Scene> Host<S> {
             config,
             renderer,
             canvas,
+            scene_renderer: None,
+            scene_thumbnails: None,
+            scene_layer_renderer: None,
             canvas_target,
             canvas_target_view,
         });
@@ -564,6 +580,12 @@ impl<S: Scene> Host<S> {
         let canvas_present = self.scene.canvas_present();
 
         let Some(gpu) = self.gpu.as_mut() else { return };
+        self.scene.sync_scene_layers(&mut |scene, size| {
+            use crate::scene_3d::SceneRenderer;
+            gpu.scene_layer_renderer
+                .get_or_insert_with(|| SceneRenderer::new(&gpu.device, SceneRenderer::LAYER_FORMAT))
+                .render_layer(&gpu.device, &gpu.queue, scene, size)
+        });
         self.scene
             .sync_canvas(&gpu.device, &gpu.queue, &mut gpu.canvas);
         self.scene
@@ -587,6 +609,21 @@ impl<S: Scene> Host<S> {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("editor frame"),
             });
+        if let Some((rect, scene)) = self.scene.scene_present() {
+            gpu.scene_renderer
+                .get_or_insert_with(|| crate::scene_3d::SceneRenderer::new(&gpu.device, gpu.config.format))
+                .render(
+                    &gpu.device, &gpu.queue, &mut encoder, &gpu.canvas_target_view,
+                    (size.width, size.height), &[(rect, scene, Some(self.scene.ui_scale()))],
+                    crate::scene_3d::RenderStyle::Viewport,
+                );
+        }
+        if output.draw_list.iter().any(|command| command.tex == crate::scene_3d::THUMB_TEXTURE) {
+            gpu.scene_thumbnails
+                .get_or_insert_with(|| crate::scene_3d::SceneThumbnails::new(&gpu.device, gpu.config.format))
+                .render(&gpu.device, &gpu.queue, &mut encoder, &mut gpu.renderer,
+                    self.scene.scene_documents(), &output.draw_list);
+        }
         let draw_canvas = canvas_present.as_ref().is_some_and(|(rect, view, _)| {
             rect.width() >= 1.0 && rect.height() >= 1.0 && view.width > 0
         });

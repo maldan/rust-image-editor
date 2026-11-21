@@ -1,5 +1,6 @@
 use crate::app::EditorApp;
-use crate::video_document::{CanvasDrag, CanvasDragKind, Clip, ClipDrag, ClipEdit, ClipRange, PREVIEW_TEXTURE, TrackLayout};
+use crate::video_document::{CanvasDrag, CanvasDragKind, Clip, ClipDrag, ClipEdit, ClipRange, IMAGE_CLIP_DURATION, PREVIEW_TEXTURE, TrackLayout};
+use crate::video_document_file::AssetType;
 use crate::workspace::ThumbDrag;
 use glam::Vec2;
 use mega_ui::{CursorIcon, Rect, Ui};
@@ -501,10 +502,19 @@ fn paint_timeline(ui: &mut Ui, app: &EditorApp, ruler: Rect, layout: TrackLayout
     for (index, clip) in doc.clips.iter().enumerate() {
         if let Some(rect) = clip_box(clip.range) {
             let selected = doc.selected == Some(index);
-            let color = if !doc.lane_visible(clip.range.lane) {
-                [0.13, 0.16, 0.20, 1.0]
-            } else if selected { [0.19, 0.42, 0.62, 1.0] } else { [0.16, 0.30, 0.43, 1.0] };
-            let border = if selected { [0.96, 0.97, 1.0, 1.0] } else { [0.32, 0.52, 0.72, 1.0] };
+            let visible = doc.lane_visible(clip.range.lane);
+            let (normal, active, hidden, outline) = match clip.source.asset_type() {
+                AssetType::Video => (
+                    [0.16, 0.30, 0.43, 1.0], [0.19, 0.42, 0.62, 1.0],
+                    [0.13, 0.16, 0.20, 1.0], [0.32, 0.52, 0.72, 1.0],
+                ),
+                AssetType::Image => (
+                    [0.41, 0.25, 0.08, 1.0], [0.54, 0.34, 0.12, 1.0],
+                    [0.23, 0.18, 0.12, 1.0], [0.76, 0.55, 0.26, 1.0],
+                ),
+            };
+            let color = if !visible { hidden } else if selected { active } else { normal };
+            let border = if selected { [0.96, 0.97, 1.0, 1.0] } else { outline };
             let stroke = if selected { 1.6 * scale } else { scale };
             let radius = (5.0 * scale).min(rect.width() * 0.5);
             ui.fill_round(rect, radius, border);
@@ -525,8 +535,9 @@ fn paint_timeline(ui: &mut Ui, app: &EditorApp, ruler: Rect, layout: TrackLayout
             }
             let max_chars = ((rect.width() / scale - 14.0) / 8.0).max(0.0) as usize;
             if max_chars >= 4 {
-                let mut label: String = clip.asset.name.chars().take(max_chars).collect();
-                if clip.asset.name.chars().count() > max_chars {
+                let name = clip.source.name();
+                let mut label: String = name.chars().take(max_chars).collect();
+                if name.chars().count() > max_chars {
                     label.pop();
                     label.push('…');
                 }
@@ -534,21 +545,33 @@ fn paint_timeline(ui: &mut Ui, app: &EditorApp, ruler: Rect, layout: TrackLayout
             }
         }
     }
-    if let Some(rect) = editor.drag.as_ref().and_then(|drag| drag.candidate).and_then(clip_box) {
-        ui.fill_round(rect, 4.0 * scale, [0.35, 0.68, 0.89, 0.65]);
+    let image_drop = [0.82, 0.55, 0.22, 0.65];
+    if let Some(drag) = &editor.drag && let Some(rect) = drag.candidate.and_then(clip_box) {
+        let color = match doc.clips[drag.index].source.asset_type() {
+            AssetType::Video => [0.35, 0.68, 0.89, 0.65],
+            AssetType::Image => image_drop,
+        };
+        ui.fill_round(rect, 4.0 * scale, color);
     }
-    if let Some(ThumbDrag::Video(index)) = app.workspace.asset_drag
-        && app.workspace.asset_dragging
-        && let Some(lane) = layout.lane_at(app.input.mouse_pos)
+    if app.workspace.asset_dragging
+        && let Some((lane, time, radius)) = layout.drop_position(doc, app.input.mouse_pos, scale)
     {
-        let time = doc.view_start + f64::from(app.input.mouse_pos.x - track.min.x) / density;
-        let radius = f64::from(7.0 * scale) / density;
-        if let Some(rect) = app.workspace.videos.get(index).and_then(|asset| doc.drop_range(asset, lane, time, radius)).and_then(clip_box) {
-            ui.fill_round(rect, 4.0 * scale, [0.29, 0.72, 0.54, 0.65]);
+        let candidate = match app.workspace.asset_drag {
+            Some(ThumbDrag::Video(index)) => app.workspace.videos.get(index)
+                .and_then(|asset| asset.info)
+                .map(|info| (info.duration, [0.29, 0.72, 0.54, 0.65])),
+            Some(ThumbDrag::Image(index)) => app.workspace.assets.get(index)
+                .map(|_| (IMAGE_CLIP_DURATION, image_drop)),
+            _ => None,
+        };
+        if let Some((duration, color)) = candidate
+            && let Some(rect) = doc.drop_range(duration, lane, time, radius).and_then(clip_box)
+        {
+            ui.fill_round(rect, 4.0 * scale, color);
         }
     }
     if doc.clips.is_empty() && track.width() > 180.0 * scale {
-        ui.text_at_size(track.min + Vec2::new(16.0, 22.0) * scale, "Drag a video asset here", 12.0 * scale);
+        ui.text_at_size(track.min + Vec2::new(16.0, 22.0) * scale, "Drag an image or video here", 12.0 * scale);
     }
     let playhead = x(doc.playhead);
     if playhead >= track.min.x && playhead <= track.max.x {

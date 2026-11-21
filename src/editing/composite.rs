@@ -100,6 +100,7 @@ pub fn merge_layers(
     crate::project::Layer {
         id: crate::project::new_layer_id(),
         identity: Default::default(),
+        kind: Default::default(),
         ai_metadata: None,
         z: lower.z,
         drawings: Default::default(),
@@ -142,6 +143,7 @@ pub fn merge_layer_tracks(
     crate::project::Layer {
         id: crate::project::new_layer_id(),
         identity: Default::default(),
+        kind: Default::default(),
         ai_metadata: None,
         z: lower.z,
         drawings,
@@ -162,6 +164,7 @@ fn track_frame(layer: &crate::project::Layer, frame: u32) -> crate::project::Lay
     crate::project::Layer {
         id: crate::project::new_layer_id(),
         identity: Default::default(),
+        kind: Default::default(),
         ai_metadata: layer.ai_metadata.clone(),
         z: layer.z,
         drawings: Default::default(),
@@ -183,6 +186,7 @@ mod merge_tests {
         let mut lower = Layer {
             id: crate::project::new_layer_id(),
             identity: Default::default(),
+            kind: Default::default(),
             ai_metadata: None,
             z: 0.0,
             drawings: Default::default(),
@@ -195,6 +199,7 @@ mod merge_tests {
         let mut upper = Layer {
             id: crate::project::new_layer_id(),
             identity: Default::default(),
+            kind: Default::default(),
             ai_metadata: None,
             z: 0.0,
             drawings: Default::default(),
@@ -221,6 +226,7 @@ mod merge_tests {
                 let mut lower = Layer {
                     id: crate::project::new_layer_id(),
                     identity: Default::default(),
+                    kind: Default::default(),
                     ai_metadata: None,
                     z: 0.0,
                     drawings: Default::default(),
@@ -233,6 +239,7 @@ mod merge_tests {
                 let mut upper = Layer {
                     id: crate::project::new_layer_id(),
                     identity: Default::default(),
+                    kind: Default::default(),
                     ai_metadata: None,
                     z: 0.0,
                     drawings: Default::default(),
@@ -256,6 +263,7 @@ mod merge_tests {
         let mut lower = Layer {
             id: crate::project::new_layer_id(),
             identity: Default::default(),
+            kind: Default::default(),
             ai_metadata: None,
             z: 0.0,
             drawings: Default::default(),

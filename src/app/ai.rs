@@ -1029,6 +1029,7 @@ impl EditorApp {
         let name = format!("{action} {}", self.workspace.active().layers.len() + 1);
         let project = self.workspace.active_mut();
         let onto_current = !self.ai.new_layer
+            && project.layers.get(project.active_layer).is_some_and(|layer| layer.is_raster())
             && !project.layers.is_empty()
             && project.width > 0
             && project.height > 0;

@@ -23,6 +23,7 @@ pub struct Layer {
     pub id: String,
     /// Session-local identity for references such as node sources.
     pub identity: std::sync::Arc<()>,
+    pub kind: LayerKind,
     pub ai_metadata: Option<AiMetadata>,
     pub z: f32,
     /// Held drawings keyed by their first frame. `pixels` is the editable current drawing.
@@ -31,6 +32,19 @@ pub struct Layer {
     pub visible: bool,
     pub opacity: f32,
     pub pixels: SparsePixels,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LayerKind {
+    #[default]
+    Raster,
+    Scene { document_id: usize, rendered: Option<u64> },
+}
+
+impl Layer {
+    pub fn is_raster(&self) -> bool {
+        self.kind == LayerKind::Raster
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -377,6 +391,7 @@ impl Project {
         self.layers = vec![Layer {
             id: new_layer_id(),
             identity: Default::default(),
+            kind: Default::default(),
             ai_metadata: None,
             z: 0.0,
             drawings: Default::default(),
@@ -397,6 +412,7 @@ impl Project {
         self.layers.push(Layer {
             id: new_layer_id(),
             identity: Default::default(),
+            kind: Default::default(),
             ai_metadata: None,
             z: 0.0,
             drawings: Default::default(),
@@ -462,6 +478,9 @@ impl Project {
         if self.layers.is_empty() {
             return Err("Choose a layer first".into());
         }
+        if !self.layers[self.active_layer].is_raster() {
+            return Err("Scene layers are read-only".into());
+        }
         if image.width() == 0 || image.height() == 0 {
             return Err("Result image is empty".into());
         }
@@ -507,6 +526,7 @@ impl Project {
             self.layers.push(Layer {
                 id: new_layer_id(),
                 identity: Default::default(),
+                kind: Default::default(),
                 ai_metadata: None,
                 z: 0.0,
                 drawings: Default::default(),
@@ -596,6 +616,7 @@ impl Project {
     pub fn active_pixels_mut(&mut self) -> Option<&mut SparsePixels> {
         self.layers
             .get_mut(self.active_layer)
+            .filter(|layer| layer.is_raster())
             .map(|layer| &mut layer.pixels)
     }
 

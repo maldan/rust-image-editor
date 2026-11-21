@@ -1,12 +1,13 @@
 //! On-disk form of a video document (`DocumentMeta.video`, see docs/project-format.md).
-//! Plain data only: clips reference video assets by id, and view state is not stored.
+//! Plain data only: clips reference library assets by id, and view state is not stored.
 
 use crate::video_effects::{ClipEffect, ClipEffects, EffectKind, Easing};
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
 
-/// Schema version of the `video` object, independent of `DocumentMeta.version`.
+/// Schema versions of the `video` object, independent of `DocumentMeta.version`.
 pub const VIDEO_VERSION: u32 = 1;
+pub const IMAGE_CLIP_VERSION: u32 = 2;
 pub const DEFAULT_BACKGROUND: [f32; 4] = [0.015, 0.017, 0.023, 1.0];
 
 fn default_background() -> [f32; 4] {
@@ -51,7 +52,8 @@ pub struct VideoData {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipData {
-    /// `VideoMeta.id` of the source video.
+    #[serde(default, skip_serializing_if = "AssetType::is_video")]
+    pub asset_type: AssetType,
     pub asset: String,
     pub lane: usize,
     pub start: f64,
@@ -61,6 +63,20 @@ pub struct ClipData {
     pub position: Point,
     #[serde(default)]
     pub effects: Vec<EffectData>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AssetType {
+    #[default]
+    Video,
+    Image,
+}
+
+impl AssetType {
+    fn is_video(&self) -> bool {
+        *self == Self::Video
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -108,7 +124,7 @@ pub struct VideoRecord {
 
 impl VideoData {
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != VIDEO_VERSION {
+        if !matches!(self.version, VIDEO_VERSION | IMAGE_CLIP_VERSION) {
             return Err(format!("Unsupported video document version {}", self.version));
         }
         if !(1..=240).contains(&self.fps)
@@ -131,6 +147,8 @@ impl VideoData {
                 || clip.scale_percent <= 0.0
                 || !clip.position.x.is_finite()
                 || !clip.position.y.is_finite()
+                || (clip.asset_type == AssetType::Image
+                    && (self.version < IMAGE_CLIP_VERSION || clip.source_in != 0.0))
             {
                 return Err("Invalid video clip".into());
             }
@@ -274,6 +292,7 @@ mod tests {
     #[test]
     fn validation_rejects_unknown_versions_and_broken_clips() {
         let clip = ClipData {
+            asset_type: AssetType::Video,
             asset: "v_1".into(),
             lane: 0,
             start: 0.0,
@@ -286,9 +305,10 @@ mod tests {
         let data = VideoData { version: VIDEO_VERSION, fps: 24, duration: 5.0, lane_count: 1, background: DEFAULT_BACKGROUND, clips: vec![clip] };
         let legacy = serde_json::to_value(&data).unwrap();
         assert!(legacy.get("background").is_none());
-        assert_eq!(serde_json::from_value::<VideoData>(legacy).unwrap().background, DEFAULT_BACKGROUND);
+        assert!(legacy["clips"][0].get("assetType").is_none());
+        assert_eq!(serde_json::from_value::<VideoData>(legacy).unwrap(), data);
         assert!(data.validate().is_ok());
-        assert!(VideoData { version: 2, ..data.clone() }.validate().is_err());
+        assert!(VideoData { version: 3, ..data.clone() }.validate().is_err());
         assert!(VideoData { fps: 0, ..data.clone() }.validate().is_err());
         let mut broken = data.clone();
         broken.clips[0].lane = 1;

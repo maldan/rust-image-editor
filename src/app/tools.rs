@@ -67,7 +67,7 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn handle_tool_hotkeys(&mut self) {
-        if self.ai.open || self.hsv.open || self.rename.is_some() {
+        if self.ai.open || self.hsv.open || self.rename.is_some() || self.active_scene_layer() {
             return;
         }
         if self.input.key_tool_brush {
@@ -101,7 +101,8 @@ impl EditorApp {
         if self.handle_brush_size_gesture() {
             return;
         }
-        match self.session.tool {
+        let tool = if self.active_scene_layer() { self.session.select_tool } else { self.session.tool };
+        match tool {
             Tool::RectangleSelect => self.handle_rect_select(view),
             Tool::Lasso => self.handle_lasso(view),
             Tool::PolygonSelect => self.handle_polygon(view),

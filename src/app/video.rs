@@ -23,6 +23,7 @@ impl EditorApp {
         self.animation_clock = None;
         self.close_asset_preview();
         self.close_graph_view();
+        self.close_scene_document();
         self.video_editor.open(index);
         self.workspace.tree_selected = Some(format!("video_document_{index}"));
     }
@@ -71,6 +72,7 @@ impl EditorApp {
         self.cancel_transform();
         self.animation_clock = None;
         self.close_asset_preview();
+        self.close_scene_document();
         let index = self.workspace.create_document(&name);
         self.workspace.documents[index].project = project;
         self.workspace.rebuild_active_thumb_now();
@@ -217,6 +219,7 @@ mod tests {
 
     #[test]
     fn video_documents_survive_save_and_open_with_clips_and_effects() {
+        use crate::video_document::ClipSource;
         use crate::video_effects::{ClipEffect, EffectKind};
         use std::time::{Duration, Instant};
 
@@ -257,7 +260,7 @@ mod tests {
         let doc = &app.video_editor.documents[0];
         assert_eq!((doc.id.as_str(), doc.name.as_str(), doc.fps, doc.lane_count), ("vd_1", "Video 1", 30, 2));
         let clip = &doc.clips[0];
-        assert_eq!(clip.asset.id, video_id);
+        assert!(matches!(&clip.source, ClipSource::Video { asset, .. } if asset.id == video_id));
         assert_eq!((clip.range.start, clip.range.source_in, clip.range.source_out), (1.0, 0.0, 1.0));
         assert_eq!((clip.scale_percent, clip.position), (150.0, Vec2::new(0.25, 0.75)));
         assert_eq!(clip.effects.entries().len(), 2);
@@ -272,14 +275,14 @@ mod tests {
         }
         app.poll_video(&mut ui);
         let clip = &app.video_editor.documents[0].clips[0];
-        assert!(clip.asset.info.is_some());
-        assert!((clip.source_duration - 1.0).abs() < 0.001);
+        assert!(matches!(&clip.source, ClipSource::Video { asset, duration }
+            if asset.info.is_some() && (*duration - 1.0).abs() < 0.001));
 
         // A new document created after opening must not reuse the loaded id.
         assert_eq!(app.video_editor.new_document(), 1);
         assert_eq!(app.video_editor.documents[1].id, "vd_2");
 
-        let (editor, missing) = crate::video_document::VideoEditor::from_records(&expected, &[]);
+        let (editor, missing) = crate::video_document::VideoEditor::from_records(&expected, &[], &[]);
         assert_eq!((editor.documents.len(), editor.documents[0].clips.len(), missing), (1, 0, 1));
     }
 

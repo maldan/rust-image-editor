@@ -1,12 +1,14 @@
-use crate::{video::Playback, workspace::VideoAsset};
+use crate::{video::Playback, workspace::{ImageAsset, VideoAsset}};
 use crate::video_effects::ClipEffects;
-use crate::video_document_file::{ClipData, VIDEO_VERSION, VideoData, VideoRecord};
+use crate::video_document_file::{AssetType, ClipData, IMAGE_CLIP_VERSION, VIDEO_VERSION, VideoData, VideoRecord};
 use glam::Vec2;
 use mega_ui::Rect;
 use image::RgbaImage;
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 pub const PREVIEW_TEXTURE: u32 = 7;
+pub const IMAGE_CLIP_DURATION: f64 = 3.0;
 const EPSILON: f64 = 0.000_001;
 const PREVIEW_LOOKAHEAD: f64 = 1.0;
 
@@ -29,12 +31,56 @@ impl ClipRange {
 }
 
 pub struct Clip {
-    pub asset: Arc<VideoAsset>,
-    pub source_duration: f64,
+    pub source: ClipSource,
     pub range: ClipRange,
     pub scale_percent: f32,
     pub position: Vec2,
     pub effects: ClipEffects,
+}
+
+#[derive(Clone)]
+pub enum ClipSource {
+    Video { asset: Arc<VideoAsset>, duration: f64 },
+    Image(Arc<StillImage>),
+}
+
+pub struct StillImage {
+    id: String,
+    name: String,
+    frame: Arc<RgbaImage>,
+}
+
+impl StillImage {
+    fn from_asset(asset: &ImageAsset) -> Option<Self> {
+        Some(Self {
+            id: asset.id.clone(),
+            name: asset.name.clone(),
+            frame: Arc::new(RgbaImage::from_raw(asset.width, asset.height, asset.pixels.clone())?),
+        })
+    }
+}
+
+impl ClipSource {
+    pub fn asset_type(&self) -> AssetType {
+        match self {
+            Self::Video { .. } => AssetType::Video,
+            Self::Image(_) => AssetType::Image,
+        }
+    }
+
+    fn id(&self) -> &str {
+        match self {
+            Self::Video { asset, .. } => &asset.id,
+            Self::Image(image) => &image.id,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Video { asset, .. } => &asset.name,
+            Self::Image(image) => &image.name,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -54,8 +100,14 @@ impl Clip {
     }
 
     pub fn size_in_document(&self) -> Option<Vec2> {
-        let info = self.asset.info?;
-        Some(Vec2::new(info.width as f32, info.height as f32) * (self.scale_percent / 100.0))
+        let (width, height) = match &self.source {
+            ClipSource::Video { asset, .. } => {
+                let info = asset.info?;
+                (info.width, info.height)
+            }
+            ClipSource::Image(image) => image.frame.dimensions(),
+        };
+        Some(Vec2::new(width as f32, height as f32) * (self.scale_percent / 100.0))
     }
 }
 
@@ -138,13 +190,18 @@ impl VideoDocument {
             width: self.width.max(1) as u32,
             height: self.height.max(1) as u32,
             video: VideoData {
-                version: VIDEO_VERSION,
+                version: if self.clips.iter().any(|clip| matches!(clip.source, ClipSource::Image(_))) {
+                    IMAGE_CLIP_VERSION
+                } else {
+                    VIDEO_VERSION
+                },
                 fps: self.fps,
                 duration: self.duration,
                 lane_count: self.lane_count,
                 background: self.background,
                 clips: self.clips.iter().map(|clip| ClipData {
-                    asset: clip.asset.id.clone(),
+                    asset_type: clip.source.asset_type(),
+                    asset: clip.source.id().to_owned(),
                     lane: clip.range.lane,
                     start: clip.range.start,
                     source_in: clip.range.source_in,
@@ -158,7 +215,7 @@ impl VideoDocument {
     }
 
     /// Clips whose asset no longer exists are skipped; the second value counts them.
-    pub fn from_record(record: &VideoRecord, videos: &[VideoAsset]) -> (Self, usize) {
+    fn from_record(record: &VideoRecord, mut resolve: impl FnMut(&ClipData) -> Option<ClipSource>) -> (Self, usize) {
         let mut doc = Self::new(record.id.clone(), record.name.clone());
         let data = &record.video;
         doc.width = record.width.min(i32::MAX as u32) as i32;
@@ -169,7 +226,7 @@ impl VideoDocument {
         doc.background = data.background;
         let mut missing = 0;
         for clip in &data.clips {
-            let Some(asset) = videos.iter().find(|video| video.id == clip.asset) else {
+            let Some(source) = resolve(clip) else {
                 missing += 1;
                 continue;
             };
@@ -180,9 +237,7 @@ impl VideoDocument {
                 source_out: clip.source_out,
             };
             doc.clips.push(Clip {
-                asset: Arc::new(asset.clone()),
-                // Refined by `VideoEditor::refresh_assets` once the asset has been inspected.
-                source_duration: asset.info.map_or(range.source_out, |info| info.duration.max(range.source_out)),
+                source,
                 range,
                 scale_percent: clip.scale_percent,
                 position: clip.position.into(),
@@ -264,23 +319,32 @@ impl VideoDocument {
             }
             ClipEdit::TrimStart => {
                 let start = self.snap(original.start + delta, radius, Some(drag.index));
+                let min_start = match clip.source {
+                    ClipSource::Video { .. } => (original.start - original.source_in).max(0.0),
+                    ClipSource::Image(_) => 0.0,
+                };
                 range.start = start.clamp(
-                    (original.start - original.source_in).max(0.0),
+                    min_start,
                     (original.end() - min_length).max(original.start),
                 );
-                range.source_in += range.start - original.start;
+                match clip.source {
+                    ClipSource::Video { .. } => range.source_in += range.start - original.start,
+                    ClipSource::Image(_) => range.source_out = original.end() - range.start,
+                }
             }
             ClipEdit::TrimEnd => {
                 let end = self.snap(original.end() + delta, radius, Some(drag.index));
-                range.source_out = (original.source_out + end - original.end())
-                    .clamp((original.source_in + min_length).min(original.source_out), clip.source_duration);
+                range.source_out = match clip.source {
+                    ClipSource::Video { duration, .. } => (original.source_out + end - original.end())
+                        .clamp((original.source_in + min_length).min(original.source_out), duration),
+                    ClipSource::Image(_) => (end - original.start).max(min_length),
+                };
             }
         }
         self.fits(range, Some(drag.index)).then_some(range)
     }
 
-    pub fn drop_range(&self, asset: &VideoAsset, lane: usize, seconds: f64, radius: f64) -> Option<ClipRange> {
-        let duration = asset.info?.duration;
+    pub fn drop_range(&self, duration: f64, lane: usize, seconds: f64, radius: f64) -> Option<ClipRange> {
         let start = self.snap(seconds, radius, None).max(0.0);
         let range = ClipRange { lane, start, source_in: 0.0, source_out: duration };
         (duration.is_finite() && self.fits(range, None)).then_some(range)
@@ -311,11 +375,19 @@ impl TrackLayout {
             Vec2::new(self.rect.width(), self.row_height),
         ))
     }
+
+    pub fn drop_position(self, doc: &VideoDocument, point: Vec2, scale: f32) -> Option<(usize, f64, f64)> {
+        let lane = self.lane_at(point)?;
+        let density = f64::from(doc.pixels_per_second * scale);
+        let time = doc.view_start + f64::from(point.x - self.rect.min.x) / density;
+        Some((lane, time, f64::from(7.0 * scale) / density))
+    }
 }
 
 #[derive(Default)]
 pub struct TrackPreview {
     current: Option<(usize, Playback)>,
+    still: Option<(usize, Arc<RgbaImage>)>,
     prepared: Option<(usize, Playback)>,
     previous: Option<(usize, Arc<RgbaImage>)>,
     texture: Option<(u32, Weak<RgbaImage>)>,
@@ -323,8 +395,9 @@ pub struct TrackPreview {
 
 impl TrackPreview {
     pub fn frame(&self) -> Option<(usize, &Arc<RgbaImage>)> {
-        self.current.as_ref()
-            .and_then(|(index, player)| player.frame.as_ref().map(|frame| (*index, frame)))
+        self.still.as_ref().map(|(index, frame)| (*index, frame))
+            .or_else(|| self.current.as_ref()
+                .and_then(|(index, player)| player.frame.as_ref().map(|frame| (*index, frame))))
             .or_else(|| self.previous.as_ref().map(|(index, frame)| (*index, frame)))
     }
 
@@ -346,8 +419,18 @@ impl TrackPreview {
         }
         let Some((index, clip)) = target else {
             self.current = None;
+            self.still = None;
             self.previous = None;
             return;
+        };
+        let asset = match &clip.source {
+            ClipSource::Video { asset, .. } => asset,
+            ClipSource::Image(image) => {
+                self.still = Some((index, image.frame.clone()));
+                self.current = None;
+                self.previous = None;
+                return;
+            }
         };
         let source_time = clip.range.source_in + (time - clip.range.start).max(0.0);
         if let Some((current, player)) = &mut self.current && *current == index {
@@ -360,13 +443,14 @@ impl TrackPreview {
         }
 
         self.previous = if playing && !seek { self.frame().map(|(index, frame)| (index, frame.clone())) } else { None };
+        self.still = None;
         let player = if playing && self.prepared.as_ref().is_some_and(|(next, _)| *next == index) {
             let (_, mut player) = self.prepared.take().unwrap();
             player.set_fps(Some(fps));
             player.set_paused(false);
             player
         } else {
-            Playback::start_at((*clip.asset).clone(), source_time, !playing, Some(fps))
+            Playback::start_at((**asset).clone(), source_time, !playing, Some(fps))
         };
         self.current = Some((index, player));
     }
@@ -400,12 +484,29 @@ pub struct VideoEditor {
 
 impl VideoEditor {
     /// Rebuilds the editor from saved records. Returns the number of clips dropped because
-    /// their video asset is missing.
-    pub fn from_records(records: &[VideoRecord], videos: &[VideoAsset]) -> (Self, usize) {
+    /// their source asset is missing.
+    pub fn from_records(records: &[VideoRecord], videos: &[VideoAsset], images: &[ImageAsset]) -> (Self, usize) {
         let mut editor = Self::default();
         let mut missing = 0;
+        let mut stills = HashMap::<&str, Arc<StillImage>>::new();
         for record in records {
-            let (doc, dropped) = VideoDocument::from_record(record, videos);
+            let (doc, dropped) = VideoDocument::from_record(record, |clip| match clip.asset_type {
+                AssetType::Video => {
+                    let asset = videos.iter().find(|asset| asset.id == clip.asset)?;
+                    // Refined by refresh_assets after background inspection.
+                    let duration = asset.info.map_or(clip.source_out, |info| info.duration.max(clip.source_out));
+                    Some(ClipSource::Video { asset: Arc::new(asset.clone()), duration })
+                }
+                AssetType::Image => {
+                    if let Some(image) = stills.get(clip.asset.as_str()) {
+                        return Some(ClipSource::Image(image.clone()));
+                    }
+                    let asset = images.iter().find(|asset| asset.id == clip.asset)?;
+                    let image = Arc::new(StillImage::from_asset(asset)?);
+                    stills.insert(&asset.id, image.clone());
+                    Some(ClipSource::Image(image))
+                }
+            });
             missing += dropped;
             if let Some(number) = doc.id.strip_prefix("vd_").and_then(|n| n.parse::<usize>().ok()) {
                 editor.next_id = editor.next_id.max(number);
@@ -423,14 +524,15 @@ impl VideoEditor {
     /// Copies freshly inspected asset info into clips that were created before it was known.
     pub fn refresh_assets(&mut self, videos: &[VideoAsset]) {
         for clip in self.documents.iter_mut().flat_map(|doc| doc.clips.iter_mut()) {
-            if clip.asset.info.is_some() {
+            let ClipSource::Video { asset, duration } = &mut clip.source else { continue };
+            if asset.info.is_some() {
                 continue;
             }
-            if let Some(video) = videos.iter().find(|video| video.id == clip.asset.id)
+            if let Some(video) = videos.iter().find(|video| video.id == asset.id)
                 && let Some(info) = video.info
             {
-                clip.asset = Arc::new(video.clone());
-                clip.source_duration = info.duration.max(clip.range.source_out);
+                *asset = Arc::new(video.clone());
+                *duration = info.duration.max(clip.range.source_out);
             }
         }
     }
@@ -470,12 +572,26 @@ impl VideoEditor {
     }
 
     pub fn insert(&mut self, asset: &VideoAsset, lane: usize, seconds: f64, radius: f64) -> bool {
+        let Some(info) = asset.info else { return false };
+        let source = ClipSource::Video { asset: Arc::new(asset.clone()), duration: info.duration };
+        self.insert_source(source, info.duration, lane, seconds, radius)
+    }
+
+    pub fn insert_image(&mut self, asset: &ImageAsset, lane: usize, seconds: f64, radius: f64) -> bool {
+        let existing = self.documents.iter().flat_map(|doc| &doc.clips).find_map(|clip| match &clip.source {
+            ClipSource::Image(image) if image.id == asset.id => Some(image.clone()),
+            _ => None,
+        });
+        let Some(image) = existing.or_else(|| StillImage::from_asset(asset).map(Arc::new)) else { return false };
+        self.insert_source(ClipSource::Image(image), IMAGE_CLIP_DURATION, lane, seconds, radius)
+    }
+
+    fn insert_source(&mut self, source: ClipSource, duration: f64, lane: usize, seconds: f64, radius: f64) -> bool {
         let Some(doc) = self.current_mut() else { return false };
-        let Some(range) = doc.drop_range(asset, lane, seconds, radius) else { return false };
+        let Some(range) = doc.drop_range(duration, lane, seconds, radius) else { return false };
         let index = doc.clips.len();
         doc.clips.push(Clip {
-            asset: Arc::new(asset.clone()),
-            source_duration: range.source_out,
+            source,
             range,
             scale_percent: 100.0,
             position: Vec2::splat(0.5),
@@ -509,10 +625,14 @@ impl VideoEditor {
             return;
         }
         let source_cut = clip.range.source_in + (cut - clip.range.start);
+        let mut right_range = ClipRange { start: cut, source_in: source_cut, ..clip.range };
+        if matches!(clip.source, ClipSource::Image(_)) {
+            right_range.source_out = right_range.duration();
+            right_range.source_in = 0.0;
+        }
         let mut right = Clip {
-            range: ClipRange { start: cut, source_in: source_cut, ..clip.range },
-            asset: clip.asset.clone(),
-            source_duration: clip.source_duration,
+            range: right_range,
+            source: clip.source.clone(),
             scale_percent: clip.scale_percent,
             position: clip.position,
             effects: clip.effects.duplicate_settings(),
@@ -573,13 +693,17 @@ impl VideoEditor {
         }
         for (lane, (track, target)) in self.previews.iter_mut().zip(targets).enumerate() {
             if !doc.lane_visible(lane) {
-                // Retain the last upload identity until another frame uses the slot.
                 track.current = None;
+                track.still = None;
                 track.prepared = None;
                 track.previous = None;
-                continue;
+            } else {
+                track.update(target, doc.playhead, f64::from(doc.fps), self.playing, seek);
             }
-            track.update(target, doc.playhead, f64::from(doc.fps), self.playing, seek);
+            if track.frame().is_none() {
+                // Other lanes can reuse this texture slot while this lane is absent.
+                track.texture = None;
+            }
         }
     }
 
@@ -617,10 +741,14 @@ impl VideoEditor {
             }
         }
         for (track, next) in self.previews.iter_mut().zip(upcoming) {
+            let next = next.and_then(|(index, clip)| match &clip.source {
+                ClipSource::Video { asset, .. } => Some((index, asset, clip.range.source_in)),
+                ClipSource::Image(_) => None,
+            });
             match next {
-                Some((index, clip)) if track.prepared.as_ref().is_none_or(|(previous, _)| *previous != index) => {
+                Some((index, asset, source_in)) if track.prepared.as_ref().is_none_or(|(previous, _)| *previous != index) => {
                     track.prepared = Some((index, Playback::start_at(
-                        (*clip.asset).clone(), clip.range.source_in, true, Some(f64::from(doc.fps)),
+                        (**asset).clone(), source_in, true, Some(f64::from(doc.fps)),
                     )));
                 }
                 None => track.prepared = None,
@@ -638,6 +766,29 @@ impl VideoEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn showing_a_still_again_uploads_it_after_another_lane_used_its_slot() {
+        let mut workspace = crate::workspace::Workspace::default();
+        let red = workspace.import_asset_rgba("Red".into(), &[255, 0, 0, 255], 1, 1).unwrap();
+        let blue = workspace.import_asset_rgba("Blue".into(), &[0, 0, 255, 255], 1, 1).unwrap();
+        let mut editor = VideoEditor::default();
+        let index = editor.new_document();
+        editor.open(index);
+        editor.current_mut().unwrap().lane_count = 2;
+        assert!(editor.insert_image(&workspace.assets[red], 0, 0.0, 0.0));
+        assert!(editor.insert_image(&workspace.assets[blue], 1, 0.0, 0.0));
+        assert!(editor.previews[0].upload_frame(PREVIEW_TEXTURE).is_some());
+        assert!(editor.previews[1].upload_frame(PREVIEW_TEXTURE + 1).is_some());
+        assert!(editor.previews[0].upload_frame(PREVIEW_TEXTURE).is_none());
+
+        editor.toggle_lane(0);
+        assert!(editor.previews[0].frame().is_none());
+        assert!(editor.previews[1].upload_frame(PREVIEW_TEXTURE).is_some());
+        editor.toggle_lane(0);
+        let frame = editor.previews[0].upload_frame(PREVIEW_TEXTURE).unwrap();
+        assert_eq!(frame.as_raw(), &[255, 0, 0, 255]);
+    }
 
     #[test]
     fn adjacent_cut_reuses_the_frame_prepared_during_playback() {

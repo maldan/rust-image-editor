@@ -2,7 +2,7 @@ use super::*;
 
 impl EditorApp {
     pub(in crate::app) fn begin_transform(&mut self) {
-        if self.camera_visible() || self.layer_grid_active() { return; }
+        if self.camera_visible() || self.layer_grid_active() || self.active_scene_layer() { return; }
         if self.session.floating.is_some() {
             return;
         }

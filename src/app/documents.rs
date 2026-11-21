@@ -14,6 +14,7 @@ impl EditorApp {
     }
 
     pub fn new_project(&mut self, ui: &mut Ui) {
+        self.scene_editor = Default::default();
         self.layer_grid = Default::default();
         self.effect_dialog = None;
         self.effect_key_drag = None;
@@ -122,6 +123,10 @@ impl EditorApp {
 
     pub fn cut_selection(&mut self, ui: &mut Ui) {
         if self.camera_visible() { return; }
+        if self.active_scene_layer() {
+            self.status = "Scene layers are read-only".into();
+            return;
+        }
         if self.session.floating.is_some() {
             self.status = "Apply or cancel the transform before cutting".into();
             return;
@@ -293,6 +298,7 @@ impl EditorApp {
         Ok(crate::project::Layer {
             id: crate::project::new_layer_id(),
             identity: Default::default(),
+            kind: Default::default(),
             ai_metadata: source.ai_metadata.clone(),
             z: source.z,
             drawings: Default::default(),
@@ -304,6 +310,9 @@ impl EditorApp {
     }
 
     pub(in crate::app) fn erase_active_selection(&mut self) -> Result<(), String> {
+        if self.active_scene_layer() {
+            return Err("Scene layers are read-only".into());
+        }
         let (width, _) = self.image_size.ok_or("No image")?;
         let selection = self
             .session
@@ -448,6 +457,21 @@ impl EditorApp {
     pub fn open_path(&mut self, path: &Path) -> Result<(), String> {
         let mut workspace = Workspace::open(path)?;
         workspace.ensure_document_loaded(workspace.active_document)?;
+        let image_ids: std::collections::HashSet<_> = workspace.video_documents.iter()
+            .flat_map(|record| &record.video.clips)
+            .filter(|clip| clip.asset_type == crate::video_document_file::AssetType::Image)
+            .map(|clip| clip.asset.as_str())
+            .collect();
+        let image_indices: Vec<_> = workspace.assets.iter().enumerate()
+            .filter(|(_, asset)| image_ids.contains(asset.id.as_str()))
+            .map(|(index, _)| index)
+            .collect();
+        for index in image_indices {
+            workspace.ensure_asset_loaded(index)?;
+        }
+        let (video_editor, missing) = crate::video_document::VideoEditor::from_records(
+            &workspace.video_documents, &workspace.videos, &workspace.assets,
+        );
         self.layer_grid = Default::default();
         self.effect_dialog = None;
         self.effect_key_drag = None;
@@ -456,9 +480,8 @@ impl EditorApp {
         self.video_poster = None;
         self.cancel_transform();
         self.workspace = workspace;
-        let (video_editor, missing) =
-            crate::video_document::VideoEditor::from_records(&self.workspace.video_documents, &self.workspace.videos);
         self.video_editor = video_editor;
+        self.scene_editor = Default::default();
         self.video_snapshot = self.video_editor.records();
         self.install_active_graph();
         self.video_trim = Default::default();
@@ -467,7 +490,7 @@ impl EditorApp {
         self.dirty = false;
         self.status = format!("Opened {}", file_name(path));
         if missing > 0 {
-            self.status.push_str(&format!(" · {missing} video clip(s) skipped: source video missing"));
+            self.status.push_str(&format!(" · {missing} timeline clip(s) skipped: source asset missing"));
         }
         Ok(())
     }
@@ -530,6 +553,7 @@ impl EditorApp {
             self.status = error;
             return;
         }
+        self.close_scene_document();
         if self.video_editor.active.is_some() {
             self.video_editor.close_view();
             self.workspace.select_active_document();
@@ -551,6 +575,7 @@ impl EditorApp {
     }
 
     pub fn new_document(&mut self) {
+        self.close_scene_document();
         self.video_editor.close_view();
         self.animation_clock = None;
         self.cancel_transform();
@@ -609,6 +634,7 @@ impl EditorApp {
     }
 
     pub fn place_asset(&mut self, asset_index: usize, ui: &mut Ui) {
+        self.close_scene_document();
         self.close_asset_preview();
         self.close_graph_view();
         self.cancel_transform();
@@ -628,6 +654,7 @@ impl EditorApp {
         self.cancel_transform();
         match self.workspace.create_document_from_asset(asset_index) {
             Ok(_) => {
+                self.close_scene_document();
                 self.animation_clock = None;
                 self.close_asset_preview();
                 self.history.discard_project_edits();

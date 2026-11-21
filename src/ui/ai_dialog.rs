@@ -522,7 +522,11 @@ pub fn draw(ui: &mut Ui, app: &mut EditorApp) {
                             }
                         }
                         ui.checkbox("ai_fit_image", "Fit Image", &mut app.ai.fit_image);
-                        ui.checkbox("ai_new_layer", "New Layer", &mut app.ai.new_layer);
+                        if app.active_scene_layer() {
+                            ui.label("Result: new raster layer");
+                        } else {
+                            ui.checkbox("ai_new_layer", "New Layer", &mut app.ai.new_layer);
+                        }
                     });
                     ui.space(8.0);
                     if running {
